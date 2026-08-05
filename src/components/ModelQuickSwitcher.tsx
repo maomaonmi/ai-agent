@@ -9,11 +9,14 @@ type Provider = ModelSettings['provider'];
 // Why: GLM 同一 provider 下要支持 5/5.1/5.2/5V-Turbo 四个变体，
 // 用 `glm:<model_id>` 作为复合值在同一个下拉框里编码，避免引入二级菜单。
 const GLM_VARIANTS = [
+  { value: 'glm:glm-5', label: 'GLM-5', modelId: 'glm-5', multimodal: false },
+  { value: 'glm:glm-5.1', label: 'GLM-5.1', modelId: 'glm-5.1', multimodal: false },
+  { value: 'glm:glm-5.2', label: 'GLM-5.2', modelId: 'glm-5.2', multimodal: false },
   { value: 'glm:glm-5-turbo', label: 'GLM-5 Turbo', modelId: 'glm-5-turbo', multimodal: false },
-  { value: 'glm:glm-5.1-turbo', label: 'GLM-5.1 Turbo', modelId: 'glm-5.1-turbo', multimodal: false },
-  { value: 'glm:glm-5.2-turbo', label: 'GLM-5.2 Turbo', modelId: 'glm-5.2-turbo', multimodal: false },
   { value: 'glm:glm-5v-turbo', label: 'GLM-5V Turbo · 视觉', modelId: 'glm-5v-turbo', multimodal: true },
 ] as const;
+
+const REASONING_EFFORTS = ['max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none'] as const;
 
 export default function ModelQuickSwitcher({ disabled = false, compact = false }: { disabled?: boolean; compact?: boolean }) {
   const [active, setActive] = useState<Provider>('deepseek');
@@ -75,6 +78,18 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false }
     } catch { setError('模型切换失败'); setLoading(false); }
   };
 
+  const changeReasoningEffort = async (effort: string) => {
+    const profile = profiles.glm;
+    if (!profile) return;
+    setLoading(true); setError('');
+    try {
+      const saved = await saveModelSettings({ ...profile, reasoning_effort: effort });
+      setProfiles((prev) => ({ ...prev, glm: saved }));
+      window.dispatchEvent(new Event('model-settings-changed'));
+    } catch { setError('推理强度保存失败'); }
+    finally { setLoading(false); }
+  };
+
   return <div className={`flex items-center gap-2 ${compact ? '' : 'min-w-0'}`}>
     <label className="inline-flex min-w-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
       {loading ? <LoaderCircle size={14} className="animate-spin"/> : <Bot size={14} className="text-sky-600"/>}
@@ -89,6 +104,22 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false }
         {profiles.custom?.has_api_key && <option value="custom">{profiles.custom.display_name || profiles.custom.model_id}</option>}
       </select>
     </label>
+    {active === 'glm' && (
+      <label className="inline-flex min-w-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+        <span className="sr-only">推理强度</span>
+        <select
+          aria-label="推理强度"
+          value={profiles.glm?.reasoning_effort || 'high'}
+          disabled={disabled || loading}
+          onChange={(e) => void changeReasoningEffort(e.target.value)}
+          className={`bg-transparent font-medium outline-none disabled:opacity-60 ${compact ? 'max-w-24' : 'max-w-32'}`}
+        >
+          {REASONING_EFFORTS.map((effort) => (
+            <option key={effort} value={effort}>{effort}</option>
+          ))}
+        </select>
+      </label>
+    )}
     {error && <span role="status" className="max-w-48 truncate text-[11px] text-rose-600" title={error}>{error}</span>}
   </div>;
 }

@@ -23,6 +23,7 @@ export interface ModelSettings {
   text_model_id: string;
   vision_model_id: string;
   thinking_enabled: boolean;
+  reasoning_effort: string;
   temperature: number;
   max_tokens: number;
 }
@@ -143,9 +144,33 @@ export interface TerminalProposalEvent {
   command: string;
   reason?: string;
   expected_output_hint?: string;
+  run_id?: string;
 }
 
-export type CodeGenerationEvent = CodeUpdateEvent | CodeErrorEvent | CodeAgentActivityEvent | RuntimeSummaryEvent | TerminalProposalEvent;
+// Why: 全栈修改模式任务拆解——后端把复杂指令拆成子任务列表推给前端，
+// 前端用浮层卡片展示进度（待办/进行中/完成/失败/跳过）。
+export interface TaskItem {
+  id: number;
+  title: string;
+  target_files: string[];
+  description: string;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped';
+}
+
+export interface TaskListEvent {
+  type: 'task_list';
+  tasks: TaskItem[];
+  done: boolean;
+}
+
+export interface TaskUpdateEvent {
+  type: 'task_update';
+  task_id: number;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped';
+  done: boolean;
+}
+
+export type CodeGenerationEvent = CodeUpdateEvent | CodeErrorEvent | CodeAgentActivityEvent | RuntimeSummaryEvent | TerminalProposalEvent | TaskListEvent | TaskUpdateEvent;
 
 export type PlanTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 

@@ -51,6 +51,7 @@ import {
   type ChatAttachment,
   type CodeAcceptanceReport,
   type CodeAgentRun,
+  type TaskItem,
 } from '../lib/api';
 import {
   detectLanguage,
@@ -97,6 +98,10 @@ interface CodeWorkspaceProps {
   onInputChange: (value: string) => void;
   onClearSelectedElement: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  // Why: 需求面板问答式操作——重写把该条问题载回输入框(CTRL+Enter 发送并清空其后记录)；
+  // 删除移除该条问答并在上层同步关闭对应终端会话。
+  onRewritePrompt?: (promptIndex: number) => void;
+  onDeletePrompt?: (promptIndex: number) => void;
   // Why: Day57 @file 剪枝——用户在 textarea 敲 @ 触发文件下拉,选中后转为 Badge。
   // 状态提升到 ChatInterface 以便在 submit 时一起传给后端剪枝。
   mentionedFiles?: string[];
@@ -105,6 +110,66 @@ interface CodeWorkspaceProps {
   // 变更后需要把新 VFS 序列化为字符串同步回上层 ChatInterface 的 generatedCode，
   // 以便下次提交时Agent能看到完整一致的VFS快照。
   onVfsChange?: (serializedCode: string) => void;
+  // Why: 全栈修改模式任务拆解——后端推送子任务列表，
+  // 前端用浮层卡片展示进度（待办/进行中/完成/失败/跳过）。
+  tasks?: TaskItem[];
+}
+
+const TASK_STATUS_ICON: Record<TaskItem['status'], string> = {
+  pending: '\u23F3',
+  in_progress: '\u21BB',
+  completed: '\u2705',
+  failed: '\u274C',
+  skipped: '\u23ED\uFE0F',
+};
+
+const TASK_STATUS_COLOR: Record<TaskItem['status'], string> = {
+  pending: 'text-slate-400',
+  in_progress: 'text-blue-500',
+  completed: 'text-green-600',
+  failed: 'text-red-500',
+  skipped: 'text-amber-500',
+};
+
+function TaskProgressCard({ tasks }: { tasks: TaskItem[] }) {
+  const [expanded, setExpanded] = useState(true);
+  const completed = tasks.filter((t) => t.status === 'completed').length;
+  const failed = tasks.filter((t) => t.status === 'failed').length;
+  const inProgress = tasks.some((t) => t.status === 'in_progress');
+
+  return (
+    <div className="absolute right-3 top-3 z-30 w-80 max-w-[calc(100%-1.5rem)] rounded-lg border border-slate-200 bg-white/95 shadow-lg backdrop-blur-sm">
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center justify-between px-3 py-2 text-left"
+      >
+        <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
+          {inProgress && (
+            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-blue-500" />
+          )}
+          任务进度 {completed}/{tasks.length}
+          {failed > 0 && <span className="text-xs text-red-400">({failed} 失败)</span>}
+        </span>
+        <span className="text-xs text-slate-400">{expanded ? '\u25BC' : '\u25B2'}</span>
+      </button>
+      {expanded && (
+        <ul className="max-h-60 overflow-y-auto px-3 pb-2">
+          {tasks.map((task) => (
+            <li key={task.id} className="flex items-start gap-2 py-1.5 text-xs">
+              <span className="mt-0.5 shrink-0">{TASK_STATUS_ICON[task.status]}</span>
+              <div className="min-w-0 flex-1">
+                <p className={`font-medium ${TASK_STATUS_COLOR[task.status]}`}>{task.title}</p>
+                {task.target_files.length > 0 && (
+                  <p className="mt-0.5 truncate text-slate-400">{task.target_files.join(', ')}</p>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }
 
 function formatModelOutput(output: string): string {
@@ -178,9 +243,12 @@ export default function CodeWorkspace({
   onInputChange,
   onClearSelectedElement,
   onSubmit,
+  onRewritePrompt,
+  onDeletePrompt,
   mentionedFiles = [],
   onMentionedFilesChange,
   onVfsChange,
+  tasks = [],
 }: CodeWorkspaceProps) {
   const [activeView, setActiveView] = useState<'preview' | 'source'>('preview');
   const [vfs, setVfs] = useState<VirtualFileSystem>({});
@@ -257,28 +325,51 @@ export default function CodeWorkspace({
   const createManualTerminal = useCallback(() => {
     const suffix = Date.now().toString(36).slice(-5);
     const runId = `manual-${suffix}`;
+    console.log('[terminal][createManual] runId=%s workspaceId=%s', runId, terminalWorkspaceId);
     setActiveTerminalRunId(runId);
-  }, []);
+  }, [terminalWorkspaceId]);
 
   const closeTerminalSession = useCallback((runId: string) => {
+    console.log('[terminal][close] runId=%s workspaceId=%s', runId, terminalWorkspaceId);
     setActiveTerminalRunId((prev) => (prev === runId ? '' : prev));
     const wsp = terminalWorkspaceId;
     void (async () => {
+      const url1 = `/api/terminal/close/${encodeURIComponent(wsp)}/${encodeURIComponent(runId)}`;
+      console.log('[terminal][close] POST url=%s', url1);
       try {
-        const r1 = await fetch(
-          `/api/terminal/close/${encodeURIComponent(wsp)}/${encodeURIComponent(runId)}`,
-          { method: 'POST' }
-        );
+        const r1 = await fetch(url1, { method: 'POST' });
+        console.log('[terminal][close] r1 status=%s ok=%s', r1.status, r1.ok);
         if (r1.ok) return;
-      } catch { /* noop */ }
+      } catch (e) { console.log('[terminal][close] r1 error:', e); }
+      const url2 = `/api/terminal/close/${encodeURIComponent(runId)}`;
+      console.log('[terminal][close] POST fallback url=%s', url2);
       try {
-        const r2 = await fetch(`/api/terminal/close/${encodeURIComponent(runId)}`, { method: 'POST' });
+        const r2 = await fetch(url2, { method: 'POST' });
+        console.log('[terminal][close] r2 status=%s ok=%s', r2.status, r2.ok);
         if (r2.ok) return;
-      } catch { /* noop */ }
+      } catch (e) { console.log('[terminal][close] r2 error:', e); }
     })();
   }, [terminalWorkspaceId]);
 
   const isManualTerminalRunId = useCallback((runId: string) => runId.startsWith('manual-'), []);
+
+  // 复制到剪贴板（需求面板问答的"复制"按钮）
+  const copyText = useCallback((text: string) => {
+    void navigator.clipboard?.writeText(text).catch(() => { /* 剪贴板不可用时静默 */ });
+  }, []);
+
+  // 删除需求面板第 promptIndex 条问答：上层移除消息 + 同步关闭对应终端会话
+  const handleDeletePromptItem = useCallback((promptIndex: number, runId?: string) => {
+    onDeletePrompt?.(promptIndex);
+    if (runId) {
+      closeTerminalSession(runId);
+      // Why: 智能体终端 Tab 由 agentRuns 派生，后端 close 后 Tab 不会自动消失，
+      // 通过事件通知 IntegratedTerminal 把该 run_id 加入已关闭集合，同步移除 Tab。
+      try {
+        window.dispatchEvent(new CustomEvent('code-agent-terminal-close', { detail: { run_id: runId } }));
+      } catch { /* noop */ }
+    }
+  }, [onDeletePrompt, closeTerminalSession]);
 
 
   // Why: Day58 @file/@folder 下拉——候选列表包含文件路径和推导出的中间目录路径。
@@ -370,7 +461,14 @@ export default function CodeWorkspace({
         return;
       }
     }
-  }, [fileDropdownIndex, filteredVfsPaths, selectMentionedFile, showFileDropdown]);
+    // Why: 重写历史问题时支持 CTRL+Enter 直接发送（与标准对话输入框行为一致）
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      if (input.trim() && !isLoading && isSessionReady) {
+        onSubmit({ preventDefault: () => {} } as FormEvent<HTMLFormElement>);
+      }
+    }
+  }, [fileDropdownIndex, filteredVfsPaths, selectMentionedFile, showFileDropdown, input, isLoading, isSessionReady, onSubmit]);
 
   // Why: 把图片文件读成 Base64 data URL，与标准对话的 ChatAttachment 格式保持一致。
   const addImageFile = useCallback((file: File) => {
@@ -679,16 +777,29 @@ export default function CodeWorkspace({
     setIsAcceptanceExpanded(true);
   }, [runId]);
 
-  // Why: 切到 Terminal Tab 时，如果还没有选中具体 terminal run_id，自动切到“最近的 agent run（
-  // 正在 running 的优先）”；保证用户点 Tab 就立刻能看到终端输出而不是“暂无终端”。
+  // Why: 切到 Terminal Tab 时，如果还没有选中具体 terminal run_id，自动切到"最近的 agent run（
+  // 正在 running 的优先）"；保证用户点 Tab 就立刻能看到终端输出而不是"暂无终端"。
   useEffect(() => {
     if (activeTerminalTab !== 'terminal') return;
     if (activeTerminalRunId) return;
     const running = agentRuns.find((r) => Boolean(r.trace?.isRunning));
     const fallback = agentRuns[agentRuns.length - 1];
     const target = running ?? fallback;
-    if (target) setActiveTerminalRunId(target.id);
+    if (target && target.id !== activeTerminalRunId) setActiveTerminalRunId(target.id);
   }, [activeTerminalTab, activeTerminalRunId, agentRuns]);
+
+  // Why: 收到 terminal_proposal SSE 事件时自动切到终端 Tab 并选中对应 run_id，
+  // 否则用户看不到审批横幅，proposition 会 90s 超时。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail as { run_id?: string } | undefined;
+      console.log('[terminal][proposal-arrived] run_id=%s', detail?.run_id);
+      setActiveTerminalTab('terminal');
+      if (detail?.run_id) setActiveTerminalRunId(detail.run_id);
+    };
+    window.addEventListener('terminal-proposal-arrived', handler);
+    return () => window.removeEventListener('terminal-proposal-arrived', handler);
+  }, []);
 
   // Why: 设置面板切换浅/深色主题时通过切换 documentElement 的 dark 类 +
   // 写入 localStorage；这里监听二者保证代码面板背景与高亮主题即时同步。
@@ -844,13 +955,19 @@ export default function CodeWorkspace({
   useEffect(() => {
     const latest = agentRuns.at(-1);
     if (!latest?.trace.isRunning) return;
-    setExpandedRunIds((previous) => new Set(previous).add(latest.id));
+    setExpandedRunIds((previous) => {
+      if (previous.has(latest.id)) return previous;
+      return new Set(previous).add(latest.id);
+    });
   }, [agentRuns]);
 
   useEffect(() => {
     const latest = repairLogs.at(-1);
     if (!latest || latest.status !== 'repairing') return;
-    setExpandedRepairAttempts((previous) => new Set(previous).add(latest.attempt));
+    setExpandedRepairAttempts((previous) => {
+      if (previous.has(latest.attempt)) return previous;
+      return new Set(previous).add(latest.attempt);
+    });
   }, [repairLogs]);
 
   const postInspectMode = (enabled: boolean) => {
@@ -1159,59 +1276,110 @@ export default function CodeWorkspace({
                     key={`${index}-${prompt.slice(0, 24)}`}
                     className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm"
                   >
-                    <button
-                      type="button"
-                      aria-expanded={isExpanded}
-                      onClick={() => run && setExpandedRunIds((previous) => {
-                        const next = new Set(previous);
-                        if (next.has(run.id)) next.delete(run.id);
-                        else next.add(run.id);
-                        return next;
-                      })}
-                      className="w-full p-3 text-left transition-colors hover:bg-slate-50 disabled:cursor-default"
-                      disabled={!run}
-                    >
-                      <span className="mb-1 flex items-center justify-between gap-2 text-xs font-medium text-slate-400">
-                        <span>需求 {index + 1}</span>
-                        {run && (
-                          <span className="flex items-center gap-2">
-                            <span className={run.trace.isRunning ? 'text-emerald-600' : 'text-slate-400'}>
-                              {run.trace.isRunning ? '输出中' : '模型输出'}
-                            </span>
-                            <span aria-hidden="true">{isExpanded ? '⌃' : '⌄'}</span>
+                    {/* 问题块（用户） */}
+                    <div className="p-3">
+                      <div className="flex items-start gap-2">
+                        <div className="min-w-0 flex-1">
+                          <span className="mb-1 flex items-center justify-between gap-2 text-xs font-medium text-slate-400">
+                            <span>你 · 需求 {index + 1}</span>
+                            {run && (
+                              <button
+                                type="button"
+                                aria-expanded={isExpanded}
+                                onClick={() => setExpandedRunIds((previous) => {
+                                  const next = new Set(previous);
+                                  if (next.has(run.id)) next.delete(run.id);
+                                  else next.add(run.id);
+                                  return next;
+                                })}
+                                className="flex items-center gap-2 transition-colors hover:text-slate-600"
+                              >
+                                <span className={run.trace.isRunning ? 'text-emerald-600' : 'text-slate-400'}>
+                                  {run.trace.isRunning ? '输出中' : '模型输出'}
+                                </span>
+                                <span aria-hidden="true">{isExpanded ? '⌃' : '⌄'}</span>
+                              </button>
+                            )}
                           </span>
-                        )}
-                      </span>
-                      <span className="block whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">
-                        {prompt}
-                      </span>
-                      {promptAttachments[index] && promptAttachments[index].length > 0 && (
-                        <div className="mt-2 flex flex-wrap gap-1.5" onClick={(event) => event.stopPropagation()}>
-                          {promptAttachments[index]!.map((item, attachIndex) => (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img
-                              key={`${item.url.slice(0, 24)}-${attachIndex}`}
-                              src={item.url}
-                              alt={item.name || '附件图片'}
-                              className="h-12 w-12 cursor-zoom-in rounded border border-slate-200 object-cover"
-                              onClick={() => setLightboxUrl(item.url)}
-                            />
-                          ))}
+                          <span className="block whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">
+                            {prompt}
+                          </span>
+                          {promptAttachments[index] && promptAttachments[index].length > 0 && (
+                            <div className="mt-2 flex flex-wrap gap-1.5">
+                              {promptAttachments[index]!.map((item, attachIndex) => (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  key={`${item.url.slice(0, 24)}-${attachIndex}`}
+                                  src={item.url}
+                                  alt={item.name || '附件图片'}
+                                  className="h-12 w-12 cursor-zoom-in rounded border border-slate-200 object-cover"
+                                  onClick={() => setLightboxUrl(item.url)}
+                                />
+                              ))}
+                            </div>
+                          )}
                         </div>
-                      )}
-                    </button>
-                    {/* Day59: 三字段契约——summary 汇报放在外面（正常白底 Markdown，不进大黑框） */}
+                        <div className="flex shrink-0 flex-col items-end gap-1 text-slate-400">
+                          <button
+                            type="button"
+                            title="复制问题"
+                            onClick={() => copyText(prompt)}
+                            className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-slate-100 hover:text-slate-700"
+                          >
+                            ⧉ 复制
+                          </button>
+                          <button
+                            type="button"
+                            title="重写（CTRL+Enter 发送，会清空其后记录）"
+                            onClick={() => onRewritePrompt?.(index)}
+                            className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-slate-100 hover:text-slate-700"
+                          >
+                            ✎ 重写
+                          </button>
+                          <button
+                            type="button"
+                            title="删除该条问答并关闭对应终端"
+                            onClick={() => handleDeletePromptItem(index, run?.id)}
+                            className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-rose-100 hover:text-rose-600"
+                          >
+                            🗑 删除
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                    {/* 答案块（智能体） */}
                     {run && run.trace.summary && (
                       <div className="border-t border-slate-100 bg-white px-3 py-2.5">
-                        <div className="mb-1 flex items-center gap-2">
-                          <span className="inline-flex h-4 items-center rounded bg-emerald-50 px-1.5 text-[10px] font-semibold text-emerald-700">
-                            {run.trace.summaryIntent === 'answer'
-                              ? '回答'
-                              : run.trace.summaryIntent === 'ask_clarification'
-                                ? '澄清'
-                                : run.trace.summaryIntent === 'fullstack_bootstrap'
-                                  ? '全栈初始化'
-                                  : '变更总结'}
+                        <div className="mb-1 flex items-center justify-between gap-2">
+                          <span className="flex items-center gap-2">
+                            <span className="text-[10px] font-medium text-slate-400">智能体</span>
+                            <span className="inline-flex h-4 items-center rounded bg-emerald-50 px-1.5 text-[10px] font-semibold text-emerald-700">
+                              {run.trace.summaryIntent === 'answer'
+                                ? '回答'
+                                : run.trace.summaryIntent === 'ask_clarification'
+                                  ? '澄清'
+                                  : run.trace.summaryIntent === 'fullstack_bootstrap'
+                                    ? '全栈初始化'
+                                    : '变更总结'}
+                            </span>
+                          </span>
+                          <span className="flex items-center gap-1 text-slate-400">
+                            <button
+                              type="button"
+                              title="复制回答"
+                              onClick={() => copyText(run.trace.summary ?? '')}
+                              className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-slate-100 hover:text-slate-700"
+                            >
+                              ⧉ 复制
+                            </button>
+                            <button
+                              type="button"
+                              title="删除该条问答并关闭对应终端"
+                              onClick={() => handleDeletePromptItem(index, run.id)}
+                              className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-rose-100 hover:text-rose-600"
+                            >
+                              🗑 删除
+                            </button>
                           </span>
                         </div>
                         <MarkdownMessage
@@ -1752,6 +1920,10 @@ export default function CodeWorkspace({
         />
 
         <div className="relative min-h-[28rem] min-w-0 flex-1 bg-white lg:min-h-0 fullscreen:min-h-0">
+          {/* Why: 全栈修改模式任务拆解浮层卡片——展示子任务进度，可折叠。 */}
+          {tasks.length > 0 && (
+            <TaskProgressCard tasks={tasks} />
+          )}
           {!hasCode && status.state !== 'generating' && (
             <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-white px-6 text-center">
               <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-slate-100 text-2xl">
@@ -1788,7 +1960,10 @@ export default function CodeWorkspace({
                 className="min-h-0 flex-1 w-full border-0 bg-white"
               />
               <section
-                style={{ height: isConsoleOpen ? consoleHeight : 40 }}
+                // Why: 终端活动时面板若沿用 144px 的 consoleHeight，减去 Tab 头与会话条后
+                // 终端 host 会被 flex 压到 0 高，term.open() 拿不到非零尺寸而无限跳过。
+                // 切换到 Terminal Tab 时给足 320px，保证终端有可用的渲染高度。
+                style={{ height: isConsoleOpen ? (activeTerminalTab === 'terminal' ? 320 : consoleHeight) : 40 }}
                 className="relative flex shrink-0 flex-col border-t border-slate-200 bg-slate-950 text-slate-200"
               >
                 <div
@@ -1856,8 +2031,9 @@ export default function CodeWorkspace({
                     ))}
                   </div>
                 ) : (
-                  <div className={`${isConsoleOpen ? 'min-h-0 flex-1' : 'hidden'}`}>
+                  <div className={`${isConsoleOpen ? 'relative flex-1 overflow-hidden' : 'hidden'}`}>
                     {activeTerminalRunId ? (
+                      <div className="absolute inset-0">
                       <IntegratedTerminal
                         workspaceId={terminalWorkspaceId}
                         activeRunId={activeTerminalRunId}
@@ -1876,6 +2052,7 @@ export default function CodeWorkspace({
                         onTrustedPrefixAdd={(runIdValue, prefix) => onAddTrustedTerminalPrefix(runIdValue, prefix)}
                         trustedPrefixesByRun={trustedTerminalPrefixes}
                       />
+                      </div>
                     ) : (
                       <div className="flex h-full min-h-[180px] items-center justify-center text-xs text-slate-500">
                         <div className="text-center">

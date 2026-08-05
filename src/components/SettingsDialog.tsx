@@ -15,9 +15,10 @@ const PRESETS: Record<'deepseek' | 'glm', Pick<ModelSettings, 'base_url' | 'mode
 // Why: 同步 ModelQuickSwitcher 的 GLM 变体列表，让设置界面也能一键切换官方模型 ID，
 // 避免用户手敲 model_id 拼错导致后端 is_vision_model 判定失效。
 const GLM_MODEL_OPTIONS: Array<{ id: string; label: string; multimodal: boolean }> = [
-  { id: 'glm-5', label: 'GLM-5 · 纯文本', multimodal: false },
-  { id: 'glm-5.1', label: 'GLM-5.1 · 纯文本', multimodal: false },
-  { id: 'glm-5.2', label: 'GLM-5.2 · 纯文本', multimodal: false },
+  { id: 'glm-5', label: 'GLM-5', multimodal: false },
+  { id: 'glm-5.1', label: 'GLM-5.1', multimodal: false },
+  { id: 'glm-5.2', label: 'GLM-5.2', multimodal: false },
+  { id: 'glm-5-turbo', label: 'GLM-5 Turbo', multimodal: false },
   { id: 'glm-5v-turbo', label: 'GLM-5V Turbo · 视觉', multimodal: true },
 ];
 
@@ -25,7 +26,7 @@ const DEFAULTS: ModelSettings = {
   provider: 'deepseek', api_format: 'openai_chat_completions', base_url: PRESETS.deepseek.base_url,
   model_id: PRESETS.deepseek.model_id, display_name: PRESETS.deepseek.display_name, api_key: '', model_family: 'default',
   input_context: 64000, output_context: 8000, tool_call_rounds: 200, full_url: false, multimodal: false,
-  text_model_id: 'glm-5-turbo', vision_model_id: 'glm-5v-turbo', thinking_enabled: true, temperature: 1, max_tokens: 16000,
+  text_model_id: 'glm-5-turbo', vision_model_id: 'glm-5v-turbo', thinking_enabled: true, reasoning_effort: 'high', temperature: 1, max_tokens: 16000,
 };
 
 function applyAppearance(theme: Theme, font: Font) {
@@ -111,7 +112,7 @@ export default function SettingsDialog({ open, onClose }: { open: boolean; onClo
                       // Why: 选 GLM-5V 时同步多模态开关和 vision_model_id；选纯文本模型时自动把 vision_model_id 保留为 glm-5v-turbo 以便普通对话上传图时仍能切到视觉模型。
                       patch({
                         model_id: option.id,
-                        display_name: option.label.split(' · ')[0],
+                        display_name: option.label,
                         multimodal: option.multimodal,
                         vision_model_id: option.multimodal ? option.id : (form.vision_model_id || 'glm-5v-turbo'),
                         text_model_id: option.multimodal ? (form.text_model_id || 'glm-5-turbo') : option.id,
@@ -138,7 +139,7 @@ export default function SettingsDialog({ open, onClose }: { open: boolean; onClo
           {advanced && <div className="space-y-5 rounded-xl border border-slate-200 bg-slate-50/60 p-4 dark:border-slate-700 dark:bg-slate-950/40">
             <div className="grid gap-5 sm:grid-cols-2"><Field label="模型展示名称" hint={`${form.display_name.length}/32`}><Input maxLength={32} value={form.display_name} onChange={(v) => patch({display_name:v})}/></Field><Field label="模型系列"><Select value={form.model_family} onChange={(v) => patch({model_family:v})}><option value="default">默认</option><option value="deepseek">DeepSeek</option><option value="glm">GLM</option><option value="reasoning">推理模型</option></Select></Field></div>
             <div className="grid gap-5 sm:grid-cols-2"><Field label="输入上下文"><NumberInput value={form.input_context} onChange={(v) => patch({input_context:v})}/></Field><Field label="输出上下文"><NumberInput value={form.output_context} onChange={(v) => patch({output_context:v})}/></Field></div>
-            {form.provider === 'glm' && <><div className="grid gap-5 sm:grid-cols-2"><Field label="文本模型 ID" hint="无附件时自动使用"><Input value={form.text_model_id} onChange={(v) => patch({text_model_id:v})}/></Field><Field label="多模态模型 ID" hint="包含附件时自动使用"><Input value={form.vision_model_id} onChange={(v) => patch({vision_model_id:v})}/></Field></div><div className="grid gap-5 sm:grid-cols-3"><Field label="最大输出 Tokens"><NumberInput value={form.max_tokens} onChange={(v) => patch({max_tokens:v})}/></Field><Field label="Temperature"><input type="number" min={0} max={2} step={0.1} value={form.temperature} onChange={(e)=>patch({temperature:Number(e.target.value)})} className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"/></Field><label className="flex h-11 items-center justify-between self-end rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900">启用深度思考<Toggle label="启用深度思考" checked={form.thinking_enabled} onChange={(v)=>patch({thinking_enabled:v})}/></label></div></>}
+            {form.provider === 'glm' && <><div className="grid gap-5 sm:grid-cols-2"><Field label="文本模型 ID" hint="无附件时自动使用"><Input value={form.text_model_id} onChange={(v) => patch({text_model_id:v})}/></Field><Field label="多模态模型 ID" hint="包含附件时自动使用"><Input value={form.vision_model_id} onChange={(v) => patch({vision_model_id:v})}/></Field></div><div className="grid gap-5 sm:grid-cols-3"><Field label="最大输出 Tokens"><NumberInput value={form.max_tokens} onChange={(v) => patch({max_tokens:v})}/></Field><Field label="Temperature"><input type="number" min={0} max={2} step={0.1} value={form.temperature} onChange={(e)=>patch({temperature:Number(e.target.value)})} className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"/></Field><Field label="推理强度" hint="仅 GLM 生效"><Select value={form.reasoning_effort} onChange={(v) => patch({ reasoning_effort: v })}>{['max','xhigh','high','medium','low','minimal','none'].map((effort) => (<option key={effort} value={effort}>{effort}</option>))}</Select></Field></div><div className="grid gap-5 sm:grid-cols-3"><label className="flex h-11 items-center justify-between self-end rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900">启用深度思考<Toggle label="启用深度思考" checked={form.thinking_enabled} onChange={(v)=>patch({thinking_enabled:v})}/></label></div></>}
             <div className="grid items-end gap-5 sm:grid-cols-2"><Field label="工具调用轮次"><NumberInput value={form.tool_call_rounds} onChange={(v) => patch({tool_call_rounds:v})}/></Field><label className="flex h-11 items-center justify-between rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900">多模态支持<Toggle label="多模态支持" checked={form.multimodal} onChange={(v) => patch({multimodal:v})}/></label></div>
           </div>}
           <div className="sticky bottom-0 -mx-5 flex items-center justify-between border-t border-slate-200 bg-white/95 px-5 py-4 backdrop-blur dark:border-slate-700 dark:bg-slate-900/95 sm:-mx-7 sm:px-7"><span role="status" className="text-sm text-slate-500">{message}</span><button type="button" disabled={saving || !form.base_url || !form.model_id} onClick={save} className="rounded-lg bg-sky-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50">{saving ? '保存中…' : '保存配置'}</button></div>

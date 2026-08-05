@@ -119,6 +119,9 @@ export default function ChatInterface() {
   const [codeProjectKind, setCodeProjectKind] = useState<'frontend' | 'fullstack'>('frontend');
   // Why: Day57 @file 剪枝——状态提升到此,提交时连同 instruction 一起传给 useCodeAutoRepair.modify。
   const [mentionedFiles, setMentionedFiles] = useState<string[]>([]);
+  // Why: 重写消息——点"重写"把该条用户消息载回输入框，CTRL+Enter 发送；
+  // 若编辑的是历史消息，提交时先截断其后的所有记录（ChatGPT 式编辑重发）。
+  const [rewritingIndex, setRewritingIndex] = useState<number | null>(null);
   const titleRequestedRef = useRef<Set<string>>(new Set());
   const {
     code: generatedCode,
@@ -128,6 +131,7 @@ export default function ChatInterface() {
     agentRuns,
     terminalWorkspaceId,
     trustedTerminalPrefixes,
+    tasks: codeTasks,
     generate: generateCode,
     modify: modifyCode,
     reset: resetCode,
@@ -542,12 +546,19 @@ export default function ChatInterface() {
     setAgentStatus('');
     setPlanProgress(null);
 
-    setMessages((prev) => [...prev, {
-      role: 'user',
-      content: userMessage,
-      // Why: Code 模式历史消息回显图片缩略图；standard/deep 模式消息列表也支持展示附件。
-      attachments: requestAttachments.length ? requestAttachments : undefined,
-    }]);
+    setMessages((prev) => {
+      // Why: 重写历史消息时，先截断到 rewritingIndex（该条及其后的记录全部清除），
+      // 再追加新的用户消息，实现 ChatGPT 式"编辑并重发"。
+      const base = rewritingIndex != null ? prev.slice(0, rewritingIndex) : prev;
+      return [...base, {
+        role: 'user',
+        content: userMessage,
+        // Why: Code 模式历史消息回显图片缩略图；standard/deep 模式消息列表也支持展示附件。
+        attachments: requestAttachments.length ? requestAttachments : undefined,
+      }];
+    });
+    // 截断后重写索引失效，下一轮提交按普通发送处理
+    setRewritingIndex(null);
 
     if (mode === 'code') {
       const isIncrementalChange = Boolean(generatedCode.trim());
@@ -840,6 +851,67 @@ export default function ChatInterface() {
   };
 
   const isPlanMode = mode === 'plan' || mode === 'distributed_plan';
+
+  // 复制到剪贴板（历史消息的"复制"按钮）
+  const copyText = useCallback((text: string) => {
+    void navigator.clipboard?.writeText(text).catch(() => { /* 剪贴板不可用时静默 */ });
+  }, []);
+
+  // 重写：把第 index 条用户消息载回输入框，CTRL+Enter 发送
+  const handleRewriteMessage = useCallback((index: number) => {
+    const msg = messages[index];
+    if (!msg || msg.role !== 'user') return;
+    setInput(msg.content);
+    setRewritingIndex(index);
+    inputRef.current?.focus();
+  }, [messages]);
+
+  // 删除单条消息；若删除的是正在重写的消息则清空重写态
+  const handleDeleteMessage = useCallback((index: number) => {
+    setRewritingIndex((prev) => (
+      prev == null ? null : (prev === index ? null : (prev > index ? prev - 1 : prev))
+    ));
+    setMessages((prev) => prev.filter((_, i) => i !== index));
+  }, []);
+
+  // code 模式需求面板：promptIndex 对应第几个 user 消息
+  const handleRewritePrompt = useCallback((promptIndex: number) => {
+    const userIndices = messages
+      .map((m, idx) => (m.role === 'user' ? idx : -1))
+      .filter((idx) => idx >= 0);
+    const target = userIndices[promptIndex];
+    if (target == null) return;
+    const msg = messages[target];
+    if (!msg) return;
+    setInput(msg.content);
+    setRewritingIndex(target);
+  }, [messages]);
+
+  // code 模式需求面板：删除第 promptIndex 条问答（用户问题 + 紧邻的智能体回答）
+  const handleDeletePrompt = useCallback((promptIndex: number) => {
+    setMessages((prev) => {
+      const userIndices = prev
+        .map((m, idx) => (m.role === 'user' ? idx : -1))
+        .filter((idx) => idx >= 0);
+      const target = userIndices[promptIndex];
+      if (target == null) return prev;
+      const next = [...prev];
+      next.splice(target, 1);
+      if (next[target] && next[target].role === 'assistant') next.splice(target, 1);
+      return next;
+    });
+  }, []);
+
+  // 输入框 CTRL+Enter 发送（重写场景）
+  const handleInputCtrlEnter = (e: React.KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      if (input.trim() && !isLoading && isSessionReady) {
+        handleSubmit({ preventDefault: () => {} } as React.FormEvent);
+      }
+    }
+  };
+
   const visibleMessages = mode === 'code'
     ? []
     : mode === 'agent' || isPlanMode
@@ -1036,6 +1108,9 @@ export default function ChatInterface() {
               mentionedFiles={mentionedFiles}
               onMentionedFilesChange={setMentionedFiles}
               onVfsChange={handleVfsChange}
+              onRewritePrompt={handleRewritePrompt}
+              onDeletePrompt={handleDeletePrompt}
+              tasks={codeTasks}
             />
           )}
 
@@ -1092,6 +1167,43 @@ export default function ChatInterface() {
                       </div>
                     </details>
                   )}
+
+                  {/* 消息操作：复制 / 重写(仅用户) / 删除 */}
+                  {(() => {
+                    const realIndex = messages.indexOf(msg);
+                    return (
+                      <div className={`mt-2 flex items-center gap-1 ${
+                        msg.role === 'user' ? 'text-blue-100' : 'text-slate-400'
+                      }`}>
+                        <button
+                          type="button"
+                          title="复制内容"
+                          onClick={() => copyText(msg.content)}
+                          className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-white/20"
+                        >
+                          ⧉ 复制
+                        </button>
+                        {msg.role === 'user' && (
+                          <button
+                            type="button"
+                            title="重写（CTRL+Enter 发送，会清空其后记录）"
+                            onClick={() => handleRewriteMessage(realIndex)}
+                            className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-white/20"
+                          >
+                            ✎ 重写
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          title="删除该消息"
+                          onClick={() => handleDeleteMessage(realIndex)}
+                          className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-rose-100"
+                        >
+                          🗑 删除
+                        </button>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
             ))}
@@ -1266,6 +1378,7 @@ export default function ChatInterface() {
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleInputCtrlEnter}
                 placeholder={
                   mode === 'web' ? '联网搜索最新信息...' :
                   mode === 'research' ? '输入调研主题...' :

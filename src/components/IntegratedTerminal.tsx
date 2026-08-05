@@ -30,12 +30,15 @@ export interface IntegratedTerminalProps {
   trustedPrefixesByRun?: Record<string, string[]>;
 }
 
+// Why: Next.js rewrites 只代理 HTTP 请求，WebSocket 升级请求不会被转发。
+// 所以必须直接连后端端口（8000），不能依赖当前页面的 host。
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
 function buildWebSocketUrl(workspaceId: string, runId: string): string {
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const host = window.location.host;
-  // Why: 本地开发一般 Vite 3000 代理到后端 8000，/ws/* 走 vite 的 server.proxy 里的 "^/ws" 规则。
-  // 没有代理时直接连当前 host 也行——用户自己的 main.py 监听 8000，若同源就对了。
-  return `${proto}//${host}/ws/terminal/${encodeURIComponent(workspaceId)}/${encodeURIComponent(runId)}`;
+  // 从 API_BASE_URL 推导 WS 地址：http:// → ws://, https:// → wss://
+  const wsProto = API_BASE_URL.startsWith('https') ? 'wss:' : 'ws:';
+  const url = new URL(API_BASE_URL);
+  return `${wsProto}//${url.host}/ws/terminal/${encodeURIComponent(workspaceId)}/${encodeURIComponent(runId)}`;
 }
 
 // 主题色贴合现有 CodeWorkspace 的 dark/light 背景（syntaxHighlight 的配色体系，跟 SourceCodeViewer 一致）。
@@ -98,6 +101,13 @@ function termTheme(dark: boolean): { theme: { [k: string]: string }; background:
   };
 }
 
+interface TermInstance {
+  term: Terminal;
+  fit: FitAddon;
+  inputDisposable: { dispose: () => void };
+  host: HTMLDivElement;
+}
+
 export function IntegratedTerminal(props: IntegratedTerminalProps) {
   const {
     workspaceId, activeRunId, onChangeActiveRunId,
@@ -106,11 +116,15 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
     trustedPrefixesByRun,
   } = props;
 
-  const xtermHostRef = useRef<HTMLDivElement | null>(null);
-  const termRef = useRef<Terminal | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const attachRef = useRef<AttachAddon | null>(null);
+  // Why: 每个 session 拥有独立的 xterm 实例，切换 runId 时只显示对应实例，
+  // 避免多个终端输出叠加在同一个窗口里（用户反馈像"所有终端叠在一个窗口"）。
+  const termMapRef = useRef<Map<string, TermInstance>>(new Map());
+  const hostMapRef = useRef<Map<string, HTMLDivElement>>(new Map());
+  // termRef / fitRef 始终指向当前 activeRunId 的实例，保持 WS effect 改动最小。
+  const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
   const [termReady, setTermReady] = useState(false);
   const [sessions, setSessions] = useState<TerminalSessionDescriptor[]>([]);
   const [proposition, setProposition] = useState<TerminalProposition | null>(null);
@@ -119,111 +133,232 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
   const [showEditor, setShowEditor] = useState(false);
   const [trustThisCommand, setTrustThisCommand] = useState(false);
   const autoApprovedRef = useRef<Set<string>>(new Set());
+  // Why: Fast Refresh 重建 term 时，输入绑定 onData 放在 term 创建 effect 里，回调需要读取最新的
+  // allowUserStdin（手动/agent 切换），用 ref 保存避免闭包读到旧值。
+  const allowStdinRef = useRef(allowUserStdin);
+  allowStdinRef.current = allowUserStdin;
+  // Why: 智能体终端 Tab 由持久化的 agentRuns 派生，后端 close 成功后 agentRuns 仍保留该 run，
+  // 若不过滤，Tab 会一直留在列表里删不掉。这里记录已关闭的 agent run_id，
+  // 从合并列表里排除，实现"点 × 即消失"。
+  // 持久化到 localStorage（按 workspaceId 区分）：否则刷新/切 tab 组件重挂载后已删的终端又回来。
+  const closedRunKey = `closed-agent-terminal:${workspaceId}`;
+  const [closedAgentRunIds, setClosedAgentRunIds] = useState<Set<string>>(() => {
+    try {
+      const saved = window.localStorage.getItem(closedRunKey);
+      if (saved) return new Set<string>(JSON.parse(saved) as string[]);
+    } catch { /* noop */ }
+    return new Set<string>();
+  });
+
+  // 组合 session 列表：后端 sessions（list 接口推的真实 ConPTY） + 前端已知但后端还没 spawn 的 agent run（保证用户没审批也能先看到 tab）
+  // Why: 必须在 effect 之前定义，因为多实例终端管理 effect 依赖 allSessions。
+  const allSessions = useMemo<TerminalSessionDescriptor[]>(() => {
+    const byRunId = new Map<string, TerminalSessionDescriptor>();
+    for (const s of sessions) {
+      if (!closedAgentRunIds.has(s.run_id)) byRunId.set(s.run_id, s);
+    }
+    for (const run of agentRuns) {
+      if (closedAgentRunIds.has(run.id)) continue;
+      if (!byRunId.has(run.id)) {
+        byRunId.set(run.id, {
+          workspace_id: workspaceId,
+          run_id: run.id,
+          title: run.request ? run.request.slice(0, 24) : `Agent ${run.id.slice(0, 8)}`,
+          is_manual: false,
+          exit_code: null,
+        });
+      }
+    }
+    // Why: 用户点"+ 我的终端"会立即设置 activeRunId，但此时新 run 还没进入后端 sessions 列表，
+    // 若 allSessions 里没有它，渲染区就不会生成 host div，term.open() 因找不到宿主而失败。
+    // 把 activeRunId 预注入列表，确保 host div 始终存在。
+    if (activeRunId && !closedAgentRunIds.has(activeRunId) && !byRunId.has(activeRunId)) {
+      byRunId.set(activeRunId, {
+        workspace_id: workspaceId,
+        run_id: activeRunId,
+        title: isManualTerminal(activeRunId) ? activeRunId.slice(-6) : `Agent ${activeRunId.slice(0, 8)}`,
+        is_manual: isManualTerminal(activeRunId),
+        exit_code: null,
+      });
+    }
+    return Array.from(byRunId.values());
+  }, [sessions, agentRuns, workspaceId, closedAgentRunIds, activeRunId, isManualTerminal]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(closedRunKey, JSON.stringify(Array.from(closedAgentRunIds)));
+    } catch { /* noop */ }
+  }, [closedRunKey, closedAgentRunIds]);
+
+  // Why: 需求面板删除问答时上层会派发该事件，同步把对应 run_id 加入已关闭集合（移除终端 Tab）
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const runId = (e as CustomEvent<{ run_id?: string }>).detail?.run_id;
+      if (!runId) return;
+      setClosedAgentRunIds((prev) => new Set(prev).add(runId));
+    };
+    window.addEventListener('code-agent-terminal-close', handler);
+    return () => window.removeEventListener('code-agent-terminal-close', handler);
+  }, []);
 
   // 挂到父组件的提案回调（用于 agent_trace 里显示“正在等待用户选择终端命令审批”）
   useEffect(() => {
     onPropositionUpdate?.(proposition);
   }, [proposition, onPropositionUpdate]);
 
-  // 1. 构造/销毁 Terminal 实例 + fit + weblinks
-  // Why: 从 Console Tab 切到 Terminal Tab 时，父容器的 display 刚从 none 变成 block，
-  // offsetWidth/Height 在同一帧内仍是 0。若此时调用 term.open()，xterm.js 内部的
-  // Viewport._innerRefresh 会读取 buffer.dimensions 抛 TypeError（undefined.dimensions）。
-  // 解决办法：延后 term.open() 直到容器尺寸非 0，再通过 setTermReady 通知 WebSocket effect 连接。
+  // 1. 多实例终端管理：每个 session 拥有一个独立的 xterm 实例。
+  // Why: 用户反馈"所有终端叠在一个窗口"，期望 VS Code 风格——每个 session 独立显示。
+  // 切换 runId 时只显示对应实例，输出互不干扰；关闭/移除 session 时释放对应实例。
   useEffect(() => {
-    if (!xtermHostRef.current) return;
-    const host = xtermHostRef.current;
     const { theme, background, foreground } = termTheme(dark);
 
-    host.style.backgroundColor = background;
-    host.style.color = foreground;
+    // 清理已不存在的 session
+    for (const [runId, inst] of termMapRef.current.entries()) {
+      if (!allSessions.some((s) => s.run_id === runId)) {
+        try { inst.inputDisposable.dispose(); } catch { /* noop */ }
+        try { inst.term.dispose(); } catch { /* noop */ }
+        termMapRef.current.delete(runId);
+      }
+    }
 
-    const term = new Terminal({
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
-      fontSize: 12,
-      lineHeight: 1.35,
-      cursorBlink: true,
-      convertEol: true,
-      scrollback: 5000,
-      allowProposedApi: true,
-      theme,
-    });
-    const fitAddon = new FitAddon();
-    const linksAddon = new WebLinksAddon();
-    term.loadAddon(fitAddon);
-    term.loadAddon(linksAddon);
+    // 主题变更时同步更新所有已创建实例的颜色
+    for (const inst of termMapRef.current.values()) {
+      inst.term.options.theme = theme;
+      inst.host.style.backgroundColor = background;
+      inst.host.style.color = foreground;
+    }
 
-    let rafId: number | null = null;
-    let timeoutId: number | null = null;
-    let opened = false;
+    if (!activeRunId) {
+      termRef.current = null;
+      fitRef.current = null;
+      setTermReady(false);
+      return;
+    }
 
-    const tryOpen = () => {
-      if (opened) return;
-      if (host.offsetWidth <= 0 || host.offsetHeight <= 0) return;
-      try {
-        term.open(host);
-        fitAddon.fit();
-      } catch {
+    const host = hostMapRef.current.get(activeRunId);
+    if (!host) {
+      termRef.current = null;
+      fitRef.current = null;
+      setTermReady(false);
+      return;
+    }
+
+    let inst = termMapRef.current.get(activeRunId);
+    if (!inst) {
+      const term = new Terminal({
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+        fontSize: 12,
+        lineHeight: 1.35,
+        cursorBlink: true,
+        convertEol: true,
+        scrollback: 5000,
+        allowProposedApi: true,
+        theme,
+      });
+      const fitAddon = new FitAddon();
+      const linksAddon = new WebLinksAddon();
+      term.loadAddon(fitAddon);
+      term.loadAddon(linksAddon);
+      const inputDisposable = term.onData((data) => {
+        console.log('[terminal][input] onData allow=%s bytes=%d data=%s', allowStdinRef.current, data.length, JSON.stringify(data));
+        const ws = wsRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        if (!allowStdinRef.current) {
+          // Why: agent 终端里禁止用户直接敲命令，避免把审批/等待 PS1 状态搞乱；
+          // 但允许 Ctrl+C 中断跑飞的命令（这是我们允许的唯一例外）。
+          if (data === '\x03') {
+            try { ws.send(data); } catch { /* noop */ }
+          }
+          return;
+        }
+        try {
+          // 用户自己的输入：优先以 JSON 打包 {"type":"stdin","data":...} 发，
+          // 服务端也支持 raw text（兼容 attach addon 的历史行为）。
+          ws.send(JSON.stringify({ type: 'stdin', data }));
+        } catch { /* noop */ }
+      });
+      inst = { term, fit: fitAddon, inputDisposable, host };
+      termMapRef.current.set(activeRunId, inst);
+    }
+
+    inst.host.style.backgroundColor = background;
+    inst.host.style.color = foreground;
+    inst.term.options.theme = theme;
+
+    // 首次 open 时清掉 host 里可能残留的 .xterm（Fast Refresh 场景）。
+    // Why: 必须延后到下一帧并确保 host 尺寸非 0，否则 xterm 在 display:none / 尺寸为 0 的容器上
+    // open 会触发 Viewport._innerRefresh 读取 undefined.dimensions 的 TypeError。
+    let openRaf: number | null = null;
+    let openTimer: number | null = null;
+    const tryOpenTerm = () => {
+      if (!inst || inst.term.element) return;
+      if (host.offsetWidth <= 0 || host.offsetHeight <= 0) {
+        console.log('[terminal][open] skip: host size 0x0', host.offsetWidth, host.offsetHeight);
+        openTimer = window.setTimeout(tryOpenTerm, 50);
         return;
       }
-      opened = true;
-      termRef.current = term;
-      fitRef.current = fitAddon;
-      setTermReady(true);
+      console.log('[terminal][open] calling term.open size=%sx%s', host.offsetWidth, host.offsetHeight);
+      host.querySelectorAll(':scope > .xterm').forEach((n) => n.remove());
+      try {
+        inst.term.open(host);
+        inst.fit.fit();
+        // Why: 新终端创建后默认不会自动获得焦点，用户需要手动点击才能输入；
+        // 这里自动 focus，让"新建终端"后可以直接敲命令。
+        inst.term.focus();
+      } catch (err) {
+        console.log('[terminal][open] term.open error:', err);
+      }
     };
+    openRaf = window.requestAnimationFrame(tryOpenTerm);
+    openTimer = window.setTimeout(tryOpenTerm, 100);
+
+    termRef.current = inst.term;
+    fitRef.current = inst.fit;
+    setTermReady(true);
 
     const ro = new ResizeObserver(() => {
-      tryOpen();
-      if (!opened) return;
+      const active = termRef.current;
+      if (!active) return;
+      try { fitRef.current?.fit(); } catch { /* noop */ }
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-        } catch { /* noop */ }
+        try { ws.send(JSON.stringify({ type: 'resize', cols: active.cols, rows: active.rows })); } catch { /* noop */ }
       }
     });
     ro.observe(host);
 
-    tryOpen();
-    rafId = window.requestAnimationFrame(() => tryOpen());
-    timeoutId = window.setTimeout(() => tryOpen(), 100);
-
     const onWindowResize = () => {
-      if (!opened) { tryOpen(); return; }
+      const active = termRef.current;
+      if (!active) return;
+      try { fitRef.current?.fit(); } catch { /* noop */ }
       const ws = wsRef.current;
       if (ws && ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-        } catch { /* noop */ }
+        try { ws.send(JSON.stringify({ type: 'resize', cols: active.cols, rows: active.rows })); } catch { /* noop */ }
       }
     };
     window.addEventListener('resize', onWindowResize);
 
     return () => {
-      if (rafId !== null) cancelAnimationFrame(rafId);
-      if (timeoutId !== null) window.clearTimeout(timeoutId);
-      window.removeEventListener('resize', onWindowResize);
+      if (openRaf !== null) cancelAnimationFrame(openRaf);
+      if (openTimer !== null) window.clearTimeout(openTimer);
       ro.disconnect();
-      try { attachRef.current?.dispose(); } catch { /* noop */ }
-      try { term.dispose(); } catch { /* noop */ }
+      window.removeEventListener('resize', onWindowResize);
       termRef.current = null;
       fitRef.current = null;
-      attachRef.current = null;
       setTermReady(false);
     };
-  }, [dark]);
+  }, [allSessions, activeRunId, dark]);
 
-  // 2. 主题变更时，已存在的 term 直接替换 theme / 背景色（上面的 effect 只跑一次）
+  // 组件卸载（或 Fast Refresh 重建）时释放所有终端实例
   useEffect(() => {
-    const term = termRef.current;
-    const host = xtermHostRef.current;
-    if (!term || !host) return;
-    const { theme, background, foreground } = termTheme(dark);
-    term.options.theme = theme;
-    host.style.backgroundColor = background;
-    host.style.color = foreground;
-    try { fitRef.current?.fit(); } catch { /* noop */ }
-  }, [dark]);
+    return () => {
+      for (const inst of termMapRef.current.values()) {
+        try { inst.inputDisposable.dispose(); } catch { /* noop */ }
+        try { inst.term.dispose(); } catch { /* noop */ }
+      }
+      termMapRef.current.clear();
+    };
+  }, []);
 
   // 3. 根据 activeRunId 切换 WebSocket。
   // Why: 依赖 termReady 是因为 WebSocket 必须在 term.open() 成功后才能连接，
@@ -231,8 +366,7 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
   useEffect(() => {
     if (!activeRunId) return;
     if (!termReady) return;
-    const term = termRef.current;
-    if (!term) return;
+    if (!termRef.current) return;
 
     // 关旧 WS
     try { attachRef.current?.dispose(); } catch { /* noop */ }
@@ -244,20 +378,25 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
     wsRef.current = null;
 
     const url = buildWebSocketUrl(workspaceId, activeRunId);
+    console.log('[terminal][ws] connecting url=%s workspaceId=%s runId=%s', url, workspaceId, activeRunId);
     let ws: WebSocket;
     try {
       ws = new WebSocket(url);
     } catch (err) {
-      term.writeln(`\r\n\x1b[31m[集成终端] 无法建立 WebSocket：${(err as Error).message}\x1b[0m`);
+      console.log('[terminal][ws] connection failed:', err);
+      termRef.current?.writeln(`\r\n\x1b[31m[集成终端] 无法建立 WebSocket：${(err as Error).message}\x1b[0m`);
       return;
     }
     wsRef.current = ws;
+    ws.onerror = (e) => { console.log('[terminal][ws] error event:', e); };
+    ws.onclose = (e) => { console.log('[terminal][ws] closed code=%s reason=%s', e.code, e.reason); };
 
     // 开一条 attach 通道（xterm 输出由服务端推过来，用户输入则是“手动终端”时才会发）
     // 但 AttachAddon 默认会把所有 onData 都写 websocket，这里我们不直接用它的 attach，
     // 自己写一个更可控的监听：WS 的 pty_output 写到 term，term 的 onData 只有 allowUserStdin 才发。
     let destroyed = false;
     ws.onopen = () => {
+      console.log('[terminal][ws] OPEN');
       if (destroyed) return;
       try { fitRef.current?.fit(); } catch { /* noop */ }
       if (ws.readyState === WebSocket.OPEN && termRef.current) {
@@ -271,6 +410,10 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
     };
     ws.onmessage = (ev) => {
       if (destroyed) return;
+      // Why: 用 termRef.current 而非闭包 term——Fast Refresh / 组件重建时旧闭包 term 已被 dispose，
+      // 但 termReady state 被保留导致 WS effect 不重跑，闭包 term.write 会失效（数据到了但不渲染=空白）。
+      const liveTerm = termRef.current;
+      if (!liveTerm) return;
       let payload: Partial<TerminalProposition> & {
         type?: string;
         data?: string;
@@ -280,17 +423,24 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
         payload = typeof ev.data === 'string' ? JSON.parse(ev.data) : { type: '' };
       } catch {
         // 非 JSON：当作原始 PTY 输出（兼容未来二进制）
-        if (typeof ev.data === 'string') term.write(ev.data);
+        if (typeof ev.data === 'string') {
+          console.log('[terminal][ws] raw text bytes=%d', ev.data.length);
+          liveTerm.write(ev.data);
+        }
         return;
       }
       switch (payload.type) {
         case 'pty_output':
-          if (typeof payload.data === 'string') term.write(payload.data);
+          if (typeof payload.data === 'string') {
+            console.log('[terminal][ws] pty_output bytes=%d sample=%s', payload.data.length, payload.data.slice(0, 60).replace(/\n/g, '\\n'));
+            liveTerm.write(payload.data);
+          }
           break;
         case 'list':
           if (Array.isArray(payload.terminals)) setSessions(payload.terminals);
           break;
         case 'proposition': {
+          console.log('[terminal][ws] proposition received:', payload);
           // 把 proposition 标准化
           const next: TerminalProposition = {
             id: String(payload.id ?? ''),
@@ -305,6 +455,7 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
             timeout_seconds: Number(payload.timeout_seconds ?? 90),
             remaining_seconds: Number(payload.remaining_seconds ?? 90),
           };
+          console.log('[terminal][proposition] setProposition id=%s runId=%s command=%s status=%s', next.id, next.run_id, next.command, next.status);
           setProposition(next);
           setPropositionSecondConfirm(false);
           setEditingCommand(next.command);
@@ -313,7 +464,7 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
           break;
         }
         case 'error':
-          term.writeln(`\r\n\x1b[31m[集成终端] ${String(payload.data ?? '')}\x1b[0m`);
+          termRef.current?.writeln(`\r\n\x1b[31m[集成终端] ${String(payload.data ?? '')}\x1b[0m`);
           break;
         default:
           break;
@@ -321,24 +472,11 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
     };
     ws.onclose = () => {
       if (destroyed) return;
-      term.writeln('\r\n\x1b[33m[集成终端] WebSocket 已断开。切换终端可重连。\x1b[0m');
+      termRef.current?.writeln('\r\n\x1b[33m[集成终端] WebSocket 已断开。切换终端可重连。\x1b[0m');
     };
 
-    const disposable = term.onData((data) => {
-      if (!allowUserStdin) {
-        // Why: agent 终端里禁止用户直接敲命令，避免把审批/等待 PS1 状态搞乱；
-        // 但允许 Ctrl+C 中断跑飞的命令（这是我们允许的唯一例外）。
-        if (data === '\x03') {
-          try { ws.send(data); } catch { /* noop */ }
-        }
-        return;
-      }
-      try {
-        // 用户自己的输入：优先以 JSON 打包 {"type":"stdin","data":...} 发，
-        // 服务端也支持 raw text（兼容 attach addon 的历史行为）。
-        ws.send(JSON.stringify({ type: 'stdin', data }));
-      } catch { /* noop */ }
-    });
+    // Why: 输入处理 onData 已在多实例 term 创建 effect 里按 runId 绑定到对应 Terminal 实例，
+    // 此处不再重复绑定，避免每次 WS 重连都叠加一个 onData 导致同一按键发送多次。
 
     // 后端周期性广播 session list 也更新一次 UI：我们每次切 runId 主动请求一次 list。
     const listTimer = window.setInterval(() => {
@@ -350,7 +488,6 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
     return () => {
       destroyed = true;
       window.clearInterval(listTimer);
-      disposable.dispose();
       try { ws.close(); } catch { /* noop */ }
       wsRef.current = null;
     };
@@ -415,21 +552,27 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
     editedCommand?: string; addTrust?: boolean; secondConfirm?: boolean;
   } = {}) => {
     const ws = wsRef.current;
+    console.log('[terminal][resolve] decision=%s ws=%s readyState=%s prop=%s', decision, ws ? 'yes' : 'no', ws?.readyState, proposition?.id);
     if (!ws || !proposition) return;
     if (ws.readyState !== WebSocket.OPEN) return;
     try {
-      ws.send(JSON.stringify({
+      const payload = JSON.stringify({
         type: 'resolve',
         id: proposition.id,
         decision,
         edited_command: editedCommand,
         add_trust: Boolean(addTrust),
         second_confirm: Boolean(secondConfirm),
-      }));
-    } catch { /* noop */ }
+      });
+      console.log('[terminal][resolve] sending payload=%s', payload);
+      ws.send(payload);
+    } catch (err) {
+      console.log('[terminal][resolve] send error:', err);
+    }
   }, [proposition]);
 
   const onApprove = () => {
+    console.log('[terminal][onApprove] status=%s secondConfirm=%s', proposition?.status, propositionSecondConfirm);
     if (!proposition) return;
     const finalCommand = showEditor ? editingCommand : undefined;
     if (proposition.status === 'needs_confirm' && !propositionSecondConfirm) {
@@ -445,26 +588,13 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
     resolve('approve', { editedCommand: finalCommand, addTrust: trustThisCommand, secondConfirm: true });
   };
 
-  // 组合 session 列表：后端 sessions（list 接口推的真实 ConPTY） + 前端已知但后端还没 spawn 的 agent run（保证用户没审批也能先看到 tab）
-  const allSessions = useMemo<TerminalSessionDescriptor[]>(() => {
-    const byRunId = new Map<string, TerminalSessionDescriptor>();
-    for (const s of sessions) byRunId.set(s.run_id, s);
-    for (const run of agentRuns) {
-      if (!byRunId.has(run.id)) {
-        byRunId.set(run.id, {
-          workspace_id: workspaceId,
-          run_id: run.id,
-          title: run.request ? run.request.slice(0, 24) : `Agent ${run.id.slice(0, 8)}`,
-          is_manual: false,
-          exit_code: null,
-        });
-      }
-    }
-    return Array.from(byRunId.values());
-  }, [sessions, agentRuns, workspaceId]);
+  const onReject = () => {
+    console.log('[terminal][onReject] prop=%s', proposition?.id);
+    resolve('reject');
+  };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex h-full min-h-0 flex-col">
       {/* 提案横幅：紧贴终端 Tab 正上方，需求原文要求”位置最好加到终端上方，紧靠着“ */}
       {proposition && (proposition.status === 'pending' || proposition.status === 'needs_confirm') && (
         <div className={`flex shrink-0 flex-col gap-2 border-b px-3 py-2 ${
@@ -513,7 +643,7 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
               </button>
               <button
                 type="button"
-                onClick={() => resolve('reject')}
+                onClick={onReject}
                 className="rounded border border-rose-700 bg-rose-600/90 px-2 py-1 text-[11px] font-medium text-white hover:bg-rose-600"
               >
                 拒绝
@@ -572,16 +702,19 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
                 >
                   {label}
                 </button>
-                {s.is_manual ? (
-                  <button
-                    type="button"
-                    title="关闭终端"
-                    onClick={() => onCloseTerminal(s.run_id)}
-                    className="rounded px-1 text-slate-500 opacity-60 hover:bg-slate-700 hover:text-rose-300 hover:opacity-100"
-                  >
-                    ×
-                  </button>
-                ) : null}
+                <button
+                  type="button"
+                  title="关闭终端"
+                  onClick={() => {
+                  onCloseTerminal(s.run_id);
+                  // Why: 手动终端由后端 sessions 驱动，close 后自动消失；
+                  // 智能体终端 Tab 从 agentRuns 派生，需本地记录已关闭 run_id 才从列表移除。
+                  setClosedAgentRunIds((prev) => new Set(prev).add(s.run_id));
+                }}
+                  className="rounded px-1 text-slate-500 opacity-60 hover:bg-slate-700 hover:text-rose-300 hover:opacity-100"
+                >
+                  ×
+                </button>
               </div>
             );
           })}
@@ -598,8 +731,36 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
         </div>
       </div>
 
-      {/* xterm 渲染区 */}
-      <div ref={xtermHostRef} className="min-h-0 flex-1 w-full" />
+      {/* xterm 渲染区：每个 session 一个独立的 host，通过 hidden 切换显示 */}
+      <div className="relative min-h-[120px] w-full flex-1 overflow-hidden">
+        {allSessions.length === 0 ? (
+          <div className="flex h-full min-h-[180px] items-center justify-center text-xs text-slate-500">
+            <div className="text-center">
+              <p className="mb-2">暂无终端会话。</p>
+              <button
+                type="button"
+                onClick={onCreateManual}
+                className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 font-medium text-slate-200 hover:bg-slate-800"
+              >
+                + 新建手动终端
+              </button>
+            </div>
+          </div>
+        ) : allSessions.map((s) => {
+          const { background, foreground } = termTheme(dark);
+          return (
+            <div
+              key={s.run_id}
+              ref={(el) => {
+                if (el) hostMapRef.current.set(s.run_id, el);
+                else hostMapRef.current.delete(s.run_id);
+              }}
+              className={`absolute inset-0 ${s.run_id === activeRunId ? '' : 'hidden'}`}
+              style={{ backgroundColor: background, color: foreground }}
+            />
+          );
+        })}
+      </div>
     </div>
   );
 }

@@ -14,6 +14,7 @@ import {
   type CodeAgentTrace,
   type CodeFileChange,
   type CodeGenerationEvent,
+  type TaskItem,
 } from '../lib/api';
 import { parseProjectCode } from '../Code/fullstackBundler';
 import {
@@ -187,6 +188,9 @@ export default function useCodeAutoRepair() {
   });
   // 会话级（本次 tab session）的信任白名单，按 runId 分组，关页面就失效。
   const [trustedTerminalPrefixes, setTrustedTerminalPrefixes] = useState<Record<string, string[]>>({});
+  // Why: 全栈修改模式任务拆解——后端推送 task_list/task_update 事件，
+  // 前端用浮层卡片展示进度。每次新 run 开始时清空。
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
 
   const codeRef = useRef('');
   const runIdRef = useRef('');
@@ -233,6 +237,8 @@ export default function useCodeAutoRepair() {
     // Why: 信任白名单按 runId 切分；每启动一次新 agent 自动初始化一个空数组，
     // 用户在这次 run 里勾选过“信任”的命令前缀就命中，关 tab 整体失效。
     setTrustedTerminalPrefixes((previous) => previous[id] ? previous : { ...previous, [id]: [] });
+    // Why: 每次 agent run 开始时清空任务列表，避免上一次的残留任务显示。
+    setTasks([]);
   }, []);
 
   const continueAgentTrace = useCallback((message: string) => {
@@ -277,6 +283,7 @@ export default function useCodeAutoRepair() {
       return true;
     }
     if (event.type === 'terminal_proposal') {
+      console.log('[terminal][sse] terminal_proposal event:', event);
       commitAgentTrace((previous) => ({
         ...previous,
         terminalProposals: [
@@ -284,6 +291,27 @@ export default function useCodeAutoRepair() {
           { command: event.command, reason: event.reason, expected_output_hint: event.expected_output_hint },
         ],
       }));
+      // Why: 通知 CodeWorkspace 自动切到终端 Tab 并选中 agent 终端，
+      // 否则用户看不到审批横幅，proposition 会 90s 超时。
+      try {
+        const runId = (event as { run_id?: string }).run_id;
+        console.log('[terminal][sse] dispatching terminal-proposal-arrived run_id=%s', runId);
+        window.dispatchEvent(new CustomEvent('terminal-proposal-arrived', {
+          detail: { run_id: runId },
+        }));
+      } catch (e) { console.log('[terminal][sse] dispatch error:', e); }
+      return true;
+    }
+    // Why: 任务拆解事件——task_list 推送完整列表，task_update 更新单个任务状态。
+    // 前端用浮层卡片展示进度，不进 agent_trace 大黑框。
+    if (event.type === 'task_list') {
+      setTasks(event.tasks);
+      return true;
+    }
+    if (event.type === 'task_update') {
+      setTasks((previous) => previous.map((t) =>
+        t.id === event.task_id ? { ...t, status: event.status } : t
+      ));
       return true;
     }
     if (event.type !== 'agent_activity') return false;
@@ -453,7 +481,7 @@ export default function useCodeAutoRepair() {
     let didComplete = false;
 
     const handleEvent = (event: CodeGenerationEvent) => {
-      if (event.type === 'agent_activity' || event.type === 'runtime_summary' || event.type === 'terminal_proposal') {
+      if (event.type === 'agent_activity' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update') {
         consumeAgentEvent(event);
         return;
       }
@@ -519,7 +547,10 @@ export default function useCodeAutoRepair() {
     setRepairLogs([]);
     setStatus({ state: 'modifying', charCount: 0 });
     const currentVfs = parseProjectCode(currentCode);
-    beginAgentTrace(currentVfs ? '正在启动全栈增量修改智能体。' : '正在启动前端增量修改智能体。', instruction, currentVfs ? 'fullstack' : 'frontend');
+    // Why: parseProjectCode('{}') 返回空对象，在 JS 中是 truthy；
+    //   必须检查是否包含真实文件，否则会把空 VFS 传给后端触发 422。
+    const hasVfs = currentVfs && Object.keys(currentVfs).length > 0;
+    beginAgentTrace(hasVfs ? '正在启动全栈增量修改智能体。' : '正在启动前端增量修改智能体。', instruction, hasVfs ? 'fullstack' : 'frontend');
     const runIdForRequest = currentAgentRunIdRef.current;
 
     const controller = new AbortController();
@@ -537,7 +568,7 @@ export default function useCodeAutoRepair() {
           }
         : null;
     const handleEvent = (event: CodeGenerationEvent) => {
-      if (event.type === 'agent_activity' || event.type === 'runtime_summary' || event.type === 'terminal_proposal') {
+      if (event.type === 'agent_activity' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update') {
         consumeAgentEvent(event);
         return;
       }
@@ -556,7 +587,7 @@ export default function useCodeAutoRepair() {
     };
     try {
       // Why: fullstack 和 frontend 单文件路径都已支持视觉模型分析附件。
-      if (currentVfs) {
+      if (hasVfs) {
         await modifyFullstackCode(
           currentVfs, instruction, targetElement, handleEvent, controller.signal, pendingDiagnostics, attachments,
           { workspace_id: terminalWorkspaceId, run_id: runIdForRequest },
@@ -663,8 +694,9 @@ export default function useCodeAutoRepair() {
 
     try {
       const currentVfs = parseProjectCode(codeRef.current);
+      const hasVfs = currentVfs && Object.keys(currentVfs).length > 0;
       const handleEvent = (event: CodeGenerationEvent) => {
-          if (event.type === 'agent_activity' || event.type === 'runtime_summary' || event.type === 'terminal_proposal') {
+          if (event.type === 'agent_activity' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update') {
             consumeAgentEvent(event);
             if (event.type === 'agent_activity' && event.channel === 'output') {
               repairModelOutput += event.content;
@@ -695,7 +727,7 @@ export default function useCodeAutoRepair() {
             charCount: event.code.length,
           });
         };
-      if (currentVfs) {
+      if (hasVfs) {
         await fixFullstackCode(
           currentVfs, diagnostic, handleEvent, controller.signal,
           { workspace_id: terminalWorkspaceId, run_id: currentAgentRunIdRef.current },
@@ -816,6 +848,7 @@ export default function useCodeAutoRepair() {
     agentRuns,
     terminalWorkspaceId,
     trustedTerminalPrefixes,
+    tasks,
     generate,
     modify,
     reset,
