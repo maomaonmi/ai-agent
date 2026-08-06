@@ -34,6 +34,11 @@ from session_memory import SessionNotFoundError, SessionStore
 from model_settings import ModelSettings, ModelSettingsStore
 from glm_adapter import ChatAttachment, build_user_content, choose_glm_model, reasoning_from_delta, validate_attachment_mix
 from App import create_code_router
+# Why: Phase2 记忆系统——三个 store 在 main.py 启动时统一初始化，
+# 共用 SESSION_DB_PATH 同一 SQLite，FK 约束由 SessionStore._initialize() 先建表保证。
+from memory_engine import MemoryEngine
+from skill_store import SkillStore
+from vfs_checkpoint import VFSCheckpointStore
 from terminal_service import TERMINAL_POOL, handle_terminal_websocket
 
 from 全知全能.day32_deep_research_retrieval import (
@@ -65,6 +70,12 @@ SESSION_DB_PATH = Path(os.getenv(
     str(Path(__file__).resolve().parent / "data" / "agent_memory.db"),
 ))
 session_store = SessionStore(SESSION_DB_PATH)
+# Why: Phase2 记忆系统三个 store——必须放在 SessionStore 之后实例化，
+# 因为 raw_event_ledger / profile_cards / conversation_summaries / vfs_checkpoints / skills
+# 的 session_id 外键依赖 sessions 表，SessionStore._initialize() 负责建表。
+memory_engine = MemoryEngine(SESSION_DB_PATH)
+skill_store = SkillStore(SESSION_DB_PATH)
+vfs_store = VFSCheckpointStore(SESSION_DB_PATH)
 
 
 def get_llm(mode: str, max_tokens: Optional[int] = None):
@@ -1752,6 +1763,11 @@ app.include_router(create_code_router(
         model_settings_store.load().reasoning_effort,
     ),
     terminal_pool=TERMINAL_POOL,
+    # Why: Phase2 注入记忆系统三个 store——所有 stream 函数的记忆钩子依赖此处的实参；
+    # None 时降级为 no-op，保持 router 独立可测。
+    memory_engine=memory_engine,
+    vfs_store=vfs_store,
+    skill_store=skill_store,
 ))
 
 

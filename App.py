@@ -37,6 +37,152 @@ if not logger.handlers:
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
 
+
+def _build_memory_prompt_suffix(
+    memory_engine: Any,
+    session_id: str | None,
+    user_input: str,
+    messages: list[dict[str, Any]] | None = None,
+    current_vfs: dict[str, str] | None = None,
+) -> str:
+    """合成记忆上下文，作为 system_prompt 的追加段。
+
+    Why: stream 函数已有自己的 CODE_SYSTEM_PROMPT / FIX_SYSTEM_PROMPT 等；
+    记忆上下文不能覆盖这些基础规则，只能以追加段形式拼到 system 内容末尾，
+    让模型既遵守代码契约，又能感知历史档案卡/摘要/最近对话。
+    失败时返回空串，主流程无感知。
+
+    Args:
+        messages: 调用方已有的 messages 列表，用于提取滑动窗口；None 时跳过窗口段。
+        current_vfs: 当前 VFS（仅列文件名，避免撑爆 token 预算）。
+    """
+    if not session_id or memory_engine is None:
+        return ""
+    try:
+        return "\n\n" + memory_engine.build_context(
+            session_id=session_id,
+            user_input=user_input,
+            messages=messages or [],
+            current_vfs=current_vfs,
+        )
+    except Exception:
+        logger.exception(
+            "[memory] build_context 失败 sid=%s，降级为空上下文。",
+            session_id,
+        )
+        return ""
+
+
+def _record_patch_success(
+    *,
+    memory_engine: Any,
+    vfs_store: Any,
+    skill_store: Any,
+    session_id: str | None,
+    run_id: str,
+    before_vfs: dict[str, str] | None,
+    after_vfs: dict[str, str] | None,
+    instruction: str,
+    summary: str = "",
+    skill_type: str = "fix_template",
+) -> None:
+    """Patch 成功后统一落账：追加账本 + VFS checkpoint + 档案卡 + Skill 沉淀。
+
+    Why: 4 个 stream 函数共有 11 处 patch 成功退出点。每处都要执行同一组记忆动作：
+      1) record_event(ai_reply + vfs_change) — 审计流水
+      2) save_vfs_checkpoint(post_patch) — 崩溃恢复
+      3) update_profile_field(last_modified_files) — 项目画像演进
+      4) maybe_create_skill_from_success — 程序性记忆沉淀
+    任何一步失败都仅 log，绝不抛出（主链路已成功，记忆是 best-effort）。
+
+    Args:
+        before_vfs/after_vfs: 修补前/后的 VFS。单文件场景由调用方包装为
+            {"index.html": code}。两者均为 None 时跳过 vfs_change 落账。
+        instruction: 用户原始指令，作为 Skill 的 trigger_condition。
+        skill_type: fix_template（修复）/ code_pattern（增量修改）/ task_flow（全栈生成）。
+    """
+    if not session_id or memory_engine is None:
+        return
+    safe_run_id = run_id or "unknown"
+    try:
+        # 1. 追加账本：记录 AI 回复摘要 + VFS 变更
+        memory_engine.record_event(
+            session_id,
+            event_type="ai_reply",
+            event_data={
+                "summary": (summary or "")[:MAX_SUMMARY_LENGTH],
+                "instruction": (instruction or "")[:MAX_INSTRUCTION_LENGTH],
+                "run_id": safe_run_id,
+            },
+        )
+        if after_vfs is not None:
+            changed_files = sorted(
+                [path for path in after_vfs if before_vfs is None or before_vfs.get(path) != after_vfs[path]]
+            )
+            memory_engine.record_event(
+                session_id,
+                event_type="vfs_change",
+                event_data={
+                    "run_id": safe_run_id,
+                    "changed_files": changed_files[:50],
+                    "before_file_count": len(before_vfs) if before_vfs else 0,
+                    "after_file_count": len(after_vfs),
+                },
+            )
+            # 2. VFS checkpoint（post_patch 触发）
+            if vfs_store is not None:
+                try:
+                    vfs_store.save_checkpoint(
+                        session_id=session_id,
+                        run_id=safe_run_id,
+                        vfs=after_vfs,
+                        trigger_reason="post_patch",
+                    )
+                except Exception:
+                    logger.exception(
+                        "[memory] save_vfs_checkpoint 失败 sid=%s run=%s",
+                        session_id,
+                        safe_run_id,
+                    )
+            # 3. 档案卡：更新 last_modified_files（双时间戳自动打断旧记录）
+            memory_engine.update_profile_field(
+                session_id,
+                field_key="last_modified_files",
+                field_value=changed_files[:20],
+                source="inferred",
+            )
+
+        # 4. Skill 自动沉淀：连续成功 2 次后入库
+        if skill_store is not None and instruction and instruction.strip():
+            try:
+                keywords = [
+                    w for w in instruction.split()
+                    if len(w) >= 2
+                ][:5]
+                skill_store.maybe_create_skill_from_success(
+                    trigger_condition=instruction.strip()[:200],
+                    trigger_keywords=keywords,
+                    standard_steps=[
+                        f"按指令 '{instruction.strip()[:80]}' 生成/修改代码",
+                        "应用补丁后调用 reject_destructive_patch 校验",
+                        "落盘到 generated/<run_id>/ 并推送 code_update",
+                    ],
+                    skill_type=skill_type,
+                    sample_envelope=(summary or "")[:500] or None,
+                )
+            except Exception:
+                logger.exception(
+                    "[memory] maybe_create_skill_from_success 失败 sid=%s",
+                    session_id,
+                )
+    except Exception:
+        logger.exception(
+            "[memory] _record_patch_success 整体失败 sid=%s run=%s",
+            session_id,
+            safe_run_id,
+        )
+
+
 # Why: 集中管理 GLM 轮级思考强度默认值，避免多个 stream 函数各自写死 "high"，方便统一调整。
 DEFAULT_REASONING_EFFORT: str = "low"
 
@@ -1108,6 +1254,7 @@ class CodeGenerateRequest(BaseModel):
     # 避免多个 agent 共享同一条 shell，互相踩 cd / env / 历史命令。
     workspace_id: str = Field(default="default", min_length=1, max_length=64)
     run_id: str = Field(default="", max_length=64)
+    session_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class CodeFixRequest(BaseModel):
@@ -1115,6 +1262,7 @@ class CodeFixRequest(BaseModel):
     error: str = Field(min_length=1, max_length=MAX_ERROR_LENGTH)
     workspace_id: str = Field(default="default", min_length=1, max_length=64)
     run_id: str = Field(default="", max_length=64)
+    session_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class CodeModifyRequest(BaseModel):
@@ -1125,6 +1273,7 @@ class CodeModifyRequest(BaseModel):
     attachments: list[ChatAttachment] = Field(default_factory=list, max_length=10)
     workspace_id: str = Field(default="default", min_length=1, max_length=64)
     run_id: str = Field(default="", max_length=64)
+    session_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class FullstackGenerateRequest(BaseModel):
@@ -1132,6 +1281,7 @@ class FullstackGenerateRequest(BaseModel):
     attachments: list[ChatAttachment] = Field(default_factory=list, max_length=10)
     workspace_id: str = Field(default="default", min_length=1, max_length=64)
     run_id: str = Field(default="", max_length=64)
+    session_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class FullstackModifyRequest(BaseModel):
@@ -1147,6 +1297,7 @@ class FullstackModifyRequest(BaseModel):
     mentioned_files: list[str] = Field(default_factory=list, max_length=MAX_VFS_FILES)
     workspace_id: str = Field(default="default", min_length=1, max_length=64)
     run_id: str = Field(default="", max_length=64)
+    session_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class FullstackFixRequest(BaseModel):
@@ -1154,6 +1305,7 @@ class FullstackFixRequest(BaseModel):
     error: str = Field(min_length=1, max_length=MAX_ERROR_LENGTH)
     workspace_id: str = Field(default="default", min_length=1, max_length=64)
     run_id: str = Field(default="", max_length=64)
+    session_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class VFSArchiveRequest(BaseModel):
@@ -2895,6 +3047,10 @@ async def fix_code_stream(
     run_id: str,
     terminal_pool: Any,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    session_id: str | None = None,
+    memory_engine: Any | None = None,
+    vfs_store: Any | None = None,
+    skill_store: Any | None = None,
 ) -> AsyncIterator[str]:
     """前端单文件修复：模型现在按 UNIFIED ENVELOPE 输出，先 normalize 再分字段消费。
 
@@ -2912,12 +3068,26 @@ async def fix_code_stream(
     _ = (workspace_id, run_id, terminal_pool)
     code = _extract_html_from_mangled_envelope_source(code)
     content = ""
+    # Why: Phase2 记忆上下文——以追加段形式拼到 system prompt 末尾，失败时返回空串。
+    memory_suffix = _build_memory_prompt_suffix(
+        memory_engine,
+        session_id,
+        user_input=(error or "")[:500],
+        current_vfs={"index.html": code} if code else None,
+    )
     try:
         yield format_sse({"type": "agent_activity", "channel": "status", "phase": "diagnosing", "content": "正在根据运行错误定位最小修复范围。", "done": False})
+        messages = build_fix_messages(code, error)
+        # Why: 记忆上下文以追加段形式拼到 system prompt 末尾，不覆盖基础代码契约。
+        if memory_suffix and messages:
+            messages[0] = {
+                "role": messages[0]["role"],
+                "content": messages[0]["content"] + memory_suffix,
+            }
         content, sse_events = await stream_json_completion(
             client,
             model=model_name,
-            messages=build_fix_messages(code, error),
+            messages=messages,
             temperature=0.1,
             max_tokens=4_000,
             phase="patching",
@@ -2979,6 +3149,19 @@ async def fix_code_stream(
                 "content": summarize_vfs_delta("patch", {"index.html": code}, {"index.html": full_html_candidate}, envelope.get("summary", "")),
                 "intent": "patch", "done": True,
             })
+            # Why: Phase2 修复成功落账——skill_type=fix_template（运行时修复）。
+            _record_patch_success(
+                memory_engine=memory_engine,
+                vfs_store=vfs_store,
+                skill_store=skill_store,
+                session_id=session_id,
+                run_id=run_id,
+                before_vfs={"index.html": code},
+                after_vfs={"index.html": full_html_candidate},
+                instruction=error,
+                summary=envelope.get("summary", ""),
+                skill_type="fix_template",
+            )
             yield format_sse({"type": "code_update", "code": full_html_candidate, "done": False})
             yield format_sse({"type": "code_update", "code": full_html_candidate, "done": True})
             return
@@ -3004,6 +3187,19 @@ async def fix_code_stream(
             "intent": "patch", "done": True,
         })
         yield format_sse({"type": "agent_activity", "channel": "status", "phase": "validating", "content": "补丁已生成，正在验证修改结果。", "done": True})
+        # Why: Phase2 修复成功落账——skill_type=fix_template（运行时修复）。
+        _record_patch_success(
+            memory_engine=memory_engine,
+            vfs_store=vfs_store,
+            skill_store=skill_store,
+            session_id=session_id,
+            run_id=run_id,
+            before_vfs={"index.html": code},
+            after_vfs={"index.html": updated_code},
+            instruction=error,
+            summary=envelope.get("summary", ""),
+            skill_type="fix_template",
+        )
         yield format_sse({"type": "code_update", "code": updated_code, "done": False})
         yield format_sse({"type": "code_update", "code": updated_code, "done": True})
     except (ValueError, json.JSONDecodeError) as exc:
@@ -3054,6 +3250,20 @@ async def fix_code_stream(
                                                if content.strip().startswith("{") else "")),
                 "intent": "patch", "done": True,
             })
+            # Why: Phase2 修复兜底成功落账——skill_type=fix_template（运行时修复）。
+            _record_patch_success(
+                memory_engine=memory_engine,
+                vfs_store=vfs_store,
+                skill_store=skill_store,
+                session_id=session_id,
+                run_id=run_id,
+                before_vfs={"index.html": code},
+                after_vfs={"index.html": raw_html},
+                instruction=error,
+                summary=(normalize_agent_envelope(content).get("summary", "")
+                         if content.strip().startswith("{") else ""),
+                skill_type="fix_template",
+            )
             yield format_sse({"type": "code_update", "code": raw_html, "done": False})
             yield format_sse({"type": "code_update", "code": raw_html, "done": True})
             return
@@ -3083,6 +3293,10 @@ async def modify_code_stream(
     run_id: str,
     terminal_pool: Any,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    session_id: str | None = None,
+    memory_engine: Any | None = None,
+    vfs_store: Any | None = None,
+    skill_store: Any | None = None,
 ) -> AsyncIterator[str]:
     # modify 流程：保留 workspace_id/run_id/terminal_pool 给 terminal_commands 提案审批链（propose_command）。
     _ = (workspace_id, run_id, terminal_pool)
@@ -3102,7 +3316,20 @@ async def modify_code_stream(
             except Exception:
                 yield format_sse({"type": "agent_activity", "channel": "status", "phase": "analyzing", "content": "视觉分析失败，已回退到纯文本指令。", "done": False})
 
+        # Why: Phase2 记忆上下文——以追加段形式拼到 system prompt 末尾，失败时返回空串。
+        memory_suffix = _build_memory_prompt_suffix(
+            memory_engine,
+            session_id,
+            user_input=(effective_instruction or "")[:500],
+            current_vfs={"index.html": code} if code else None,
+        )
         messages = build_modify_messages(code, effective_instruction, target_element, diagnostics)
+        # Why: 记忆上下文以追加段形式拼到 system prompt 末尾，不覆盖基础代码契约。
+        if memory_suffix and messages:
+            messages[0] = {
+                "role": messages[0]["role"],
+                "content": messages[0]["content"] + memory_suffix,
+            }
         last_error = ""
 
         for attempt in range(2):
@@ -3165,6 +3392,19 @@ async def modify_code_stream(
                 if isinstance(full_html_candidate, str) and _looks_like_full_html(full_html_candidate) and len(full_html_candidate) > 300:
                     reject_destructive_patch(code, full_html_candidate, bootstrap_mode=False)
                     yield format_sse({"type": "agent_activity", "channel": "status", "phase": "validating", "content": "检测到完整重写意图，正在应用新页面。", "done": True})
+                    # Why: Phase2 修改成功落账——skill_type=code_pattern（单文件增量修改）。
+                    _record_patch_success(
+                        memory_engine=memory_engine,
+                        vfs_store=vfs_store,
+                        skill_store=skill_store,
+                        session_id=session_id,
+                        run_id=run_id,
+                        before_vfs={"index.html": code},
+                        after_vfs={"index.html": full_html_candidate},
+                        instruction=effective_instruction,
+                        summary=envelope.get("summary", ""),
+                        skill_type="code_pattern",
+                    )
                     yield format_sse({"type": "code_update", "code": full_html_candidate, "done": False})
                     yield format_sse({"type": "code_update", "code": full_html_candidate, "done": True})
                     yield format_sse({
@@ -3184,6 +3424,19 @@ async def modify_code_stream(
                 updated_code = apply_edit_operations(code, operations)
                 ensure_changed(code, updated_code)
                 yield format_sse({"type": "agent_activity", "channel": "status", "phase": "validating", "content": "增量补丁已生成，正在确认未改动无关区域。", "done": True})
+                # Why: Phase2 修改成功落账——skill_type=code_pattern（单文件增量修改）。
+                _record_patch_success(
+                    memory_engine=memory_engine,
+                    vfs_store=vfs_store,
+                    skill_store=skill_store,
+                    session_id=session_id,
+                    run_id=run_id,
+                    before_vfs={"index.html": code},
+                    after_vfs={"index.html": updated_code},
+                    instruction=effective_instruction,
+                    summary=envelope.get("summary", ""),
+                    skill_type="code_pattern",
+                )
                 yield format_sse({"type": "code_update", "code": updated_code, "done": False})
                 yield format_sse({"type": "code_update", "code": updated_code, "done": True})
                 yield format_sse({
@@ -3267,6 +3520,20 @@ async def modify_code_stream(
                                               if content.strip().startswith("{") else ""),
                 "intent": "patch", "done": True,
             })
+            # Why: Phase2 修改兜底成功落账——skill_type=code_pattern（单文件增量修改）。
+            _record_patch_success(
+                memory_engine=memory_engine,
+                vfs_store=vfs_store,
+                skill_store=skill_store,
+                session_id=session_id,
+                run_id=run_id,
+                before_vfs={"index.html": code},
+                after_vfs={"index.html": raw_html},
+                instruction=effective_instruction,
+                summary=(normalize_agent_envelope(content).get("summary", "")
+                         if content.strip().startswith("{") else ""),
+                skill_type="code_pattern",
+            )
             yield format_sse({"type": "code_update", "code": raw_html, "done": False})
             yield format_sse({"type": "code_update", "code": raw_html, "done": True})
             return
@@ -4092,6 +4359,10 @@ async def fullstack_generate_stream(
     terminal_pool: Any,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     decompose: bool = True,
+    session_id: str | None = None,
+    memory_engine: Any | None = None,
+    vfs_store: Any | None = None,
+    skill_store: Any | None = None,
 ) -> AsyncIterator[str]:
     # 兼容占位：保留 workspace_id/run_id/terminal_pool 给 terminal_commands 提案链。
     _ = (workspace_id, run_id, terminal_pool)
@@ -4113,6 +4384,14 @@ async def fullstack_generate_stream(
             except Exception:
                 # Why: 视觉分析失败不应阻塞代码生成，回退到原始 prompt 让用户至少拿到一份结果。
                 yield format_sse({"type": "agent_activity", "channel": "status", "phase": "analyzing", "content": "视觉分析失败，已回退到纯文本 prompt。", "done": False})
+
+        # Why: Phase2 记忆上下文——以追加段形式拼到 system prompt 末尾，失败时返回空串。
+        memory_suffix = _build_memory_prompt_suffix(
+            memory_engine,
+            session_id,
+            user_input=(effective_prompt or "")[:500],
+            current_vfs=None,
+        )
 
         # ── 拆解链：复杂需求先拆成子任务，逐个单独生成该模块，实现"边写边做" ──
         # Why: 一次性生成整个 VFS 会让 GLM 思考量爆炸、max_tokens 被 reasoning_content 占满，
@@ -4183,13 +4462,20 @@ async def fullstack_generate_stream(
 
         if not task_list:
             # ── 未拆解 / 拆解失败：单次生成完整 VFS ──
+            # Why: 记忆上下文以追加段形式拼到 system prompt 末尾，不覆盖基础代码契约。
+            _generate_messages = [
+                {"role": "system", "content": FULLSTACK_GENERATE_SYSTEM_PROMPT},
+                {"role": "user", "content": effective_prompt},
+            ]
+            if memory_suffix and _generate_messages:
+                _generate_messages[0] = {
+                    "role": _generate_messages[0]["role"],
+                    "content": _generate_messages[0]["content"] + memory_suffix,
+                }
             content, sse_events = await stream_json_completion(
                 client,
                 model=model_name,
-                messages=[
-                    {"role": "system", "content": FULLSTACK_GENERATE_SYSTEM_PROMPT},
-                    {"role": "user", "content": effective_prompt},
-                ],
+                messages=_generate_messages,
                 temperature=0.3,
                 max_tokens=16_000,
                 status_stream_label="正在规划全栈项目结构…",
@@ -4305,6 +4591,20 @@ async def fullstack_generate_stream(
             "intent": envelope.get("intent") or "fullstack_bootstrap",
             "done": True,
         })
+        # Why: Phase2 全栈生成成功落账——skill_type=task_flow（全栈生成视为任务流）。
+        # before_vfs=None 表示从零生成，after_vfs 为最终 VFS。
+        _record_patch_success(
+            memory_engine=memory_engine,
+            vfs_store=vfs_store,
+            skill_store=skill_store,
+            session_id=session_id,
+            run_id=run_id,
+            before_vfs=None,
+            after_vfs=vfs,
+            instruction=effective_prompt,
+            summary=envelope.get("summary", ""),
+            skill_type="task_flow",
+        )
         yield format_sse({"type": "code_update", "code": code, "done": True})
     except Exception:
         logger.error("[fullstack_generate_stream] 全栈生成异常。\n%s", traceback.format_exc())
@@ -4326,6 +4626,10 @@ async def fullstack_patch_stream(
     mentioned_files: list[str] | None = None,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     decompose: bool = True,
+    session_id: str | None = None,
+    memory_engine: Any | None = None,
+    vfs_store: Any | None = None,
+    skill_store: Any | None = None,
 ) -> AsyncIterator[str]:
     """Apply incremental changes to a full-stack VFS.
 
@@ -4375,6 +4679,16 @@ async def fullstack_patch_stream(
         # 纯文本 GLM 模型(glm-5/5.1/5.2)与 DeepSeek 一样走精确补丁，
         # 因为它们缺乏视觉模型对长上下文的重写稳定性，但精确补丁更省 token。
         is_vision_model = "5v" in model_name.lower() or "vision" in model_name.lower()
+
+        # Why: Phase2 记忆上下文——以追加段形式拼到 system prompt 末尾，
+        # 让模型既遵守代码契约，又能感知历史档案卡/摘要/最近对话。
+        # 失败时返回空串，主流程无感知。
+        memory_suffix = _build_memory_prompt_suffix(
+            memory_engine,
+            session_id,
+            user_input=(effective_instruction or "")[:500],
+            current_vfs=current_vfs,
+        )
 
         # ── 任务拆解：复杂指令先拆成子任务再逐个执行 ─────────────────
         # Why: GLM 在复杂补丁场景下思考量巨大，max_tokens 全被 reasoning_content 占满，
@@ -4510,6 +4824,19 @@ async def fullstack_patch_stream(
                         _auto_archive_generated_vfs(updated_vfs, run_id)
                     except Exception:
                         logger.warning("[fullstack_patch_stream] 子任务自动落盘失败。\n%s", traceback.format_exc())
+                    # Why: Phase2 子任务路径退出前落账——skill_type=task_flow 因为是任务拆解流程。
+                    _record_patch_success(
+                        memory_engine=memory_engine,
+                        vfs_store=vfs_store,
+                        skill_store=skill_store,
+                        session_id=session_id,
+                        run_id=run_id,
+                        before_vfs=current_vfs,
+                        after_vfs=updated_vfs,
+                        instruction=effective_instruction,
+                        summary=envelope_for_summary.get("summary", "") if isinstance(envelope_for_summary, dict) else "",
+                        skill_type="task_flow",
+                    )
                     yield format_sse({"type": "code_update", "code": code, "done": False})
                     yield format_sse({"type": "code_update", "code": code, "done": True})
                     return
@@ -4530,6 +4857,12 @@ async def fullstack_patch_stream(
             messages = build_fullstack_patch_messages(
                 pruned_vfs, effective_instruction, target_element, diagnostics, focus_rule
             )
+            # Why: 记忆上下文以追加段形式拼到 system prompt 末尾，不覆盖基础代码契约。
+            if memory_suffix and messages:
+                messages[0] = {
+                    "role": messages[0]["role"],
+                    "content": messages[0]["content"] + memory_suffix,
+                }
             for synthesis_attempt in range(3):
                 content, sse_events = await stream_json_completion(
                     client,
@@ -4665,6 +4998,12 @@ async def fullstack_patch_stream(
             messages = build_fullstack_file_replace_messages(
                 pruned_vfs, effective_instruction, target_element, diagnostics, focus_rule
             )
+            # Why: 记忆上下文以追加段形式拼到 system prompt 末尾，不覆盖基础代码契约。
+            if memory_suffix and messages:
+                messages[0] = {
+                    "role": messages[0]["role"],
+                    "content": messages[0]["content"] + memory_suffix,
+                }
             envelope_for_summary: dict[str, Any] | None = None
             for file_replace_attempt in range(2):
                 content, sse_events = await stream_json_completion(
@@ -4789,6 +5128,12 @@ async def fullstack_patch_stream(
             regenerate_messages = build_fullstack_regenerate_messages(
                 pruned_vfs, effective_instruction, target_element, diagnostics, last_error, focus_rule
             )
+            # Why: 记忆上下文以追加段形式拼到 system prompt 末尾，不覆盖基础代码契约。
+            if memory_suffix and regenerate_messages:
+                regenerate_messages[0] = {
+                    "role": regenerate_messages[0]["role"],
+                    "content": regenerate_messages[0]["content"] + memory_suffix,
+                }
             content, sse_events = await stream_json_completion(
                 client,
                 model=model_name,
@@ -4821,6 +5166,21 @@ async def fullstack_patch_stream(
             str(summary_payload.get("summary", "") or "")
             if isinstance(summary_payload, dict)
             else ""
+        )
+        # Why: Phase2 Path A/B/Fallback 三路汇聚点退出前落账——
+        # skill_type=task_flow（全栈补丁视为任务流，区别于单文件 code_pattern）。
+        # best-effort：失败仅 log，绝不影响主链路已成功的 patch。
+        _record_patch_success(
+            memory_engine=memory_engine,
+            vfs_store=vfs_store,
+            skill_store=skill_store,
+            session_id=session_id,
+            run_id=run_id,
+            before_vfs=current_vfs,
+            after_vfs=updated_vfs,
+            instruction=effective_instruction,
+            summary=provided_summary,
+            skill_type="task_flow",
         )
         yield format_sse({
             "type": "runtime_summary",
@@ -4856,6 +5216,9 @@ def create_code_router(
     settings_provider=None,
     terminal_pool: Any | None = None,
     default_workspace_id: str = "default",
+    memory_engine: Any | None = None,
+    vfs_store: Any | None = None,
+    skill_store: Any | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/code", tags=["code"])
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
@@ -4920,6 +5283,10 @@ def create_code_router(
                 run_id=request.run_id,
                 terminal_pool=terminal_pool or _DEFAULT_TERMINAL_POOL,
                 reasoning_effort=reasoning_effort,
+                session_id=request.session_id,
+                memory_engine=memory_engine,
+                vfs_store=vfs_store,
+                skill_store=skill_store,
             ),
             media_type="text/event-stream",
             headers={
@@ -4978,6 +5345,10 @@ def create_code_router(
                 run_id=request.run_id,
                 terminal_pool=terminal_pool or _DEFAULT_TERMINAL_POOL,
                 reasoning_effort=reasoning_effort,
+                session_id=request.session_id,
+                memory_engine=memory_engine,
+                vfs_store=vfs_store,
+                skill_store=skill_store,
             ),
             media_type="text/event-stream",
             headers={
@@ -5007,6 +5378,10 @@ def create_code_router(
                 run_id=request.run_id,
                 terminal_pool=terminal_pool or _DEFAULT_TERMINAL_POOL,
                 reasoning_effort=reasoning_effort,
+                session_id=request.session_id,
+                memory_engine=memory_engine,
+                vfs_store=vfs_store,
+                skill_store=skill_store,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -5038,6 +5413,10 @@ def create_code_router(
                 terminal_pool=terminal_pool or _DEFAULT_TERMINAL_POOL,
                 mentioned_files=request.mentioned_files,
                 reasoning_effort=reasoning_effort,
+                session_id=request.session_id,
+                memory_engine=memory_engine,
+                vfs_store=vfs_store,
+                skill_store=skill_store,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -5059,6 +5438,10 @@ def create_code_router(
                 terminal_pool=terminal_pool or _DEFAULT_TERMINAL_POOL,
                 reasoning_effort=reasoning_effort,
                 decompose=False,
+                session_id=request.session_id,
+                memory_engine=memory_engine,
+                vfs_store=vfs_store,
+                skill_store=skill_store,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
