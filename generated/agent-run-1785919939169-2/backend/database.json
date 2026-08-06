@@ -1,0 +1,70 @@
+{
+  "tracks": [
+    {
+      "id": 1,
+      "title": "星空漫步",
+      "artist": "夜行者",
+      "album": "城市夜曲",
+      "duration": 245,
+      "cover": "https://picsum.photos/seed/track1/300/300",
+      "plays": 15234,
+      "likes": 892,
+      "genre": "电子"
+    },
+    {
+      "id": 2,
+      "title": "霓虹之夜",
+      "artist": "电子梦想家",
+      "album": "未来之声",
+      "duration": 198,
+      "cover": "https://picsum.photos/seed/track2/300/300",
+      "plays": 9876,
+      "likes": 654,
+      "genre": "合成波"
+    },
+    {
+      "id": 3,
+      "title": "深海漫游",
+      "artist": "蓝色星球",
+      "album": "海洋交响曲",
+      "duration": 312,
+      "cover": "https://picsum.photos/seed/track3/300/300",
+      "plays": 23456,
+      "likes": 1234,
+      "genre": "氛围"
+    },
+    {
+      "id": 4,
+      "title": "城市脉搏",
+      "artist": "节拍机器",
+      "album": "都市律动",
+      "duration": 187,
+      "cover": "https://picsum.photos/seed/track4/300/300",
+      "plays": 8765,
+      "likes": 432,
+      "genre": "嘻哈"
+    },
+    {
+      "id": 5,
+      "title": "极光幻想",
+      "artist": "北极光",
+      "album": "冰原回响",
+      "duration": 276,
+      "cover": "https://picsum.photos/seed/track5/300/300",
+      "plays": 12345,
+      "likes": 789,
+      "genre": "新世纪"
+    },
+    {
+      "id": 6,
+      "title": "午夜列车",
+      "artist": "旅途者",
+      "album": "穿越时空",
+      "duration": 223,
+      "cover": "https://picsum.photos/seed/track6/300/300",
+      "plays": 6543,
+      "likes": 321,
+      "genre": "摇滚"
+    }
+  ]
+}

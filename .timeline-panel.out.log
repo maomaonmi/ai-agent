@@ -1,0 +1,9 @@
+
+> ai-agent@0.1.0 start
+> next start --port 3005
+
+  ▲ Next.js 15.0.0
+  - Local:        http://localhost:3005
+
+ ✓ Starting...
+ ✓ Ready in 471ms

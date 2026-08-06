@@ -1,0 +1,25 @@
+# FastAPI 核心依赖
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+
+# SSE 支持 (FastAPI 原生 StreamingResponse 已内置，sse-starlette 可选)
+# sse-starlette>=0.27.0
+
+# LangChain / LangGraph 依赖
+langgraph>=0.0.20
+langchain-core>=0.1.0
+langchain-openai>=0.0.5
+openai>=1.0.0
+
+# 数据验证
+pydantic>=2.0.0
+playwright>=1.47.0
+
+# Windows 伪控制台（PowerShell 集成终端）
+# Why: 在 Windows 上启动真实的 PTY 会话（等价于 VSCode 集成终端），比 subprocess.Popen + 管道能正确传递 ANSI 颜色、光标、PSReadLine 补全、清屏序列。
+# 非 Windows 平台可以忽略，由启动代码里自动跳过。
+pywinpty>=2.0.13; sys_platform == "win32"
+
+# Gradio (可选，如需保留本地测试界面)
+# gradio>=4.0.0

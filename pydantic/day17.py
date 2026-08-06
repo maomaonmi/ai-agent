@@ -1,0 +1,144 @@
+import json
+import os
+import re
+from typing import Annotated, TypedDict, List, Dict, Optional, Literal
+from pydantic import BaseModel, Field, model_validator
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+
+# ==========================================
+# 1. 定义数据结构（质检标准）
+# ==========================================
+class IndustrySchema(BaseModel):
+    """定义期望 AI 返回的 JSON 格式，不符此格式将被拦截"""
+    industry_name: str = Field(description="行业名称")
+    risk_level: int = Field(description="1-10的风险等级", ge=1, le=10)
+    tags: List[str] = Field(description="3-5个行业关键词")
+    
+    @model_validator(mode="after")
+    def check_tags_count(self):
+        if not (3 <= len(self.tags) <= 5):
+            raise ValueError(f"tags数量={len(self.tags)}不在 3-5 范围内，当前值：{self.tags}")
+        return self
+
+# ==========================================
+# 2. 状态定义 (State)
+# ==========================================
+class RobustState(TypedDict):
+    messages: Annotated[list[BaseMessage], add_messages]
+    # 存放解析好的数据
+    extracted_data: Optional[IndustrySchema]
+    # 存放错误信息，用于反馈给 AI 修改
+    error_log: str
+    # 记录重试次数，防止无限死循环
+    retry_count: int
+
+# ==========================================
+# 3. 节点逻辑 (Nodes)
+# ==========================================
+llm = ChatOpenAI(
+    model="deepseek-chat",
+    api_key=os.getenv("DEEPSEEK_API_KEY", "sk-6d31f71ec3514f6785e28fa00ea03199"),
+    base_url="https://api.deepseek.com",
+)
+
+def analyst_node(state: RobustState):
+    """分析师节点：根据反馈信息（如果有）进行创作或修正"""
+    print(f"\n[Node: Analyst] 📊 正在生成/修正报告... (第 {state.get('retry_count', 0)} 次尝试)")
+    
+    # 如果有错误信息，将其加入 Prompt
+    feedback = ""
+    if state.get("error_log"):
+        feedback = f"\n\n⚠️ 【重要：修正请求】你上次的输出存在以下错误，请务必修正：\n{state['error_log']}"
+    
+    schema_example = """{
+        "industry_name": "行业名称，字符串，例如 \\"AI 算力芯片\\"",
+        "risk_level": 风险等级，1-10 的整数，例如 8,
+        "tags": ["关键词1", "关键词2", "关键词3"]，3到5个字符串，例如 ["GPU", "AI芯片", "英伟达"]
+    }"""
+    system_prompt = f"""你是一个专业分析师。请分析行业并在 <report> 标签内写报告。
+    同时，在 <metadata> 标签内提供 JSON 数据。
+
+    【JSON 格式必须严格遵守】：
+    {schema_example}
+
+    {feedback}
+    """
+    
+    response = llm.invoke([SystemMessage(content=system_prompt)] + state["messages"])
+    return {"messages": [response], "retry_count": state.get("retry_count", 0) + 1}
+
+def validator_node(state: RobustState):
+    """质检员节点：负责解析并校验格式"""
+    print("[Node: Validator] ⚖️ 正在进行格式质检...")
+    last_msg = state["messages"][-1].content
+    
+    # 提取 JSON 字符串
+    metadata_match = re.search(r'<metadata>(.*?)</metadata>', last_msg, re.DOTALL)
+    
+    if not metadata_match:
+        err = "未找到 <metadata> 标签。请确保在 <metadata> 标签内只放 JSON,不要有任何说明文字。"
+        print(f"⚠️ Validator错误: {err}")
+        return {"error_log": err}
+        
+    json_str = re.sub(r'```json|```', '', metadata_match.group(1)).strip()
+    if not json_str or len(json_str) < 10:
+        err = "<metadata> 标签或内容为空或太短，请确保写出完整的 JSON 对象。"
+        print(f"⚠️ Validator错误: {err}")
+        return {"error_log": err}
+        
+    # 尝试通过 Pydantic 进行严格解析
+    try:
+        # Pydantic V2: parse_raw → model_validate_json
+        data = IndustrySchema.model_validate_json(json_str)
+        print(f"✅ Validator 通过: industry_name={data.industry_name}, risk_level={data.risk_level}, tags={data.tags}")
+        return {"extracted_data": data, "error_log": ""} # 清空错误信息，表示通过
+    except Exception as e:
+        # 把具体错误信息返回给 AI，让它知道哪里要改
+        err = f"JSON 格式或内容不合规: {str(e)}"
+        print(f"⚠️ Validator错误: {err}")
+        return {"error_log": err}
+
+# ==========================================
+# 4. 路由逻辑 (Router)
+# ==========================================
+def decision_router(state: RobustState) -> Literal["analyst", "__end__"]:
+    # 如果没有错误信息且已经拿到数据，或者重试次数过多，则结束
+    if not state.get("error_log") and state.get("extracted_data"):
+        print("✅ 质检通过，任务完成。")
+        return "__end__"
+    
+    if state.get("retry_count", 0) >= 3:
+        print("❌ 已达到最大重试次数，强制终止。")
+        return "__end__"
+    
+    print("🔄 质检未通过，打回修正...")
+    return "analyst"
+
+# ==========================================
+# 5. 构建图 (Graph)
+# ==========================================
+workflow = StateGraph(RobustState)
+workflow.add_node("analyst", analyst_node)
+workflow.add_node("validator", validator_node)
+
+workflow.add_edge(START, "analyst")
+workflow.add_edge("analyst", "validator")
+workflow.add_conditional_edges("validator", decision_router)
+
+app = workflow.compile()
+
+# ==========================================
+# 6. 测试运行
+# ==========================================
+if __name__ == "__main__":
+    # 我们故意不给具体行业，看它在约束下是否会出错并修正
+    test_query = "请分析当前全球 AI 算力芯片行业现状。"
+    result = app.invoke({"messages": [HumanMessage(content=test_query)], "retry_count": 0})
+    
+    if result.get("extracted_data"):
+        print(f"\n最终解析出的结构化数据: {result['extracted_data'].model_dump()}")
+    else:
+        print("\n未能获得有效的结构化数据。")

@@ -1,0 +1,154 @@
+ ⨯ ./src/components/ModelQuickSwitcher.tsx
+Error:   [31mx[0m Expected ']', got ';'
+    ,-[[36;1;4mD:\AI-Agent学习计划\AI-Agent study\frontend\ai-agent\src\components\ModelQuickSwitcher.tsx[0m:7:1]
+ [2m 4[0m | import { Bot, LoaderCircle } from 'lucide-react';
+ [2m 5[0m | import { getModelSettings, ModelSettings, saveModelSettings } from '../lib/api';
+ [2m 6[0m | 
+ [2m 7[0m | type Provider = ModelSettings['provider';
+    : [35;1m                                        ^[0m
+ [2m 8[0m | 
+ [2m 9[0m | // Why: GLM 同一 provider 下要支持 5/5.1/5.2/5V-Turbo 四个变体，
+ [2m10[0m | // 用 `glm:<model_id>` 作为复合值在同一个下拉框里编码，避免引入二级菜单。
+    `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/ModelQuickSwitcher.tsx
+./src/components/ChatInterface.tsx
+ ⨯ ./src/hooks/useCodeAutoRepair.ts
+Error:   [31mx[0m Expression expected
+     ,-[[36;1;4mD:\AI-Agent学习计划\AI-Agent study\frontend\ai-agent\src\hooks\useCodeAutoRepair.ts[0m:284:1]
+ [2m281[0m |         : [prompt, expect.any(Function) as unknown as (event: CodeGenerationEvent) => void, controller.signal];
+ [2m282[0m |       await generateRequest(
+ [2m283[0m |         prompt,
+ [2m284[0m |         if (event.type === 'agent_activity') {
+     : [35;1m        ^^[0m
+ [2m285[0m |           consumeAgentEvent(event);
+ [2m286[0m |           return;
+ [2m287[0m |         }
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/hooks/useCodeAutoRepair.ts
+./src/components/ChatInterface.tsx
+<w> [webpack.cache.PackFileCacheStrategy] Caching failed for pack: Error: ENOENT: no such file or directory, rename 'D:\AI-Agent学习计划\AI-Agent study\frontend\ai-agent\.next-dev\cache\webpack\client-development\1.pack.gz_' -> 'D:\AI-Agent学习计划\AI-Agent study\frontend\ai-agent\.next-dev\cache\webpack\client-development\1.pack.gz'
+<w> [webpack.cache.PackFileCacheStrategy] Caching failed for pack: Error: ENOENT: no such file or directory, rename 'D:\AI-Agent学习计划\AI-Agent study\frontend\ai-agent\.next-dev\cache\webpack\server-development\0.pack.gz_' -> 'D:\AI-Agent学习计划\AI-Agent study\frontend\ai-agent\.next-dev\cache\webpack\server-development\0.pack.gz'
+ ⨯ ./src/components/CodeWorkspace.tsx
+Error:   [31mx[0m Unexpected token `section`. Expected jsx identifier
+     ,-[[36;1;4mD:\AI-Agent学习计划\AI-Agent study\frontend\ai-agent\src\components\CodeWorkspace.tsx[0m:554:1]
+ [2m551[0m |   };
+ [2m552[0m | 
+ [2m553[0m |   return (
+ [2m554[0m |     <section
+     : [35;1m     ^^^^^^^[0m
+ [2m555[0m |       ref={workspaceRef}
+ [2m556[0m |       className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white fullscreen:h-screen fullscreen:rounded-none fullscreen:border-0"
+ [2m557[0m |     >
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/components/CodeWorkspace.tsx
+./src/components/ChatInterface.tsx
+ ⨯ ./src/hooks/useCodeAutoRepair.ts
+Error:   [31mx[0m Expected ',', got '}'
+     ,-[[36;1;4mD:\AI-Agent学习计划\AI-Agent study\frontend\ai-agent\src\hooks\useCodeAutoRepair.ts[0m:656:1]
+ [2m653[0m |         const next = previous.map((run) => {
+ [2m654[0m |           if (run.id !== detail.run_id) return run;
+ [2m655[0m |           changed = true;
+ [2m656[0m |           return { ...run, trace: { ...run.trace, steps: [...run.trace.steps, detail.step } };
+     : [35;1m                                                                                          ^[0m
+ [2m657[0m |         });
+ [2m658[0m |         return changed ? next : previous;
+ [2m659[0m |       });
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/hooks/useCodeAutoRepair.ts
+./src/components/ChatInterface.tsx
+ ⨯ ./src/hooks/useCodeAutoRepair.ts
+Error:   [31mx[0m Expected ',', got '}'
+     ,-[[36;1;4mD:\AI-Agent学习计划\AI-Agent study\frontend\ai-agent\src\hooks\useCodeAutoRepair.ts[0m:656:1]
+ [2m653[0m |         const next = previous.map((run) => {
+ [2m654[0m |           if (run.id !== detail.run_id) return run;
+ [2m655[0m |           changed = true;
+ [2m656[0m |           return { ...run, trace: { ...run.trace, steps: [...run.trace.steps, detail.step } };
+     : [35;1m                                                                                          ^[0m
+ [2m657[0m |         });
+ [2m658[0m |         return changed ? next : previous;
+ [2m659[0m |       });
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/hooks/useCodeAutoRepair.ts
+./src/components/ChatInterface.tsx
+ ⨯ ./src/hooks/useCodeAutoRepair.ts
+Error:   [31mx[0m Expected ',', got '}'
+     ,-[[36;1;4mD:\AI-Agent学习计划\AI-Agent study\frontend\ai-agent\src\hooks\useCodeAutoRepair.ts[0m:656:1]
+ [2m653[0m |         const next = previous.map((run) => {
+ [2m654[0m |           if (run.id !== detail.run_id) return run;
+ [2m655[0m |           changed = true;
+ [2m656[0m |           return { ...run, trace: { ...run.trace, steps: [...run.trace.steps, detail.step } };
+     : [35;1m                                                                                          ^[0m
+ [2m657[0m |         });
+ [2m658[0m |         return changed ? next : previous;
+ [2m659[0m |       });
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/hooks/useCodeAutoRepair.ts
+./src/components/ChatInterface.tsx
+ ⨯ ./src/hooks/useCodeAutoRepair.ts
+Error:   [31mx[0m Expected ',', got '}'
+     ,-[[36;1;4mD:\AI-Agent学习计划\AI-Agent study\frontend\ai-agent\src\hooks\useCodeAutoRepair.ts[0m:656:1]
+ [2m653[0m |         const next = previous.map((run) => {
+ [2m654[0m |           if (run.id !== detail.run_id) return run;
+ [2m655[0m |           changed = true;
+ [2m656[0m |           return { ...run, trace: { ...run.trace, steps: [...run.trace.steps, detail.step } };
+     : [35;1m                                                                                          ^[0m
+ [2m657[0m |         });
+ [2m658[0m |         return changed ? next : previous;
+ [2m659[0m |       });
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/hooks/useCodeAutoRepair.ts
+./src/components/ChatInterface.tsx
+ ⨯ ./src/hooks/useCodeAutoRepair.ts
+Error:   [31mx[0m Expected ',', got '}'
+     ,-[[36;1;4mD:\AI-Agent学习计划\AI-Agent study\frontend\ai-agent\src\hooks\useCodeAutoRepair.ts[0m:656:1]
+ [2m653[0m |         const next = previous.map((run) => {
+ [2m654[0m |           if (run.id !== detail.run_id) return run;
+ [2m655[0m |           changed = true;
+ [2m656[0m |           return { ...run, trace: { ...run.trace, steps: [...run.trace.steps, detail.step } };
+     : [35;1m                                                                                          ^[0m
+ [2m657[0m |         });
+ [2m658[0m |         return changed ? next : previous;
+ [2m659[0m |       });
+     `----
+
+Caused by:
+    Syntax Error
+
+Import trace for requested module:
+./src/hooks/useCodeAutoRepair.ts
+./src/components/ChatInterface.tsx

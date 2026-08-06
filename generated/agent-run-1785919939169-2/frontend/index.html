@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SoundWave - 动态音乐网站</title>
+  <link rel="stylesheet" href="styles.css">
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div class="particles" id="particles"></div>
+  <div class="gradient-bg"></div>
+  
+  <header class="header">
+    <div class="logo">
+      <span class="logo-icon">♪</span>
+      <span class="logo-text">SoundWave</span>
+    </div>
+    <nav class="nav">
+      <a href="#" class="nav-link active">发现</a>
+      <a href="#" class="nav-link">歌单</a>
+      <a href="#" class="nav-link">收藏</a>
+    </nav>
+  </header>
+
+  <main class="main">
+    <section class="hero">
+      <h1 class="hero-title">
+        <span class="title-line">感受音乐的</span>
+        <span class="title-line highlight">无限魅力</span>
+      </h1>
+      <p class="hero-subtitle">探索海量音乐，让旋律点亮你的每一天</p>
+    </section>
+
+    <section class="visualizer-section">
+      <div class="visualizer-container">
+        <canvas id="visualizer" class="visualizer"></canvas>
+        <div class="glow-ring"></div>
+      </div>
+      <div class="current-track" id="currentTrack">
+        <div class="track-cover-wrapper">
+          <img src="" alt="" class="track-cover" id="trackCover">
+          <div class="cover-glow"></div>
+        </div>
+        <div class="track-info">
+          <h2 class="track-title" id="trackTitle">选择一首歌曲</h2>
+          <p class="track-artist" id="trackArtist">开始你的音乐之旅</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="player-section">
+      <div class="player-controls">
+        <button class="control-btn" id="prevBtn" title="上一首">
+          <svg viewBox="0 0 24 24"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+        </button>
+        <button class="control-btn play-btn" id="playBtn" title="播放">
+          <svg class="play-icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+          <svg class="pause-icon" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+        </button>
+        <button class="control-btn" id="nextBtn" title="下一首">
+          <svg viewBox="0 0 24 24"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+        </button>
+      </div>
+      <div class="progress-container">
+        <span class="time" id="currentTime">0:00</span>
+        <div class="progress-bar" id="progressBar">
+          <div class="progress-fill" id="progressFill"></div>
+          <div class="progress-handle" id="progressHandle"></div>
+        </div>
+        <span class="time" id="totalTime">0:00</span>
+      </div>
+      <div class="volume-container">
+        <svg class="volume-icon" viewBox="0 0 24 24"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+        <div class="volume-bar" id="volumeBar">
+          <div class="volume-fill" id="volumeFill"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="tracks-section">
+      <h3 class="section-title">热门歌曲</h3>
+      <div class="tracks-grid" id="tracksGrid"></div>
+    </section>
+  </main>
+
+  <div class="audio-eq">
+    <div class="eq-bar"></div>
+    <div class="eq-bar"></div>
+    <div class="eq-bar"></div>
+    <div class="eq-bar"></div>
+    <div class="eq-bar"></div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

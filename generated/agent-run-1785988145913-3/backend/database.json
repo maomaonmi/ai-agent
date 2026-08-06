@@ -1,0 +1,31 @@
+{
+  "categories": [
+    {"id": "electronics", "name": "数码电子"},
+    {"id": "fashion", "name": "时尚服饰"},
+    {"id": "home", "name": "家居生活"},
+    {"id": "beauty", "name": "美妆护肤"},
+    {"id": "sports", "name": "运动户外"},
+    {"id": "food", "name": "食品饮料"}
+  ],
+  "products": [
+    {"id": 1, "name": "无线降噪耳机 Pro", "description": "采用先进的主动降噪技术，40小时超长续航，Hi-Res认证音质，佩戴舒适轻盈，适合通勤和旅行使用。", "price": 899, "category_id": "electronics", "stock": 50, "rating": 4.8},
+    {"id": 2, "name": "超薄笔记本电脑", "description": "14英寸2.8K OLED屏幕，第13代酷睿处理器，16GB内存，512GB固态硬盘，仅重1.2kg。", "price": 5999, "category_id": "electronics", "stock": 20, "rating": 4.7},
+    {"id": 3, "name": "智能手表 Ultra", "description": "钛合金表壳，蓝宝石玻璃镜面，支持100+运动模式，血氧心率监测，14天超长续航。", "price": 2499, "category_id": "electronics", "stock": 35, "rating": 4.6},
+    {"id": 4, "name": "轻奢羊绒大衣", "description": "100%纯羊绒面料，经典双排扣设计，修身剪裁，手感柔软细腻，秋冬必备单品。", "price": 1680, "category_id": "fashion", "stock": 15, "rating": 4.9},
+    {"id": 5, "name": "复古牛仔夹克", "description": "日本进口丹宁面料，经典水洗做旧工艺，宽松版型，男女同款，百搭时尚。", "price": 459, "category_id": "fashion", "stock": 40, "rating": 4.5},
+    {"id": 6, "name": "真皮手提包", "description": "头层牛皮材质，精致五金配件，大容量多隔层设计，适合通勤和日常使用。", "price": 1280, "category_id": "fashion", "stock": 25, "rating": 4.7},
+    {"id": 7, "name": "北欧风落地灯", "description": "简约设计风格，三档色温调节，无极调光，大理石底座稳固不倒，营造温馨氛围。", "price": 368, "category_id": "home", "stock": 30, "rating": 4.4},
+    {"id": 8, "name": "记忆棉乳胶枕", "description": "泰国天然乳胶+记忆棉双芯设计，人体工学曲线，透气排湿，改善睡眠质量。", "price": 199, "category_id": "home", "stock": 100, "rating": 4.6},
+    {"id": 9, "name": "手冲咖啡壶套装", "description": "含手冲壶、滤杯、分享壶、温度计，304不锈钢材质，新手也能冲出好咖啡。", "price": 258, "category_id": "home", "stock": 45, "rating": 4.8},
+    {"id": 10, "name": "精华液修护套装", "description": "含烟酰胺精华液30ml+修护面霜50ml，改善暗沉，修护屏障，适合敏感肌使用。", "price": 328, "category_id": "beauty", "stock": 60, "rating": 4.5},
+    {"id": 11, "name": "丝绒唇釉礼盒", "description": "6色热门色号组合，丝绒雾面质地，持久不脱色，显白不挑肤色，送礼自用皆宜。", "price": 189, "category_id": "beauty", "stock": 80, "rating": 4.7},
+    {"id": 12, "name": "防晒隔离霜 SPF50+", "description": "清爽水感质地，不假白不闷痘，SPF50+ PA++++高倍防护，适合全天候使用。", "price": 149, "category_id": "beauty", "stock": 120, "rating": 4.4},
+    {"id": 13, "name": "碳纤维公路自行车", "description": "全碳纤维车架，Shimano 105变速套件，液压碟刹，仅重7.8kg，竞速与长途皆宜。", "price": 4599, "category_id": "sports", "stock": 10, "rating": 4.9},
+    {"id": 14, "name": "专业瑜伽垫", "description": "6mm加厚TPE材质，双面防滑纹理，环保无异味，附赠收纳带，居家健身房必备。", "price": 128, "category_id": "sports", "stock": 200, "rating": 4.3},
+    {"id": 15, "name": "户外冲锋衣", "description": "三合一可拆卸设计，GORE-TEX防水透气面料，防风保暖，适合徒步登山等户外活动。", "price": 899, "category_id": "sports", "stock": 35, "rating": 4.6},
+    {"id": 16, "name": "精品挂耳咖啡", "description": "埃塞俄比亚耶加雪菲产区，中浅烘焙，花果香气，每盒10片独立包装，方便快捷。", "price": 89, "category_id": "food", "stock": 300, "rating": 4.5},
+    {"id": 17, "name": "有机坚果混合装", "description": "含巴旦木、腰果、核桃、夏威夷果，低温烘焙保留营养，无添加，500g大包装。", "price": 68, "category_id": "food", "stock": 150, "rating": 4.4},
+    {"id": 18, "name": "日式抹茶粉", "description": "宇治产地直供，石磨研磨工艺，色泽翠绿，茶香浓郁，可用于冲饮和烘焙。", "price": 118, "category_id": "food", "stock": 90, "rating": 4.7}
+  ],
+  "cart": []
+}

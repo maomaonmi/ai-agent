@@ -1,0 +1,159 @@
+
+> ai-agent@0.1.0 dev:webpack
+> next dev --hostname 127.0.0.1 --port 3000
+
+  ▲ Next.js 15.0.0
+  - Local:        http://127.0.0.1:3000
+  - Network:      http://127.0.0.1:3000
+  - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 2.7s
+ ○ Compiling / ...
+ ✓ Compiled / in 3.9s (1410 modules)
+ GET / 200 in 4253ms
+ ✓ Compiled in 477ms (614 modules)
+ ✓ Compiled in 400ms (1336 modules)
+ GET / 200 in 47ms
+ GET / 200 in 128ms
+ ✓ Compiled in 455ms (1336 modules)
+ GET / 200 in 39ms
+ GET / 200 in 8ms
+ ✓ Compiled in 238ms (1336 modules)
+ GET / 200 in 36ms
+ GET / 200 in 11ms
+ ✓ Compiled in 443ms (1336 modules)
+ GET / 200 in 58ms
+ GET / 200 in 19ms
+ ✓ Compiled in 240ms (1336 modules)
+ GET / 200 in 23ms
+ GET / 200 in 12ms
+ ✓ Compiled in 256ms (1336 modules)
+ GET / 200 in 23ms
+ GET / 200 in 7ms
+ ✓ Compiled in 421ms (1344 modules)
+ GET / 200 in 24ms
+ GET / 200 in 9ms
+ ✓ Compiled in 299ms (1344 modules)
+ GET / 200 in 30ms
+ GET / 200 in 22ms
+ GET / 200 in 97ms
+ ✓ Compiled in 346ms (1344 modules)
+ GET / 200 in 40ms
+ GET / 200 in 11ms
+ GET / 200 in 7ms
+ ✓ Compiled in 470ms (1344 modules)
+ GET / 200 in 40ms
+ GET / 200 in 12ms
+ GET / 200 in 9ms
+ ✓ Compiled in 653ms (1344 modules)
+ GET / 200 in 51ms
+ GET / 200 in 15ms
+ GET / 200 in 11ms
+ ✓ Compiled in 349ms (1352 modules)
+ GET / 200 in 27ms
+ GET / 200 in 13ms
+ GET / 200 in 8ms
+ GET / 200 in 102ms
+ GET / 200 in 68ms
+ ✓ Compiled in 735ms (1352 modules)
+ ✓ Compiled in 354ms (1352 modules)
+ ✓ Compiled in 461ms (1352 modules)
+ ✓ Compiled in 391ms (1352 modules)
+ ✓ Compiled in 1047ms (1352 modules)
+ ✓ Compiled in 609ms (1352 modules)
+ ✓ Compiled in 760ms (1338 modules)
+ ✓ Compiled in 310ms (1338 modules)
+ ✓ Compiled in 234ms (1338 modules)
+ ✓ Compiled in 571ms (1352 modules)
+ ✓ Compiled in 459ms (1352 modules)
+ ✓ Compiled in 409ms (1352 modules)
+ ✓ Compiled in 701ms (1352 modules)
+ ✓ Compiled in 412ms (1352 modules)
+ ✓ Compiled in 458ms (1352 modules)
+ ✓ Compiled in 522ms (1352 modules)
+ ✓ Compiled in 466ms (1352 modules)
+ ✓ Compiled in 421ms (1352 modules)
+ ✓ Compiled in 455ms (1352 modules)
+ ✓ Compiled in 428ms (1352 modules)
+ ✓ Compiled in 647ms (1352 modules)
+ ✓ Compiled in 386ms (1352 modules)
+ ✓ Compiled in 535ms (1352 modules)
+ ✓ Compiled in 391ms (1352 modules)
+ ✓ Compiled in 1134ms (1352 modules)
+ ✓ Compiled in 432ms (1352 modules)
+ ✓ Compiled in 391ms (1352 modules)
+ ✓ Compiled in 378ms (1352 modules)
+ ✓ Compiled in 431ms (1352 modules)
+ ✓ Compiled in 386ms (1352 modules)
+ ✓ Compiled in 395ms (1352 modules)
+ ✓ Compiled in 530ms (1352 modules)
+ ✓ Compiled in 459ms (1352 modules)
+ ✓ Compiled in 333ms (1352 modules)
+ ✓ Compiled in 342ms (1338 modules)
+ ✓ Compiled in 254ms (1338 modules)
+ ✓ Compiled in 290ms (1338 modules)
+ ✓ Compiled in 262ms (1338 modules)
+ ✓ Compiled in 284ms (1338 modules)
+ ✓ Compiled in 280ms (1338 modules)
+ ✓ Compiled in 428ms (1352 modules)
+ ✓ Compiled in 364ms (1352 modules)
+ ✓ Compiled in 335ms (1352 modules)
+ ✓ Compiled in 441ms (1352 modules)
+ ✓ Compiled in 403ms (1352 modules)
+ ✓ Compiled in 472ms (1352 modules)
+ ✓ Compiled in 423ms (1352 modules)
+ ✓ Compiled in 402ms (1352 modules)
+ ✓ Compiled in 462ms (1352 modules)
+ ✓ Compiled in 417ms (1352 modules)
+ ✓ Compiled in 424ms (1352 modules)
+ ✓ Compiled in 400ms (1352 modules)
+ ✓ Compiled in 757ms (1352 modules)
+ ✓ Compiled in 435ms (1352 modules)
+ ✓ Compiled in 473ms (1352 modules)
+ ✓ Compiled in 468ms (1352 modules)
+ ✓ Compiled in 586ms (1352 modules)
+ ✓ Compiled in 369ms (1352 modules)
+ ✓ Compiled in 377ms (1352 modules)
+ ✓ Compiled in 425ms (1352 modules)
+ ✓ Compiled in 361ms (1352 modules)
+ ✓ Compiled in 462ms (1356 modules)
+ ✓ Compiled in 436ms (1356 modules)
+ ✓ Compiled in 361ms (1342 modules)
+ ✓ Compiled in 553ms (1356 modules)
+ ✓ Compiled in 360ms (1356 modules)
+ ✓ Compiled in 394ms (1356 modules)
+ ✓ Compiled in 439ms (1356 modules)
+ ✓ Compiled in 479ms (1358 modules)
+ ✓ Compiled in 401ms (1358 modules)
+ ✓ Compiled in 416ms (1358 modules)
+ ✓ Compiled in 350ms (1344 modules)
+ ✓ Compiled in 225ms (1344 modules)
+ ✓ Compiled in 330ms (1358 modules)
+ ✓ Compiled in 441ms (1358 modules)
+ ✓ Compiled in 211ms (1344 modules)
+ ✓ Compiled in 371ms (1344 modules)
+ ✓ Compiled in 679ms (1358 modules)
+ ✓ Compiled in 393ms (1344 modules)
+ ✓ Compiled in 3.1s (625 modules)
+ ✓ Compiled in 336ms (625 modules)
+ ✓ Compiled in 832ms (1344 modules)
+ ✓ Compiled in 639ms (1344 modules)
+ ✓ Compiled in 596ms (1344 modules)
+ ✓ Compiled in 436ms (1344 modules)
+ ✓ Compiled in 457ms (1344 modules)
+ ✓ Compiled in 358ms (1344 modules)
+ ✓ Compiled in 368ms (1344 modules)
+ ✓ Compiled in 365ms (1344 modules)
+ ✓ Compiled in 474ms (1344 modules)
+ ✓ Compiled in 456ms (1344 modules)
+ ✓ Compiled in 413ms (1344 modules)
+ ✓ Compiled in 369ms (1344 modules)
+ ✓ Compiled in 847ms (1358 modules)
+ ✓ Compiled in 651ms (1358 modules)
+ ✓ Compiled in 593ms (1358 modules)
+ ✓ Compiled in 589ms (1358 modules)
+ ✓ Compiled in 632ms (1358 modules)
+ ✓ Compiled in 571ms (1355 modules)
+ ✓ Compiled in 472ms (1369 modules)
+ ✓ Compiled in 458ms (1369 modules)
