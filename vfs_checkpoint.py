@@ -32,6 +32,13 @@ class VFSCheckpointStore:
     """
 
     COMPRESS_THRESHOLD = 100_000  # 100KB: payloads at/above this size get zlib-compressed.
+    MIN_SAVE_INTERVAL = 5.0       # R3: 同会话两次自动 checkpoint 的最小间隔（秒）。
+    MAX_KEEP = 10                 # R3: 单会话最多保留的 checkpoint 数。
+
+    # 触发原因白名单：manual / auto / pre_patch / post_patch。
+    # Why 仅自动类限频: manual（用户手动快照）与 pre_patch（补丁前安全网）必须落盘，
+    # 限频会导致用户困惑或丢恢复点；仅 auto/post_patch 高频触发需要节流。
+    _RATE_LIMITED_REASONS = frozenset({"auto", "post_patch"})
 
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
@@ -113,11 +120,53 @@ class VFSCheckpointStore:
                 f"got: {trigger_reason!r}"
             )
 
+        now = time.time()
         json_bytes = json.dumps(vfs, ensure_ascii=False).encode("utf-8")
-
         if len(json_bytes) >= self.COMPRESS_THRESHOLD:
             blob = zlib.compress(json_bytes, level=6)
             is_compressed = 1
+        else:
+            blob = json_bytes
+            is_compressed = 0
+
+        # R3 限频：仅自动类（auto/post_patch）在最小间隔内重复触发时，
+        # 不新增行，而是用最新 VFS 覆盖最近一条【自动类】checkpoint（upsert）。
+        # Why 覆盖而非跳过: 跳过会丢失最新状态的恢复点（连续两次快速 patch 时
+        # 第二次的 VFS 丢失）；覆盖既控制行数增长，又保证 restore 永远拿到最新 VFS。
+        # Why 查询限定自动类: 最近一条若是 pre_patch（补丁前安全网）或 manual（用户手动
+        # 快照），合并会覆盖安全网内容；限定 trigger_reason IN 自动类后，安全网行对
+        # 限频逻辑不可见，永不被 clobber。合并时同步刷新 trigger_reason，保持语义一致。
+        if trigger_reason in self._RATE_LIMITED_REASONS:
+            with self._connection() as connection:
+                row = connection.execute(
+                    """
+                    SELECT checkpoint_id, created_at FROM vfs_checkpoints
+                    WHERE session_id = ?
+                      AND trigger_reason IN ('auto', 'post_patch')
+                    ORDER BY created_at DESC, checkpoint_id DESC
+                    LIMIT 1
+                    """,
+                    (session_id,),
+                ).fetchone()
+                if row is not None and (now - float(row["created_at"])) < self.MIN_SAVE_INTERVAL:
+                    connection.execute(
+                        """
+                        UPDATE vfs_checkpoints
+                        SET run_id = ?, vfs_blob = ?, is_compressed = ?,
+                            trigger_reason = ?, created_at = ?
+                        WHERE checkpoint_id = ?
+                        """,
+                        (run_id, blob, is_compressed, trigger_reason, now, int(row["checkpoint_id"])),
+                    )
+                    logger.debug(
+                        "VFS checkpoint coalesced into id=%d (interval<%.1fs) session=%s",
+                        int(row["checkpoint_id"]),
+                        self.MIN_SAVE_INTERVAL,
+                        session_id,
+                    )
+                    return int(row["checkpoint_id"])
+
+        if len(json_bytes) >= self.COMPRESS_THRESHOLD:
             logger.debug(
                 "VFS checkpoint compressed: %d -> %d bytes (session=%s run=%s)",
                 len(json_bytes),
@@ -125,11 +174,7 @@ class VFSCheckpointStore:
                 session_id,
                 run_id,
             )
-        else:
-            blob = json_bytes
-            is_compressed = 0
 
-        now = time.time()
         with self._connection() as connection:
             cursor = connection.execute(
                 """
@@ -148,6 +193,13 @@ class VFSCheckpointStore:
             trigger_reason,
             bool(is_compressed),
         )
+
+        # R3 限量：写入后顺带回收，单会话最多保留 MAX_KEEP 个，防表无限膨胀。
+        try:
+            self.cleanup_old_checkpoints(session_id, keep=self.MAX_KEEP)
+        except Exception:
+            logger.exception("VFS checkpoint cleanup failed session=%s", session_id)
+
         return checkpoint_id
 
     def restore_vfs(self, session_id: str) -> tuple[dict[str, str], int] | None:

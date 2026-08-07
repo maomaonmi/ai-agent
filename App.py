@@ -123,24 +123,6 @@ def _skill_matched_events(matched_skills: list[Any]) -> list[str]:
     return events
 
 
-def _extract_topics(text: str) -> list[str]:
-    """从文本中简单提取关键词作为对话摘要 topics。
-
-    Why: 零 LLM 开销，纯字符串匹配。匹配常见技术关键词，最多 5 个。
-    """
-    if not text:
-        return []
-    keywords = []
-    for kw in [
-        "修改", "新增", "删除", "修复", "重构", "全栈", "前端",
-        "后端", "API", "数据库", "文件", "样式", "功能", "页面", "组件",
-        "路由", "配置", "认证", "权限", "部署", "测试", "性能",
-    ]:
-        if kw in text:
-            keywords.append(kw)
-    return keywords[:5]
-
-
 def _record_patch_success(
     *,
     memory_engine: Any,
@@ -197,7 +179,31 @@ def _record_patch_success(
                     "after_file_count": len(after_vfs),
                 },
             )
-            # 2. VFS checkpoint（post_patch 触发）
+            # 2a. VFS checkpoint（§5.3 pre_patch 触发）：补丁前安全网。
+            # Why 放在成功落账点而非补丁应用前: 内存中 apply_edit_operations 是原子的，
+            # 崩溃窗口可忽略；真正的回滚需求是"补丁成功但结果不理想"——此处保存
+            # before_vfs 即可提供撤销锚点。pre_patch 属 manual 类，豁免 R3 限频，
+            # 且限频合并查询已限定自动类，安全网行永不被 post_patch 覆盖。
+            # 仅在 before 与 after 确有差异时保存（纯生成/无前置状态场景跳过）。
+            if (
+                vfs_store is not None
+                and before_vfs is not None
+                and before_vfs != after_vfs
+            ):
+                try:
+                    vfs_store.save_checkpoint(
+                        session_id=session_id,
+                        run_id=f"{safe_run_id}-pre",
+                        vfs=before_vfs,
+                        trigger_reason="pre_patch",
+                    )
+                except Exception:
+                    logger.exception(
+                        "[memory] save_pre_patch_checkpoint 失败 sid=%s run=%s",
+                        session_id,
+                        safe_run_id,
+                    )
+            # 2b. VFS checkpoint（post_patch 触发）
             if vfs_store is not None:
                 try:
                     vfs_store.save_checkpoint(
@@ -244,19 +250,18 @@ def _record_patch_success(
                     session_id,
                 )
 
-        # 5. 对话摘要（第 3 层记忆）：复用现有 summary 文本，零额外 LLM 调用。
-        # Why: 每次 patch 成功后，把模型生成的 summary 存为结构化摘要，
-        # 供前端 MemoryPanel 的「摘要」Tab 展示，也供 build_context 读取。
-        if summary:
-            try:
-                topics = _extract_topics(f"{instruction} {summary}")
-                events = memory_engine.query_events(session_id, limit=10000)
-                turn = len(events)
-                memory_engine.save_summary(session_id, turn, turn, summary, topics)
-            except Exception:
-                logger.exception(
-                    "[memory] save_summary 失败 sid=%s", session_id,
-                )
+        # 5. 对话摘要（§5.1 双阈值触发）：未摘要 ≥8 轮或 >6000 token 时压缩早期对话。
+        # Why 替换原"每次 patch 存单条摘要": 逐条存储使最近摘要 turn_end 恒等于当前
+        # 事件总数，双阈值永不触发，且逐条摘要不省 token。maybe_summarize 内部保留
+        # 最近 4 条事件原文（滑动窗口层覆盖近期上下文），仅压缩早期对话；
+        # 默认走 R1 降级截断（零 LLM 依赖、不阻塞 SSE 主链路），上层可注入
+        # llm_compress 闭包获得 LLM 压缩质量。
+        try:
+            memory_engine.maybe_summarize(session_id)
+        except Exception:
+            logger.exception(
+                "[memory] maybe_summarize 失败 sid=%s", session_id,
+            )
     except Exception:
         logger.exception(
             "[memory] _record_patch_success 整体失败 sid=%s run=%s",

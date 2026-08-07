@@ -31,6 +31,39 @@ _PROFILE_TOKEN_BUDGET: int = 500
 _SUMMARY_TOKEN_BUDGET: int = 800
 _WINDOW_TOKEN_BUDGET: int = 2000
 
+# §5.1 摘要双阈值触发（PLAN 决策 D：N=8轮 + Token>6000）
+SUMMARY_TURN_THRESHOLD: int = 8        # 未摘要轮数（ai_reply 事件数）≥ 8 触发
+SUMMARY_TOKEN_THRESHOLD: int = 6000    # 未摘要内容估算 token > 6000 触发
+# 压缩区间保留最近 4 条事件原文（约 2 轮），近期上下文由滑动窗口层覆盖，
+# 避免摘要与窗口重复占用 token 预算。
+_SUMMARY_KEEP_RECENT_EVENTS: int = 4
+# R1 降级：LLM 压缩不可用/失败时，截断保留摘要素材前 2000 字符，主流程零感知。
+_SUMMARY_FALLBACK_CHARS: int = 2000
+# 摘要素材扫描窗口：与 query_events 的防御性 clamp 对齐，turn 序号基于该窗口计数。
+_SUMMARY_EVENT_SCAN_LIMIT: int = 500
+
+
+def _extract_summary_topics(text: str) -> list[str]:
+    """轻量话题提取：取长度 ≥2 的中英词元前 5 个（去重保序）。
+
+    Why 引擎内置而不复用 App._extract_topics：App.py 是调用方层级，引擎反向依赖
+    会造成循环 import；此处仅用于摘要 topics 标注，精度要求低，重复 ~10 行可接受。
+    """
+    import re
+
+    tokens = re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z][A-Za-z0-9_+-]{1,}", text or "")
+    seen: set[str] = set()
+    topics: list[str] = []
+    for token in tokens:
+        lowered = token.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        topics.append(token)
+        if len(topics) >= 5:
+            break
+    return topics
+
 
 def _estimate_tokens(text: str) -> int:
     """粗略估算 token 数。
@@ -386,6 +419,108 @@ class MemoryEngine:
             "topics": topics,
             "created_at": row["created_at"],
         }
+
+    def maybe_summarize(
+        self,
+        session_id: str,
+        llm_compress: "object" = None,
+    ) -> bool:
+        """§5.1 双阈值触发摘要压缩：未摘要 ≥8 轮 或 未摘要内容 >6000 token 时执行。
+
+        Why 双阈值（PLAN 决策 D）：纯轮数触发对突发长对话反应滞后，纯 token 触发
+        需要逐轮精确计数；两者取或，兼顾定期清理与突发膨胀。
+
+        压缩源：raw_event_ledger 中未被最近摘要覆盖的事件（turn 序号 = 事件在
+        最近 500 条扫描窗口内的 1-based 序号，与既有摘要的 turn_end 口径一致）。
+        压缩区间保留最近 4 条事件原文（约 2 轮）——近期上下文由滑动窗口层供给，
+        摘要只覆盖"早期对话"，避免两层重复占预算。
+
+        R1 容错：llm_compress 失败最多重试 3 次，随后降级为截断素材前 2000 字符；
+        任何异常仅 log 返回 False，绝不抛出阻塞主流程。
+
+        Args:
+            session_id: 目标会话。
+            llm_compress: 可选 Callable[[str], str]，输入摘要素材返回压缩文本；
+                None 时直接走降级截断（主链路默认，零 LLM 依赖；上层可注入真实
+                LLM 客户端闭包以获得更高质量摘要）。
+
+        Returns:
+            True = 本次触发并落库了一条摘要；False = 未达阈值或失败。
+        """
+        if not session_id:
+            return False
+        try:
+            # ASC 事件序列（query_events 返回 DESC，反转；turn 序号基于此窗口）。
+            events_desc = self.query_events(session_id, limit=_SUMMARY_EVENT_SCAN_LIMIT)
+            events = list(reversed(events_desc))
+            total = len(events)
+            latest = self.get_recent_summary(session_id)
+            covered = int(latest["turn_end"]) if latest else 0
+            if total - covered < _SUMMARY_KEEP_RECENT_EVENTS + 1:
+                return False  # 事件不足，保留窗口外无可压缩区间
+
+            unsummarized = events[covered:]
+            turns = sum(1 for e in unsummarized if e["event_type"] == "ai_reply")
+            tokens = sum(
+                _estimate_tokens(json.dumps(e["event_data"], ensure_ascii=False))
+                for e in unsummarized
+            )
+            if turns < SUMMARY_TURN_THRESHOLD and tokens <= SUMMARY_TOKEN_THRESHOLD:
+                return False
+
+            compress_end = total - _SUMMARY_KEEP_RECENT_EVENTS  # 1-based turn_end
+            digest = self._build_summary_digest(events[covered:compress_end])
+            if not digest.strip():
+                return False
+
+            summary_text = self._compress_digest(digest, llm_compress)
+            topics = _extract_summary_topics(summary_text)
+            return self.save_summary(
+                session_id,
+                turn_start=covered + 1,
+                turn_end=compress_end,
+                summary_text=summary_text,
+                topics=topics,
+            )
+        except Exception:
+            self._logger.exception("maybe_summarize 失败: sid=%s", session_id)
+            return False
+
+    @staticmethod
+    def _build_summary_digest(events: list[dict[str, object]]) -> str:
+        """把待压缩事件序列化为"指令→结果"摘要素材（逐行）。"""
+        lines: list[str] = []
+        for event in events:
+            data = event.get("event_data")
+            if not isinstance(data, dict):
+                continue
+            etype = event.get("event_type")
+            if etype == "user_input":
+                lines.append(f"用户: {str(data.get('text', ''))[:200]}")
+            elif etype == "ai_reply":
+                instruction = str(data.get("instruction", ""))[:200]
+                summary = str(data.get("summary", ""))[:300]
+                lines.append(f"指令: {instruction} → 结果: {summary}")
+            elif etype == "vfs_change":
+                files = data.get("changed_files")
+                if isinstance(files, list) and files:
+                    lines.append("变更文件: " + ", ".join(str(f) for f in files[:10]))
+        return "\n".join(lines)
+
+    def _compress_digest(self, digest: str, llm_compress: "object") -> str:
+        """LLM 压缩（3 次重试）→ 失败降级截断（R1）。"""
+        if callable(llm_compress):
+            for attempt in range(3):
+                try:
+                    compressed = llm_compress(digest)
+                    if isinstance(compressed, str) and compressed.strip():
+                        return compressed.strip()
+                except Exception:
+                    self._logger.warning(
+                        "llm_compress 第 %d 次失败", attempt + 1, exc_info=True
+                    )
+        # 降级：保留素材前 2000 字符（信息密度最高的前部）。
+        return digest[:_SUMMARY_FALLBACK_CHARS]
 
     # ==================================================================
     # 第 4 层：滑动窗口（无存储，纯截取）

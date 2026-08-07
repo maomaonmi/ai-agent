@@ -111,13 +111,17 @@ def test_record_patch_success_with_large_vfs_saves_compressed_checkpoint(memory_
         skill_type="task_flow",
     )
 
+    # §5.3：before≠after → pre_patch 安全网 + post_patch 各 1 条（DESC：post 在前）
     checkpoints = vfs_store.list_checkpoints(sid)
-    assert len(checkpoints) == 1
+    assert len(checkpoints) == 2
     assert checkpoints[0]["is_compressed"] is True
     assert checkpoints[0]["trigger_reason"] == "post_patch"
     assert checkpoints[0]["run_id"] == "run-large-1"
+    assert checkpoints[1]["trigger_reason"] == "pre_patch"
+    assert checkpoints[1]["run_id"] == "run-large-1-pre"
+    assert checkpoints[1]["is_compressed"] is False  # before VFS 较小，不压缩
 
-    # 无损恢复
+    # 无损恢复（最新 = post_patch）
     restored = vfs_store.restore_vfs(sid)
     assert restored is not None
     restored_vfs, restored_id = restored
@@ -577,11 +581,13 @@ def test_fullstack_patch_stream_invokes_memory_hooks_on_success(memory_stack):
     ]
     assert len(code_updates) >= 1, "应有 done=True 的 code_update 事件"
 
-    # 2. VFS checkpoint 已落盘（post_patch 触发）
+    # 2. VFS checkpoint 已落盘（§5.3：pre_patch 安全网 + post_patch 各 1 条）
     checkpoints = vfs_store.list_checkpoints(sid)
-    assert len(checkpoints) == 1, "应有 1 条 post_patch checkpoint"
+    assert len(checkpoints) == 2, "应有 pre_patch + post_patch 共 2 条 checkpoint"
     assert checkpoints[0]["trigger_reason"] == "post_patch"
     assert checkpoints[0]["run_id"] == "run-e2e-1"
+    assert checkpoints[1]["trigger_reason"] == "pre_patch"
+    assert checkpoints[1]["run_id"] == "run-e2e-1-pre"
 
     # 3. 事件账本含 ai_reply + vfs_change
     ledger_events = engine.query_events(sid, limit=10)
@@ -672,10 +678,20 @@ def test_fullstack_patch_stream_skill_threshold_after_two_successful_patches(mem
     assert len(matched) == 1
     assert matched[0].trigger_condition == instruction
 
-    # VFS checkpoints 应有 2 条
+    # VFS checkpoints：2 次 patch × (pre_patch + post_patch) − R3 合并 1 条 = 3 条。
+    # Why: 两次 run 间隔 < MIN_SAVE_INTERVAL(5s)，第 2 次 post_patch 被合并进第 1 次
+    # 的 post_patch 行（覆盖为最新 VFS）；pre_patch 属安全网豁免限频，各留 1 条。
     checkpoints = vfs_store.list_checkpoints(sid, limit=50)
-    assert len(checkpoints) == 2
-    assert all(c["trigger_reason"] == "post_patch" for c in checkpoints)
+    assert len(checkpoints) == 3
+    post_rows = [c for c in checkpoints if c["trigger_reason"] == "post_patch"]
+    pre_rows = [c for c in checkpoints if c["trigger_reason"] == "pre_patch"]
+    assert len(post_rows) == 1
+    assert len(pre_rows) == 2
+    # 合并后的 post_patch 内容为第 2 次的最新 VFS（restore 永远拿最新状态）
+    restored = vfs_store.restore_vfs(sid)
+    assert restored is not None
+    assert restored[0] == vfs_after_2
+    assert post_rows[0]["run_id"] == "run-skill-e2e-2"
 
 
 def test_fullstack_patch_stream_compressed_checkpoint_for_large_vfs(memory_stack):
@@ -730,11 +746,13 @@ def test_fullstack_patch_stream_compressed_checkpoint_for_large_vfs(memory_stack
         for e in events
     ), "应有 done=True 的 code_update 事件"
 
-    # checkpoint 应被压缩
+    # checkpoint 应被压缩（§5.3：pre_patch + post_patch 均为大 VFS，均压缩）
     checkpoints = vfs_store.list_checkpoints(sid)
-    assert len(checkpoints) == 1
+    assert len(checkpoints) == 2
     assert checkpoints[0]["is_compressed"] is True, "大 VFS checkpoint 应触发 zlib 压缩"
     assert checkpoints[0]["trigger_reason"] == "post_patch"
+    assert checkpoints[1]["trigger_reason"] == "pre_patch"
+    assert checkpoints[1]["is_compressed"] is True
 
     # 无损恢复并验证补丁已应用
     restored = vfs_store.restore_vfs(sid)

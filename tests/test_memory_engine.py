@@ -128,6 +128,104 @@ def test_summary_roundtrip(setup):
     assert isinstance(summary["topics"], list)
 
 
+def test_maybe_summarize_below_threshold_noop(setup):
+    """§5.1：未达双阈值（<8 轮且 ≤6000 token）时不触发，无摘要落库。"""
+    sid = setup.session.session_id
+    engine = setup.engine
+
+    for i in range(3):
+        engine.record_event(sid, "ai_reply", {"instruction": f"指令{i}", "summary": f"结果{i}"})
+
+    assert engine.maybe_summarize(sid) is False
+    assert engine.get_recent_summary(sid) is None
+
+
+def test_maybe_summarize_turn_threshold_triggers(setup):
+    """§5.1：未摘要 ≥8 轮触发；压缩保留最近 4 条原文；二次调用幂等不重复。"""
+    sid = setup.session.session_id
+    engine = setup.engine
+
+    for i in range(8):
+        engine.record_event(
+            sid, "ai_reply", {"instruction": f"添加功能{i}", "summary": f"完成第{i}次修改"}
+        )
+
+    assert engine.maybe_summarize(sid) is True
+    summary = engine.get_recent_summary(sid)
+    assert summary is not None
+    # 8 条事件保留最近 4 条 → 压缩区间 [1, 4]
+    assert summary["turn_start"] == 1
+    assert summary["turn_end"] == 4
+    # 降级截断路径（未注入 llm_compress）：摘要来自摘要素材
+    assert "指令" in summary["summary_text"]
+    assert isinstance(summary["topics"], list)
+
+    # 幂等：已覆盖区间不重复压缩
+    assert engine.maybe_summarize(sid) is False
+    assert len(engine.get_all_summaries(sid)) == 1
+
+
+def test_maybe_summarize_token_threshold_triggers(setup):
+    """§5.1：轮数不足但内容 >6000 token 时触发（突发长对话场景）。"""
+    sid = setup.session.session_id
+    engine = setup.engine
+
+    # 3 轮（<8）但每条 summary 约 6250 token（25000 英文字符 / 4）
+    for i in range(3):
+        engine.record_event(sid, "ai_reply", {"instruction": f"指令{i}", "summary": "x" * 25_000})
+        engine.record_event(sid, "vfs_change", {"changed_files": [f"f{i}.txt"]})
+
+    assert engine.maybe_summarize(sid) is True
+    summary = engine.get_recent_summary(sid)
+    assert summary is not None
+    # 6 条事件保留最近 4 条 → 压缩区间 [1, 2]
+    assert summary["turn_end"] == 2
+
+
+def test_maybe_summarize_llm_compress_injected(setup):
+    """§5.1：注入 llm_compress 时使用 LLM 压缩结果作为摘要文本。"""
+    sid = setup.session.session_id
+    engine = setup.engine
+
+    for i in range(8):
+        engine.record_event(sid, "ai_reply", {"instruction": f"指令{i}", "summary": f"结果{i}"})
+
+    calls: list[str] = []
+
+    def fake_llm(digest: str) -> str:
+        calls.append(digest)
+        return "LLM 压缩后的结构化摘要"
+
+    assert engine.maybe_summarize(sid, llm_compress=fake_llm) is True
+    assert len(calls) == 1
+    assert "指令" in calls[0]  # 摘要素材含指令行
+    summary = engine.get_recent_summary(sid)
+    assert summary is not None
+    assert summary["summary_text"] == "LLM 压缩后的结构化摘要"
+
+
+def test_maybe_summarize_llm_failure_falls_back_to_truncation(setup):
+    """R1：llm_compress 连续失败（重试 3 次）后降级为截断素材，不抛异常。"""
+    sid = setup.session.session_id
+    engine = setup.engine
+
+    for i in range(8):
+        engine.record_event(sid, "ai_reply", {"instruction": f"指令{i}", "summary": f"结果{i}"})
+
+    attempts = {"count": 0}
+
+    def broken_llm(digest: str) -> str:
+        attempts["count"] += 1
+        raise RuntimeError("LLM 不可用")
+
+    assert engine.maybe_summarize(sid, llm_compress=broken_llm) is True
+    assert attempts["count"] == 3  # 重试 3 次后放弃
+    summary = engine.get_recent_summary(sid)
+    assert summary is not None
+    # 降级截断：非空且 ≤ 2000 字符
+    assert 0 < len(summary["summary_text"]) <= 2000
+
+
 def test_sliding_window(setup):
     """滑动窗口：尾部截取 K 条；空列表与 k<=0 返回空。"""
     sid = setup.session.session_id
@@ -251,7 +349,7 @@ def test_vfs_compression(setup):
     big_vfs = {"large_file.txt": big_content, "other.txt": "小文件"}
 
     checkpoint_id = vfs_store.save_checkpoint(
-        sid, "run-big", big_vfs, trigger_reason="auto"
+        sid, "run-big", big_vfs, trigger_reason="manual"
     )
     assert checkpoint_id > 0
 
@@ -291,23 +389,80 @@ def test_vfs_small_no_compression(setup):
 
 
 def test_vfs_cleanup(setup):
-    """清理旧 checkpoint：写入 15 个，cleanup(keep=10) 删除 5 个。"""
+    """清理旧 checkpoint：写入 15 个（manual 不限频），自动回收后保留 MAX_KEEP。"""
     sid = setup.session.session_id
     vfs_store = setup.vfs_store
 
     for i in range(15):
         vfs_store.save_checkpoint(
-            sid, f"run-{i}", {f"file_{i}.txt": f"content_{i}"}, trigger_reason="auto"
+            sid, f"run-{i}", {f"file_{i}.txt": f"content_{i}"}, trigger_reason="manual"
         )
         time.sleep(0.02)
 
-    assert len(vfs_store.list_checkpoints(sid, limit=50)) == 15
-
-    deleted = vfs_store.cleanup_old_checkpoints(sid, keep=10)
-    assert deleted == 5
-
+    # save_checkpoint 内已按 MAX_KEEP(=10) 自动回收，无需手动 cleanup。
     remaining = vfs_store.list_checkpoints(sid, limit=50)
-    assert len(remaining) == 10
+    assert len(remaining) == vfs_store.MAX_KEEP
+
+
+def test_vfs_rate_limit_throttles_auto(setup):
+    """R3 限频：auto/post_patch 在 MIN_SAVE_INTERVAL 内重复写入被合并（覆盖而非新增）。
+
+    Why 覆盖语义: 跳过会丢失最新 VFS 恢复点；覆盖最近一条自动类 checkpoint 既控制
+    行数增长，又保证 restore_vfs 永远拿到最新状态。
+    """
+    sid = setup.session.session_id
+    vfs_store = setup.vfs_store
+
+    first = vfs_store.save_checkpoint(sid, "run-a", {"a.txt": "1"}, trigger_reason="auto")
+    assert first > 0
+    # 间隔 < 5s，第二次 auto 被合并到第一条（返回同一 checkpoint_id）。
+    second = vfs_store.save_checkpoint(sid, "run-b", {"a.txt": "2"}, trigger_reason="auto")
+    assert second == first
+    # 仅保留 1 条记录，且内容为最新 VFS。
+    checkpoints = vfs_store.list_checkpoints(sid)
+    assert len(checkpoints) == 1
+    assert checkpoints[0]["run_id"] == "run-b"
+    restored = vfs_store.restore_vfs(sid)
+    assert restored is not None
+    assert restored[0] == {"a.txt": "2"}
+
+
+def test_vfs_rate_limit_never_coalesces_manual_or_pre_patch(setup):
+    """R3 限频合并查询限定自动类：pre_patch/manual 安全网行永不被自动类写入覆盖。"""
+    sid = setup.session.session_id
+    vfs_store = setup.vfs_store
+
+    # 先落一条 pre_patch 安全网，紧跟着 post_patch 不得合并进它。
+    pre = vfs_store.save_checkpoint(sid, "run-pre", {"a.txt": "before"}, trigger_reason="pre_patch")
+    post = vfs_store.save_checkpoint(sid, "run-post", {"a.txt": "after"}, trigger_reason="post_patch")
+    assert post != pre
+    checkpoints = vfs_store.list_checkpoints(sid)
+    assert len(checkpoints) == 2
+    # DESC：post_patch 在前，pre_patch 安全网内容完好。
+    assert checkpoints[0]["trigger_reason"] == "post_patch"
+    assert checkpoints[1]["trigger_reason"] == "pre_patch"
+
+    # 再次 post_patch（间隔 < 5s）→ 合并进上一条 post_patch，pre_patch 仍不动。
+    post2 = vfs_store.save_checkpoint(sid, "run-post2", {"a.txt": "after2"}, trigger_reason="post_patch")
+    assert post2 == post
+    checkpoints = vfs_store.list_checkpoints(sid)
+    assert len(checkpoints) == 2
+    assert checkpoints[0]["run_id"] == "run-post2"
+    # pre_patch 内容仍是 before（未被 clobber）——恢复历史锚点完好。
+    history = vfs_store.list_checkpoints(sid, limit=10)
+    pre_row = next(c for c in history if c["trigger_reason"] == "pre_patch")
+    assert pre_row["run_id"] == "run-pre"
+
+
+def test_vfs_rate_limit_skips_manual_and_pre_patch(setup):
+    """R3 限频：manual / pre_patch 不受限，即使间隔 < MIN_SAVE_INTERVAL 也落盘。"""
+    sid = setup.session.session_id
+    vfs_store = setup.vfs_store
+
+    a = vfs_store.save_checkpoint(sid, "run-a", {"a.txt": "1"}, trigger_reason="manual")
+    b = vfs_store.save_checkpoint(sid, "run-b", {"a.txt": "2"}, trigger_reason="pre_patch")
+    assert a > 0 and b > 0
+    assert len(vfs_store.list_checkpoints(sid)) == 2
 
 
 # ==================================================================
