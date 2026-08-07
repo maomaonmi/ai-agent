@@ -42,6 +42,13 @@ _SUMMARY_FALLBACK_CHARS: int = 2000
 # 摘要素材扫描窗口：与 query_events 的防御性 clamp 对齐，turn 序号基于该窗口计数。
 _SUMMARY_EVENT_SCAN_LIMIT: int = 500
 
+# 惰性定期清理（R-Retention）：无后台线程，在写入路径同一事务内顺带执行，
+# 与 VFSCheckpointStore.cleanup_old_checkpoints 同风格。Why 限量而非按时间:
+# 会话活跃度差异大，按量保留可保证"最近上下文永远完整"，且 SQL 恒定简单。
+_EVENT_KEEP_PER_SESSION: int = 500        # 事件账本每会话保留最近 500 条（与摘要扫描窗口对齐）
+_SUMMARY_KEEP_PER_SESSION: int = 20       # 摘要每会话保留最近 20 条
+_PROFILE_INACTIVE_TTL_SECONDS: float = 30 * 86400  # 失效档案卡保留 30 天后清理
+
 
 def _extract_summary_topics(text: str) -> list[str]:
     """轻量话题提取：取长度 ≥2 的中英词元前 5 个（去重保序）。
@@ -63,6 +70,11 @@ def _extract_summary_topics(text: str) -> list[str]:
         if len(topics) >= 5:
             break
     return topics
+
+
+def _normalize_summary_text(text: str) -> str:
+    """摘要去重比对键：去全部空白字符 + 小写（仅字面级，不做语义相似）。"""
+    return "".join(str(text).split()).lower()
 
 
 def _estimate_tokens(text: str) -> int:
@@ -162,6 +174,20 @@ class MemoryEngine:
                     """,
                     (session_id, event_type, payload, time.time()),
                 )
+                # R-Retention 惰性清理：同事务裁剪账本到最近 N 条，防无限膨胀。
+                conn.execute(
+                    """
+                    DELETE FROM raw_event_ledger
+                    WHERE session_id = ?
+                      AND event_id NOT IN (
+                          SELECT event_id FROM raw_event_ledger
+                          WHERE session_id = ?
+                          ORDER BY created_at DESC, event_id DESC
+                          LIMIT ?
+                      )
+                    """,
+                    (session_id, session_id, _EVENT_KEEP_PER_SESSION),
+                )
             return True
         except sqlite3.Error as exc:
             self._logger.error(
@@ -254,6 +280,15 @@ class MemoryEngine:
                     """,
                     (session_id, field_key, serialized, now, FAR_FUTURE, source),
                 )
+                # R-Retention 惰性清理：同事务删除 30 天前已失效的历史卡。
+                # 生效卡（valid_end > now）永不触碰，保证 build_context 输入稳定。
+                conn.execute(
+                    """
+                    DELETE FROM profile_cards
+                    WHERE session_id = ? AND valid_end <= ?
+                    """,
+                    (session_id, now - _PROFILE_INACTIVE_TTL_SECONDS),
+                )
             return True
         except sqlite3.Error as exc:
             self._logger.error(
@@ -328,6 +363,32 @@ class MemoryEngine:
             )
         return history
 
+    def delete_profile_card(self, card_id: int) -> bool:
+        """删除单张档案卡（仅限已失效卡）。
+
+        Why 限失效卡：生效卡（valid_end > now）是 build_context 的直接输入，
+        误删会静默改变后续所有 AI 行为；失效卡仅具审计价值，删除安全。
+        前端也仅对失效卡渲染删除按钮，与此约束保持一致。
+        """
+        now = time.time()
+        try:
+            with self._connection() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM profile_cards WHERE card_id = ? AND valid_end <= ?",
+                    (int(card_id), now),
+                )
+            deleted = cursor.rowcount > 0
+            if not deleted:
+                self._logger.warning(
+                    "delete_profile_card 拒绝: card_id=%s 不存在或仍生效", card_id
+                )
+            return deleted
+        except sqlite3.Error as exc:
+            self._logger.error(
+                "delete_profile_card 失败: card_id=%s err=%s", card_id, exc
+            )
+            return False
+
     # ==================================================================
     # 第 3 层：对话摘要 (conversation_summaries)
     # ==================================================================
@@ -359,6 +420,20 @@ class MemoryEngine:
                     VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (session_id, turn_start, turn_end, summary_text, topics_json, time.time()),
+                )
+                # R-Retention 惰性清理：同事务裁剪摘要到最近 N 条。
+                conn.execute(
+                    """
+                    DELETE FROM conversation_summaries
+                    WHERE session_id = ?
+                      AND summary_id NOT IN (
+                          SELECT summary_id FROM conversation_summaries
+                          WHERE session_id = ?
+                          ORDER BY turn_end DESC, summary_id DESC
+                          LIMIT ?
+                      )
+                    """,
+                    (session_id, session_id, _SUMMARY_KEEP_PER_SESSION),
                 )
             return True
         except sqlite3.Error as exc:
@@ -420,6 +495,56 @@ class MemoryEngine:
             "created_at": row["created_at"],
         }
 
+    def delete_summary(self, summary_id: int) -> bool:
+        """删除单条对话摘要（手动纠偏入口）。
+
+        Why 允许删任意摘要：删错至多触发 maybe_summarize 重算（其幂等性保证
+        不会重复压缩已覆盖区间之外的内容），无安全风险。
+        """
+        try:
+            with self._connection() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM conversation_summaries WHERE summary_id = ?",
+                    (int(summary_id),),
+                )
+            return cursor.rowcount > 0
+        except sqlite3.Error as exc:
+            self._logger.error(
+                "delete_summary 失败: summary_id=%s err=%s", summary_id, exc
+            )
+            return False
+
+    def clear_session_memory(self, session_id: str) -> dict[str, int]:
+        """清空某会话的全部会话级记忆（事件/摘要/档案卡/VFS checkpoint）。
+
+        Why 核弹操作：调试或隐私场景需要一键抹除会话痕迹。skill_capsules 是
+        跨会话共享的全局资产，不属于任何会话，明确不在清理范围内。
+        返回各表删除行数，供前端展示与审计。
+        """
+        result: dict[str, int] = {
+            "events": 0, "summaries": 0, "profile_cards": 0, "vfs_checkpoints": 0,
+        }
+        if not session_id:
+            return result
+        try:
+            with self._connection() as conn:
+                for table, key in (
+                    ("raw_event_ledger", "events"),
+                    ("conversation_summaries", "summaries"),
+                    ("profile_cards", "profile_cards"),
+                    ("vfs_checkpoints", "vfs_checkpoints"),
+                ):
+                    cursor = conn.execute(
+                        f"DELETE FROM {table} WHERE session_id = ?",  # noqa: S608 - 表名为内部常量
+                        (session_id,),
+                    )
+                    result[key] = int(cursor.rowcount)
+        except sqlite3.Error as exc:
+            self._logger.error(
+                "clear_session_memory 失败: sid=%s err=%s", session_id, exc
+            )
+        return result
+
     def maybe_summarize(
         self,
         session_id: str,
@@ -474,6 +599,19 @@ class MemoryEngine:
                 return False
 
             summary_text = self._compress_digest(digest, llm_compress)
+            # 重复性检测：与最近摘要规范化文本完全一致时跳过落库。
+            # Why 只抓字面级: 用户重复相同诉求会压缩出雷同摘要，逐条落库只会
+            # 稀释信息密度；语义级相似交给人工删除，避免误杀（R1 保守原则）。
+            # 注意此时不前进覆盖区间（latest.turn_end 不变），下次触发会重算，
+            # 幂等无状态错乱。
+            if latest and _normalize_summary_text(
+                str(latest["summary_text"])
+            ) == _normalize_summary_text(summary_text):
+                self._logger.info(
+                    "maybe_summarize 跳过重复摘要: sid=%s turn=[%d,%d]",
+                    session_id, covered + 1, compress_end,
+                )
+                return False
             topics = _extract_summary_topics(summary_text)
             return self.save_summary(
                 session_id,

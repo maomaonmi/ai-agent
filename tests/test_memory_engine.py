@@ -304,8 +304,177 @@ def test_build_context_empty(setup):
 
 
 # ==================================================================
-# VFSCheckpointStore 测试
+# 手动删除 + 会话清空 + 定期清理 + 重复检测 测试
 # ==================================================================
+
+
+def test_delete_summary(setup):
+    """行级删除摘要：命中返回 True 且列表减少；不存在 id 返回 False。"""
+    sid = setup.session.session_id
+    engine = setup.engine
+
+    assert engine.save_summary(sid, 0, 4, "摘要A", ["a"])
+    assert engine.save_summary(sid, 5, 9, "摘要B", ["b"])
+    summaries = engine.get_all_summaries(sid)
+    assert len(summaries) == 2
+
+    assert engine.delete_summary(summaries[0]["summary_id"])
+    remaining = engine.get_all_summaries(sid)
+    assert len(remaining) == 1
+    assert remaining[0]["summary_text"] == "摘要A"  # ORDER BY DESC：剩较旧的 A
+
+    assert not engine.delete_summary(999999)
+
+
+def test_delete_profile_card_only_inactive(setup):
+    """档案卡删除约束：生效中卡拒绝删除，失效卡可删。"""
+    sid = setup.session.session_id
+    engine = setup.engine
+
+    engine.update_profile_field(sid, "project.name", "v1")
+    engine.update_profile_field(sid, "project.name", "v2")  # v1 卡失效
+
+    history = engine.get_profile_history(sid, "project.name")
+    assert len(history) == 2
+    inactive = [c for c in history if c["valid_end"] != FAR_FUTURE]
+    assert len(inactive) == 1
+
+    # 生效中卡拒绝删除
+    active_id = next(c["card_id"] for c in history if c["valid_end"] == FAR_FUTURE)
+    assert not engine.delete_profile_card(int(active_id))
+    assert engine.get_valid_profile(sid)["project.name"] == "v2"  # 生效卡未被误删
+
+    # 失效卡可删
+    assert engine.delete_profile_card(int(inactive[0]["card_id"]))
+    assert len(engine.get_profile_history(sid, "project.name")) == 1
+
+
+def test_clear_session_memory(setup):
+    """会话级清空：四表清空返回统计，全局 skill 资产不受影响。"""
+    sid = setup.session.session_id
+    engine = setup.engine
+
+    engine.record_event(sid, "user_input", {"text": "你好"})
+    engine.save_summary(sid, 0, 4, "摘要", ["t"])
+    engine.update_profile_field(sid, "k", "v")
+    setup.vfs_store.save_checkpoint(sid, "run", {"a.py": "x"}, "manual")
+    # 全局 skill（跨会话资产）
+    setup.skill_store.create_skill(
+        skill_name="s",
+        skill_type="code_pattern",
+        trigger_condition="t",
+        trigger_keywords=["t"],
+        standard_steps=["a"],
+    )
+
+    result = engine.clear_session_memory(sid)
+    assert result == {
+        "events": 1, "summaries": 1, "profile_cards": 1, "vfs_checkpoints": 1,
+    }
+    assert engine.query_events(sid) == []
+    assert engine.get_all_summaries(sid) == []
+    assert engine.get_profile_history(sid, "k") == []
+    assert setup.vfs_store.list_checkpoints(sid) == []
+    assert len(setup.skill_store.list_skills()) == 1  # skill 不在清理范围
+
+    # 空会话幂等
+    assert engine.clear_session_memory("nonexistent-session") == {
+        "events": 0, "summaries": 0, "profile_cards": 0, "vfs_checkpoints": 0,
+    }
+
+
+def test_event_retention_keeps_recent_500(setup):
+    """惰性定期清理：事件账本每会话仅保留最近 500 条。"""
+    from memory_engine import _EVENT_KEEP_PER_SESSION
+
+    sid = setup.session.session_id
+    engine = setup.engine
+
+    for i in range(_EVENT_KEEP_PER_SESSION + 5):
+        engine.record_event(sid, "user_input", {"text": f"msg-{i}"})
+
+    events = engine.query_events(sid, limit=_EVENT_KEEP_PER_SESSION + 10)
+    assert len(events) == _EVENT_KEEP_PER_SESSION
+    # 保尾策略：query_events 为 DESC 序，首条为最新
+    assert events[0]["event_data"] == {"text": f"msg-{_EVENT_KEEP_PER_SESSION + 4}"}
+
+
+def test_summary_retention_keeps_recent_20(setup):
+    """惰性定期清理：摘要每会话仅保留最近 20 条。"""
+    from memory_engine import _SUMMARY_KEEP_PER_SESSION
+
+    sid = setup.session.session_id
+    engine = setup.engine
+
+    for i in range(_SUMMARY_KEEP_PER_SESSION + 2):
+        assert engine.save_summary(sid, i, i + 1, f"摘要-{i}", [])
+
+    summaries = engine.get_all_summaries(sid)
+    assert len(summaries) == _SUMMARY_KEEP_PER_SESSION
+    # ORDER BY created_at DESC：首条为最新
+    assert summaries[0]["summary_text"] == f"摘要-{_SUMMARY_KEEP_PER_SESSION + 1}"
+
+
+def test_maybe_summarize_skips_duplicate_summary(setup):
+    """摘要重复检测：压缩结果与最近摘要规范化文本一致时跳过落库。
+
+    Why 构造方式: 压缩区间 = total-4（保留最近 4 条原文），两次触发需区间等长
+    且内容相同才能保证 digest 一致。第一批 8 条 → 覆盖 [1,4]（4 条）；第二批
+    4 条 → total=12，覆盖 [5,8]（同为 4 条相同事件）。第二次触发靠 token 阈值
+    （turns=4<8 但内容超长），digest 与首次摘要一致 → 去重跳过。
+    """
+    sid = setup.session.session_id
+    engine = setup.engine
+    reply = {"instruction": "相同指令", "summary": "很长的结果" * 500}
+
+    for _ in range(8):
+        engine.record_event(sid, "ai_reply", reply)
+    assert engine.maybe_summarize(sid) is True
+    assert len(engine.get_all_summaries(sid)) == 1
+
+    for _ in range(4):
+        engine.record_event(sid, "ai_reply", reply)
+    assert engine.maybe_summarize(sid) is False  # 重复摘要被跳过
+    assert len(engine.get_all_summaries(sid)) == 1
+
+
+def test_skill_dedup_normalized_trigger(setup):
+    """Skill 沉淀规范化去重：标点/大小写变体命中已有胶囊，不重复落库。"""
+    store = setup.skill_store
+
+    first = store.maybe_create_skill_from_success(
+        trigger_condition="帮我添加搜索框",
+        trigger_keywords=["搜索框"],
+        standard_steps=["s1", "s2", "s3"],
+    )
+    # 第一次 success_count=1，未达阈值
+    assert first is None
+    assert len(store.list_skills()) == 1
+
+    # 带标点变体 → 命中同一胶囊，success_count 推进到 2 并返回成熟胶囊
+    second = store.maybe_create_skill_from_success(
+        trigger_condition="帮我添加搜索框！",
+        trigger_keywords=["搜索框"],
+        standard_steps=["s1", "s2", "s3"],
+    )
+    assert second is not None
+    assert second.success_count == 2
+    assert len(store.list_skills()) == 1  # 无重复落库
+    # 原文保留（审计语义不破坏）
+    assert store.list_skills()[0].trigger_condition == "帮我添加搜索框"
+
+
+def test_vfs_delete_checkpoint(setup):
+    """行级删除 checkpoint：命中返回 True；不存在 id 返回 False。"""
+    sid = setup.session.session_id
+    store = setup.vfs_store
+
+    cp_id = store.save_checkpoint(sid, "run", {"a.py": "x"}, "manual")
+    assert store.list_checkpoints(sid)[0]["checkpoint_id"] == cp_id
+
+    assert store.delete_checkpoint(cp_id)
+    assert store.list_checkpoints(sid) == []
+    assert not store.delete_checkpoint(cp_id)  # 已删除 → False
 
 
 def test_vfs_checkpoint_roundtrip(setup):

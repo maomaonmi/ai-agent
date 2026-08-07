@@ -2278,6 +2278,7 @@ async def get_memory_profile(session_id: str):
         for item in history:
             cards.append(
                 {
+                    "card_id": item["card_id"],
                     "field_key": item["field_key"],
                     "field_value": item["field_value"],
                     "valid_start": item["valid_start"],
@@ -2373,6 +2374,61 @@ async def list_memory_events(session_id: str, limit: int = 50):
         raise HTTPException(status_code=400, detail="session_id 非法。")
     events = memory_engine.query_events(session_id, limit=max(1, min(limit, 200)))
     return {"events": events}
+
+
+# ==========================================
+# 8.6 记忆系统删除端点（手动纠偏 + 会话清空）
+# ==========================================
+# Why: 五层记忆此前全只读，错误沉淀（误匹配的 Skill、被污染的 checkpoint）
+# 无法人工干预。删除按层差异化：事件账本 append-only 不提供行级删除，
+# 只通过 clear 端点整体清空；档案卡仅允许删已失效卡（引擎层强约束）。
+
+
+@app.delete("/api/memory/summary/{summary_id}")
+async def delete_memory_summary(summary_id: int):
+    """删除单条对话摘要。"""
+    if not memory_engine.delete_summary(summary_id):
+        raise HTTPException(status_code=404, detail="摘要不存在。")
+    return {"deleted": True, "summary_id": summary_id}
+
+
+@app.delete("/api/memory/profile/card/{card_id}")
+async def delete_memory_profile_card(card_id: int):
+    """删除单张已失效档案卡（生效中卡拒绝，409）。"""
+    if not memory_engine.delete_profile_card(card_id):
+        raise HTTPException(
+            status_code=409, detail="档案卡不存在或仍在生效中，仅允许删除已失效卡。"
+        )
+    return {"deleted": True, "card_id": card_id}
+
+
+@app.delete("/api/memory/vfs/checkpoint/{checkpoint_id}")
+async def delete_memory_vfs_checkpoint(checkpoint_id: int):
+    """删除单个 VFS checkpoint（如被污染补丁的快照）。"""
+    if not vfs_store.delete_checkpoint(checkpoint_id):
+        raise HTTPException(status_code=404, detail="checkpoint 不存在。")
+    return {"deleted": True, "checkpoint_id": checkpoint_id}
+
+
+@app.delete("/api/memory/skills/{skill_id}")
+async def delete_memory_skill(skill_id: int):
+    """删除单个 Skill 胶囊（纠正错误沉淀/误匹配）。"""
+    if not skill_store.delete_skill(skill_id):
+        raise HTTPException(status_code=404, detail="Skill 不存在。")
+    return {"deleted": True, "skill_id": skill_id}
+
+
+@app.post("/api/memory/clear/{session_id}")
+async def clear_memory_session(session_id: str):
+    """清空会话全部会话级记忆（事件/摘要/档案卡/VFS checkpoint）。
+
+    Why POST 而非 DELETE: 清空是"动作"而非资源删除，且需返回各表删除统计；
+    skill_capsules 为跨会话全局资产，明确不动。前端必须二次确认后调用。
+    """
+    if not session_id or len(session_id) < 8:
+        raise HTTPException(status_code=400, detail="session_id 非法。")
+    result = memory_engine.clear_session_memory(session_id)
+    return {"cleared": True, "session_id": session_id, "deleted": result}
 
 
 # ==========================================

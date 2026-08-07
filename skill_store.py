@@ -415,6 +415,14 @@ class SkillStore:
         return None
 
     def _find_by_trigger_condition(self, trigger_condition: str) -> SkillCapsule | None:
+        """按 trigger_condition 查找已有胶囊：先精确匹配，未命中再做规范化比对。
+
+        Why 规范化去重: 自动沉淀的 trigger_condition 来自用户原始指令，"加个搜索框"
+        与"加个搜索框！"/"加个搜索框。" 字面不同会各沉淀一条语义重复的胶囊，导致
+        匹配注入时重复占用 prompt 预算。规范化（小写 + 去非字母数字字符）后比对可
+        合并这类变体；存储仍保留原文，不破坏审计与展示。胶囊量级为几十条，全表扫
+        成本可忽略，无需为规范化值加索引列。
+        """
         with self._connection() as connection:
             row = connection.execute(
                 """
@@ -424,7 +432,25 @@ class SkillStore:
                 """,
                 (trigger_condition,),
             ).fetchone()
-        return self._row_to_skill(row) if row is not None else None
+            if row is not None:
+                return self._row_to_skill(row)
+            normalized = self._normalize_trigger_condition(trigger_condition)
+            if not normalized:
+                return None
+            rows = connection.execute("SELECT * FROM skill_capsules").fetchall()
+        for candidate in rows:
+            if self._normalize_trigger_condition(candidate["trigger_condition"]) == normalized:
+                return self._row_to_skill(candidate)
+        return None
+
+    @staticmethod
+    def _normalize_trigger_condition(text: str) -> str:
+        """规范化触发条件用于去重比对：小写 + 仅保留字母数字（含中文）。
+
+        Why 只用于比对键: 存储层保留用户原文，规范化值不落库，避免破坏既有
+        UNIQUE(skill_name) 与审计语义。
+        """
+        return "".join(ch for ch in text.lower() if ch.isalnum())
 
     @staticmethod
     def _auto_skill_name(trigger_condition: str) -> str:

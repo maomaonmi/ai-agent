@@ -348,3 +348,23 @@ class VFSCheckpointStore:
             keep,
         )
         return deleted
+
+    def delete_checkpoint(self, checkpoint_id: int) -> bool:
+        """Delete a single checkpoint by id (manual curation from the UI).
+
+        Why: MAX_KEEP only bounds the count; it cannot remove a polluted snapshot
+        (e.g. a bad patch's post_patch row). Row-level delete lets users prune
+        precisely without waiting for retention to age the row out.
+
+        Returns:
+            True if a row was deleted, False if the id did not exist.
+        """
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM vfs_checkpoints WHERE checkpoint_id = ?",
+                (int(checkpoint_id),),
+            )
+        deleted = cursor.rowcount > 0
+        if deleted:
+            logger.info("Deleted VFS checkpoint id=%s", checkpoint_id)
+        return deleted
