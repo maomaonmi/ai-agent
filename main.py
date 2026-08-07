@@ -36,9 +36,11 @@ from session_memory import SessionNotFoundError, SessionStore
 from model_settings import MODEL_CATALOG, ModelSettings, ModelSettingsStore, capabilities_for_model, ensure_direct_connection
 from glm_adapter import ChatAttachment, build_user_content, choose_glm_model, reasoning_from_delta, validate_attachment_mix
 from App import create_code_router
+from App import _build_memory_prompt_suffix
 # Why: Phase2 记忆系统——三个 store 在 main.py 启动时统一初始化，
 # 共用 SESSION_DB_PATH 同一 SQLite，FK 约束由 SessionStore._initialize() 先建表保证。
 from memory_engine import MemoryEngine
+from memory_settings import MemorySettings, MemorySettingsStore
 from skill_store import SkillStore
 from vfs_checkpoint import VFSCheckpointStore
 from terminal_service import TERMINAL_POOL, handle_terminal_websocket
@@ -75,9 +77,16 @@ session_store = SessionStore(SESSION_DB_PATH)
 # Why: Phase2 记忆系统三个 store——必须放在 SessionStore 之后实例化，
 # 因为 raw_event_ledger / profile_cards / conversation_summaries / vfs_checkpoints / skills
 # 的 session_id 外键依赖 sessions 表，SessionStore._initialize() 负责建表。
-memory_engine = MemoryEngine(SESSION_DB_PATH)
+memory_settings_store = MemorySettingsStore()
+memory_settings = memory_settings_store.load()
+# 注入记忆设置：摘要/清理/窗口阈值与 VFS 节流参数从此实时生效（前端可调）。
+memory_engine = MemoryEngine(SESSION_DB_PATH, settings=memory_settings)
 skill_store = SkillStore(SESSION_DB_PATH)
-vfs_store = VFSCheckpointStore(SESSION_DB_PATH)
+vfs_store = VFSCheckpointStore(
+    SESSION_DB_PATH,
+    min_save_interval=memory_settings.vfs_min_save_interval,
+    max_keep=memory_settings.vfs_max_keep,
+)
 
 
 def get_llm(mode: str, max_tokens: Optional[int] = None):
@@ -1624,6 +1633,7 @@ async def generate_chat_events(
     discussion_agent_ids: Optional[List[str]] = None,
     discussion_rounds: int = 2,
     runtime_settings: Optional[RuntimeSettings] = None,
+    session_id: Optional[str] = None,
 ):
     settings = runtime_settings or RuntimeSettings(
         response_length=discussion_length,
@@ -1635,6 +1645,12 @@ async def generate_chat_events(
     )["instruction"]
 
     if mode == "distributed_plan":
+        # 统一记忆：plan 类模式记录用户任务（best-effort）。
+        if session_id:
+            try:
+                memory_engine.push_chat_turn(session_id, "user", message)
+            except Exception:
+                logger.exception("[memory] plan user 落账失败 sid=%s。", session_id)
         async for chunk in generate_plan_execute_events(
             f"{message}\n\n输出要求：{output_instruction}",
             execution_mode="distributed",
@@ -1644,14 +1660,25 @@ async def generate_chat_events(
 
     # plan 模式走独立的计划-执行-重规划状态机
     if mode == "plan":
+        if session_id:
+            try:
+                memory_engine.push_chat_turn(session_id, "user", message)
+            except Exception:
+                logger.exception("[memory] plan user 落账失败 sid=%s。", session_id)
         async for chunk in generate_plan_execute_events(
             f"{message}\n\n输出要求：{output_instruction}"
         ):
             yield chunk
         return
 
-    # agent 模式走独立的多智能体引擎
+    # agent 模式走独立的多智能体引擎（仅记用户任务，内部 agent_talk 不入账本，
+    # 保证 L4 窗口纯度——见计划书 §3.4）
     if mode == "agent":
+        if session_id:
+            try:
+                memory_engine.push_chat_turn(session_id, "user", message)
+            except Exception:
+                logger.exception("[memory] agent user 落账失败 sid=%s。", session_id)
         async for chunk in generate_multi_agent_events(
             message,
             custom_agents,
@@ -1672,8 +1699,38 @@ async def generate_chat_events(
             "message": "正在思考..." if effective_mode != "web" else "正在联网搜索..."
         })
 
+        # ---- 统一记忆：L4 滑窗注入 + L2/L3 上下文合成（聊天类模式，best-effort）----
+        # 记录本轮用户输入到 L4 内存 FIFO + 账本；从窗口取近 K 轮原文，
+        # 连同全局画像与摘要一并注入，使 LLM 具备多轮连续性。
+        # 注入顺序遵循缓存纪律：L2/L3 稳定前缀（SystemMessage）在前，
+        # L4 动态窗口（Human/AI）居中，本次输入始终在尾部。
+        base_messages: list = []
+        if session_id:
+            try:
+                memory_engine.push_chat_turn(session_id, "user", message)
+                memory_suffix = _build_memory_prompt_suffix(
+                    memory_engine=memory_engine,
+                    session_id=session_id,
+                    user_input=message,
+                    messages=memory_engine.get_chat_window(session_id),
+                )
+                if memory_suffix:
+                    base_messages.append(
+                        SystemMessage(content=memory_suffix)
+                    )
+                # L4 窗口（不含本轮，本轮已作为末尾 user 输入）以对话形态注入，
+                # 让 LLM 看到"谁说了什么"，而非拼接成一段纯文本。
+                for turn in memory_engine.get_chat_window(session_id)[:-1]:
+                    if turn["role"] == "user":
+                        base_messages.append(HumanMessage(content=turn["content"]))
+                    else:
+                        base_messages.append(AIMessage(content=turn["content"]))
+            except Exception:
+                logger.exception("[memory] chat 上下文注入失败 sid=%s，降级无记忆。", session_id)
+
+        base_messages.append(HumanMessage(content=message))
         inputs = {
-            "messages": [HumanMessage(content=message)],
+            "messages": base_messages,
             "mode": effective_mode,
             "web_docs": [],
             "reasoning": "",
@@ -1722,6 +1779,15 @@ async def generate_chat_events(
             "mode": effective_mode,
             "web_docs": web_docs_result
         })
+
+        # ---- 统一记忆后置落账（best-effort，绝不阻塞主链路）----
+        # 记录 AI 回复进 L4 窗口 + 账本，并触发聊天专用双阈值摘要压缩。
+        if session_id and final_response:
+            try:
+                memory_engine.push_chat_turn(session_id, "assistant", final_response)
+                memory_engine.maybe_summarize(session_id, chat_mode=True)
+            except Exception:
+                logger.exception("[memory] chat 后置落账失败 sid=%s。", session_id)
 
     except Exception as e:
         yield sse_format("error", {"message": str(e)})
@@ -1938,6 +2004,49 @@ async def update_model_settings(settings: ModelSettings):
     return model_settings_store.public()
 
 
+# ==========================================
+# 模型记忆设置（两套画像：global 聊天 / code 代码）+ 记忆痕迹预览
+# ==========================================
+@app.get("/api/memory/settings")
+async def get_memory_settings():
+    """返回当前记忆设置（两套独立画像 + Token 预算 + VFS 节流），供前端渲染。"""
+    return memory_settings_store.public()
+
+
+@app.put("/api/memory/settings")
+async def update_memory_settings(settings: MemorySettings):
+    """持久化记忆设置并立即注入 memory_engine / vfs_store（实时生效）。"""
+    global memory_settings
+    memory_settings_store.save(settings)
+    # 实时热更：替换内存中的配置对象，后续摘要/清理/窗口/VFS 全部按新值执行。
+    memory_settings = settings
+    memory_engine._settings = settings
+    vfs_store.MIN_SAVE_INTERVAL = float(settings.vfs_min_save_interval)
+    vfs_store.MAX_KEEP = int(settings.vfs_max_keep)
+    return memory_settings_store.public()
+
+
+@app.get("/api/memory/traces/md")
+async def get_memory_traces_md(
+    session_id: str | None = None,
+    scope: str = "global",
+):
+    """实时从数据库渲染记忆痕迹为 Markdown（可预览的 .md 文件内容）。
+
+    Args:
+        session_id: 指定会话时只渲染该会话痕迹；缺省渲染全部（按会话分组）。
+        scope: "global"(聊天痕迹，默认) | "code"(代码痕迹，含 VFS/补丁)，
+            用于区分两套画像下的展示焦点。
+    """
+    return {
+        "content": memory_engine.build_traces_markdown(
+            session_id=session_id,
+            scope=scope,
+        )
+    }
+
+
+
 @app.get("/api/sessions")
 async def list_sessions():
     sessions = [session.to_dict() for session in session_store.list()]
@@ -2030,6 +2139,7 @@ async def chat_stream(request: ChatRequest):
             request.discussion_agent_ids,
             request.discussion_rounds,
             request.runtime_settings,
+            request.session_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -2069,9 +2179,27 @@ def generate_direct_chat_events(request: ChatRequest, settings: ModelSettings):
     reasoning_parts: list[str] = []
     try:
         yield event("node", {"node_name": f"{provider_label} · {model_id}", "status": "processing"})
+        # ---- 统一记忆：L4 滑窗注入（best-effort）----
+        # GLM/千问直连路径同样具备多轮连续性：记录本轮输入，注入近 K 轮原文。
+        memory_messages: list[dict] = []
+        if request.session_id:
+            try:
+                memory_engine.push_chat_turn(request.session_id, "user", request.message)
+                for turn in memory_engine.get_chat_window(request.session_id)[:-1]:
+                    role = "user" if turn["role"] == "user" else "assistant"
+                    memory_messages.append({"role": role, "content": turn["content"]})
+            except Exception:
+                logger.exception(
+                    "[memory] direct chat 上下文注入失败 sid=%s，降级无记忆。",
+                    request.session_id,
+                )
+        memory_messages.append({
+            "role": "user",
+            "content": build_user_content(request.message, request.attachments),
+        })
         create_kwargs: dict = dict(
             model=model_id,
-            messages=[{"role": "user", "content": build_user_content(request.message, request.attachments)}],
+            messages=memory_messages,
             stream=True,
             max_tokens=max_tokens,
             temperature=settings.temperature,
@@ -2098,6 +2226,14 @@ def generate_direct_chat_events(request: ChatRequest, settings: ModelSettings):
             "mode": request.mode,
             "model": model_id,
         })
+        # ---- 统一记忆后置落账（best-effort）----
+        final_direct = "".join(answer_parts)
+        if request.session_id and final_direct:
+            try:
+                memory_engine.push_chat_turn(request.session_id, "assistant", final_direct)
+                memory_engine.maybe_summarize(request.session_id, chat_mode=True)
+            except Exception:
+                logger.exception("[memory] direct chat 后置落账失败 sid=%s。", request.session_id)
     except Exception as exc:
         status = getattr(exc, "status_code", None)
         message = f"{provider_label} 调用失败，请检查模型、密钥和额度"
@@ -2120,6 +2256,7 @@ async def deep_research(request: ChatRequest):
                 if request.runtime_settings
                 else "balanced"
             ),
+            request.session_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -2133,11 +2270,19 @@ async def deep_research(request: ChatRequest):
 async def generate_deep_research_events(
     query: str,
     response_length: str = "balanced",
+    session_id: Optional[str] = None,
 ):
     """深度调研：Query Fan-out → 海量抓取 → 细粒度切片 → Reranker 精选"""
 
     def sse_format(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+    # ---- 统一记忆：记录用户调研任务（best-effort）----
+    if session_id:
+        try:
+            memory_engine.push_chat_turn(session_id, "user", query)
+        except Exception:
+            logger.exception("[memory] research user 落账失败 sid=%s。", session_id)
 
     try:
         yield sse_format("research_process", {
@@ -2219,6 +2364,15 @@ async def generate_deep_research_events(
             "message": "🧠 R1 深度思考完成",
             "message_detail": "Deep Research 深度研究报告已生成"
         })
+
+        # ---- 统一记忆后置落账（best-effort）----
+        report_text = result.get("report") or ""
+        if session_id and report_text:
+            try:
+                memory_engine.push_chat_turn(session_id, "assistant", report_text)
+                memory_engine.maybe_summarize(session_id, chat_mode=True)
+            except Exception:
+                logger.exception("[memory] research 后置落账失败 sid=%s。", session_id)
 
     except Exception as e:
         yield sse_format("error", {"message": str(e)})

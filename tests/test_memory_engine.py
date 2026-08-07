@@ -15,7 +15,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from memory_engine import FAR_FUTURE, MemoryEngine, _estimate_tokens
+from memory_engine import (
+    CHAT_SUMMARY_TURN_THRESHOLD,
+    CHAT_WINDOW_K,
+    GLOBAL_PROFILE_SESSION,
+    FAR_FUTURE,
+    MemoryEngine,
+    _estimate_tokens,
+)
 from session_memory import SessionStore
 from skill_store import SkillCapsule, SkillStore
 from vfs_checkpoint import VFSCheckpointStore
@@ -785,3 +792,217 @@ def test_skill_auto_create(setup):
     all_skills = skill_store.list_skills()
     assert len(all_skills) == 1
     assert all_skills[0].skill_id == result3.skill_id
+
+
+# ==================================================================
+# 非 Code 模式统一记忆测试（L2 全局画像 / L4 双写滑窗 / L3 聊天摘要）
+# ==================================================================
+
+
+def test_global_profile_cross_session(setup):
+    """L2 全局画像跨会话共享：global scope 写入对所有会话可见。
+
+    Why 验证核心设计：聊天类模式需跨会话记住用户偏好（文档 L2"跨会话永久保存"），
+    而 profile_cards 有 session_id FK 约束，以哨兵会话承载全局画像。
+    """
+    sid_a = setup.session.session_id
+    sid_b = setup.session_store.create("standard", title="会话B").session_id
+    assert setup.engine.update_profile_field(
+        sid_a, "preferred_lang", "中文", source="explicit", scope="global"
+    )
+    # 会话 B 应能看到全局画像（跨会话）。
+    profile_b = setup.engine.get_valid_profile(sid_b)
+    assert profile_b["preferred_lang"] == "中文"
+    # 全局画像独立可查。
+    global_profile = setup.engine.get_global_profile()
+    assert global_profile["preferred_lang"] == "中文"
+
+
+def test_global_profile_session_overrides(setup):
+    """会话级画像覆盖全局默认：同字段会话级优先。
+
+    Why 验证合并顺序：get_valid_profile 合并全局+会话，会话级字段局部覆盖全局默认，
+    保证某会话内的临时偏好不影响其他会话。
+    """
+    sid_a = setup.session.session_id
+    sid_b = setup.session_store.create("standard", title="会话B").session_id
+    setup.engine.update_profile_field(sid_a, "region", "华东", scope="global")
+    # 会话 A 单独设置局部 region。
+    setup.engine.update_profile_field(sid_a, "region", "华南", scope="session")
+    assert setup.engine.get_valid_profile(sid_a)["region"] == "华南"
+    # 会话 B 仍看到全局默认（不受 A 的局部覆盖影响）。
+    assert setup.engine.get_valid_profile(sid_b)["region"] == "华东"
+
+
+def test_global_profile_dual_timestamp(setup):
+    """全局画像同样遵循双时间戳：二次写入全局字段打断旧值。"""
+    sid = setup.session.session_id
+    setup.engine.update_profile_field(sid, "nickname", "小明", scope="global")
+    setup.engine.update_profile_field(sid, "nickname", "小刚", scope="global")
+    assert setup.engine.get_global_profile()["nickname"] == "小刚"
+    # 哨兵会话存在（FK 前提满足）。
+    assert setup.session_store.get(GLOBAL_PROFILE_SESSION) is not None
+
+
+def test_chat_window_dual_write(setup):
+    """L4 双写滑窗：push_chat_turn 同时写内存 FIFO 与账本。
+
+    Why 验证双写方案：内存 deque 为主路径（零 IO），账本为兜底（可回放重建）。
+    两条路径产出一致的消息序列（旧→新升序）。
+    """
+    sid = setup.session.session_id
+    setup.engine.push_chat_turn(sid, "user", "你好")
+    setup.engine.push_chat_turn(sid, "assistant", "你好！有什么可以帮你？")
+    setup.engine.push_chat_turn(sid, "user", "我想了解记忆机制")
+
+    window = setup.engine.get_chat_window(sid)
+    assert [t["role"] for t in window] == ["user", "assistant", "user"]
+    assert window[-1]["content"] == "我想了解记忆机制"
+
+    # 账本兜底路径：重建 MemoryEngine（无内存 FIFO）后仍能回放。
+    engine2 = MemoryEngine(setup.db_path)
+    window2 = engine2.get_chat_window(sid)
+    assert [t["content"] for t in window2] == ["你好", "你好！有什么可以帮你？", "我想了解记忆机制"]
+
+
+def test_chat_window_k_cap(setup):
+    """L4 滑窗 K 值上限：超过 K 轮时仅保留最近 K 轮。"""
+    sid = setup.session.session_id
+    for i in range(CHAT_WINDOW_K + 5):
+        setup.engine.push_chat_turn(sid, "user", f"第{i}轮")
+        setup.engine.push_chat_turn(sid, "assistant", f"回复{i}")
+    window = setup.engine.get_chat_window(sid)
+    # 内存 FIFO 容量 = CHAT_WINDOW_K（条），此处只压 user。
+    assert len(window) <= CHAT_WINDOW_K
+    # 兜底回放按条截断，不超 K。
+    engine2 = MemoryEngine(setup.db_path)
+    window2 = engine2.get_chat_window(sid, k=CHAT_WINDOW_K)
+    assert len(window2) <= CHAT_WINDOW_K
+
+
+def test_maybe_summarize_chat_mode_uses_chat_threshold(setup):
+    """L3 聊天模式摘要：使用更灵敏的聊天阈值（CHAT_SUMMARY_TURN_THRESHOLD）。
+
+    Why 验证阈值分离：聊天轮次快、内容短，chat_mode=True 时以聊天阈值触发，
+    而不是等 code 模式的 8 轮。
+    """
+    sid = setup.session.session_id
+    # 写入 CHAT_SUMMARY_TURN_THRESHOLD 轮 ai_reply（低于 code 阈值 8）。
+    for i in range(CHAT_SUMMARY_TURN_THRESHOLD):
+        setup.engine.push_chat_turn(sid, "user", f"问题{i}")
+        setup.engine.push_chat_turn(sid, "assistant", f"回答{i}")
+    # chat_mode=True 应触发。
+    assert setup.engine.maybe_summarize(sid, chat_mode=True) is True
+    summary = setup.engine.get_recent_summary(sid)
+    assert summary is not None
+    # 摘要含九段式标记（早期对话增量笔记）。
+    assert "早期对话" in str(summary["summary_text"])
+
+
+def test_build_chat_digest_nine_section(setup):
+    """L3 九段式摘要素材：含初始目标/关键指令/回复要点/未完成事项段。"""
+    events = [
+        {
+            "event_type": "user_input",
+            "event_data": {"text": "帮我规划一个订单模块"},
+        },
+        {
+            "event_type": "ai_reply",
+            "event_data": {"text": "好的，我先梳理订单状态流转。"},
+        },
+    ]
+    digest = setup.engine._build_chat_digest(events)
+    assert "初始目标" in digest
+    assert "关键指令与诉求" in digest
+    assert "早期回复要点" in digest
+    assert "未完成事项" in digest
+    assert "帮我规划一个订单模块" in digest
+
+
+# ==================================================================
+# 记忆设置（memory_settings）测试
+# ==================================================================
+
+
+def test_memory_settings_defaults():
+    """MemorySettings 默认含两套独立画像（global 更灵敏 / code 更保守）。"""
+    from memory_settings import MemorySettings
+
+    settings = MemorySettings()
+    assert settings.global_memory.summary_turn_threshold == 5
+    assert settings.global_memory.event_keep == 800
+    assert settings.code_memory.summary_turn_threshold == 8
+    assert settings.code_memory.event_keep == 500
+    assert settings.vfs_max_keep == 10
+
+
+def test_memory_settings_store_roundtrip(tmp_path):
+    """MemorySettingsStore 持久化-读取往返一致，字段完整。"""
+    from memory_settings import MemorySettings, MemorySettingsStore
+
+    store = MemorySettingsStore(tmp_path / "memory_settings.json")
+    settings = store.load()
+    settings.global_memory.summary_turn_threshold = 3
+    settings.global_memory.summary_token_threshold = 2000
+    settings.vfs_min_save_interval = 2.5
+    settings.vfs_max_keep = 5
+    store.save(settings)
+
+    reloaded = store.load()
+    assert reloaded.global_memory.summary_turn_threshold == 3
+    assert reloaded.global_memory.summary_token_threshold == 2000
+    assert reloaded.vfs_min_save_interval == 2.5
+    assert reloaded.vfs_max_keep == 5
+    # 未改动的 code 画像保持默认
+    assert reloaded.code_memory.summary_turn_threshold == 8
+
+
+def test_memory_engine_uses_injected_settings(tmp_path):
+    """注入 MemorySettings 后，摘要阈值/窗口/事件保留从配置读取（实时生效）。"""
+    from memory_settings import MemorySettings
+    from session_memory import SessionStore
+
+    db_path = tmp_path / "mem.db"
+    session_store = SessionStore(db_path)
+    session = session_store.create("standard", title="记忆设置会话")
+    sid = session.session_id
+
+    settings = MemorySettings()
+    settings.global_memory.summary_turn_threshold = 2
+    settings.global_memory.event_keep = 100
+    settings.global_memory.window_k = 3
+    engine = MemoryEngine(db_path, settings=settings)
+
+    # 3 轮对话 → 注入阈值 2 应触发 chat 摘要（默认 5 不会）。
+    for i in range(3):
+        engine.push_chat_turn(sid, "user", f"问题{i}")
+        engine.push_chat_turn(sid, "assistant", f"回答{i}")
+    assert engine.maybe_summarize(sid, chat_mode=True) is True
+
+    # 窗口容量 = 配置的 window_k=3：压 5 轮后只保留最近 3。
+    for i in range(5):
+        engine.push_chat_turn(sid, "user", f"w{i}")
+        engine.push_chat_turn(sid, "assistant", f"a{i}")
+    window = engine.get_chat_window(sid, k=10)
+    assert len(window) == 3
+
+
+def test_build_traces_markdown(setup):
+    """记忆痕迹 Markdown 预览：含档案卡/摘要/事件/会话标题。"""
+    sid = setup.session.session_id
+    engine = setup.engine
+
+    engine.update_profile_field(sid, "tech_stack", "Python", source="explicit")
+    for i in range(2):
+        engine.push_chat_turn(sid, "user", f"记忆问题{i}")
+        engine.push_chat_turn(sid, "assistant", f"记忆回答{i}")
+
+    md = engine.build_traces_markdown(session_id=sid, scope="global")
+    assert "模型记忆痕迹" in md
+    assert sid in md
+    assert "档案卡" in md
+    assert "tech_stack" in md
+    assert "记忆问题" in md
+    # code scope 不含 VFS 时也应正常渲染
+    md_code = engine.build_traces_markdown(session_id=sid, scope="code")
+    assert "事件痕迹" in md_code

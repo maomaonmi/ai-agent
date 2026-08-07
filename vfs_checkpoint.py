@@ -40,9 +40,17 @@ class VFSCheckpointStore:
     # 限频会导致用户困惑或丢恢复点；仅 auto/post_patch 高频触发需要节流。
     _RATE_LIMITED_REASONS = frozenset({"auto", "post_patch"})
 
-    def __init__(self, db_path: str | Path):
+    def __init__(
+        self,
+        db_path: str | Path,
+        min_save_interval: float | None = None,
+        max_keep: int | None = None,
+    ):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        # R3 节流参数：可从外部注入（前端记忆设置调节），未注入回退默认。
+        self.MIN_SAVE_INTERVAL = min_save_interval if min_save_interval is not None else 5.0
+        self.MAX_KEEP = max_keep if max_keep is not None else 10
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:

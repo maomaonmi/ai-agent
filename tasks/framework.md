@@ -603,3 +603,45 @@ assert student_form.is_visible()
 * FileTreeExplorer.tsx：支持树状层级、展开/收起、拖拽源 (Drag Source) 的文件树组件。
 * DragMentionInput.tsx：支持拖拽释放目标 (Drop Target)、@file / @folder 自动补全的输入框组件。
 * day58_backend_folder_pruning.py：FastAPI 后端，支持文件夹级的 VFS 剪枝。
+
+
+## 本次改动
+T4.1+T4.3 前端 VFS 跨会话恢复 — ChatInterface.tsx
+
+- openSession 在应用 UI 快照后追加调 restoreMemoryVfs(session_id) ，命中有效 checkpoint 时以其为准覆盖 restoreCode （全栈走 serializeProjectVFS ，单文件走 bundleVFS ）
+- Why：UI 快照仅在流结束后持久化，滞后于每次 patch 成功时写入的 checkpoint；checkpoint 是更新的状态源。失败静默降级到快照，不阻断会话打开。 刷新页面代码不再丢失（M4 达成）
+T5.4 Skill 联动注入 — App.py
+
+- _build_memory_prompt_suffix 签名升级为 -> tuple[str, list] ，新增 skill_store 参数：运行时对 user_input 走 match_skills quick_match 快速通道，命中即把 Skill 标准步骤（≤4) + 校验规则（≤3) 拼入上下文（Skill 段压在 R5 预算的 ~500 token 份额内）
+- 新增 _skill_matched_events() ，4 个 stream 入口（fix / modify / fullstack 生成 / fullstack 修改）解包返回值并 yield skill_matched SSE——前端 useCodeAutoRepair 消费端不再空转
+T4.4 generated/ LRU 清理 — main.py
+
+- lifespan 启动钩子调 _cleanup_old_generated_runs(keep=20) ，按 mtime 保留最近 20 个 run 目录，异常不阻断启动。checkpoint 存 SQLite BLOB，与落盘目录无强引用，删除安全（R6 闭环）
+测试适配 — test_memory_integration.py ：3 处 _build_memory_prompt_suffix 调用适配新 tuple 返回值。
+
+## 完成内容
+R3 — VFS checkpoint 限频+限量 （ vfs_checkpoint.py ）
+
+- 限频合并查询限定 trigger_reason IN ('auto','post_patch') ，pre_patch/manual 安全网行永不被覆盖；合并时同步刷新 trigger_reason
+§5.3 — pre_patch 触发点 （ App.py _record_patch_success ）
+
+- 补丁成功落账时保存 before_vfs 作为撤销锚点（ run_id 加 -pre 后缀， before≠after 才存，豁免限频）
+§5.1 — LLM 摘要双阈值触发 （ memory_engine.py maybe_summarize ）
+
+- 未摘要 ≥8 轮 或 >6000 token 触发；压缩区间保留最近 4 条事件原文（近期上下文由滑动窗口层覆盖，避免重复占预算）
+- llm_compress 可注入（默认 None 零 LLM 依赖），3 次重试，失败降级截断前 2000 字符（R1）
+- 替换掉原"每次 patch 存逐条摘要"逻辑（该逻辑使 turn_end 恒等于事件总数，双阈值永不触发），并删除死代码 _extract_topics
+
+## 1. 核心结论
+删除按钮 （按层差异化）：
+
+- 档案卡/摘要/VFS/Skill：行级删除按钮（前端 confirm + busy 态）
+- 档案卡仅失效卡可删（前端不渲染生效卡按钮，后端 409 强约束双保险）
+- 事件账本 append-only 不提供行级删除，改为头部"清空"按钮（二次确认，清四表、保留全局 Skill）
+重复性检测 ：
+
+- Skill 沉淀： _normalize_trigger_condition 规范化比对（小写+去标点），标点变体命中已有胶囊推进 success_count，不重复落库，原文保留
+- 摘要： maybe_summarize 落库前与最近摘要规范化文本比对，一致则跳过且不前进覆盖区间（幂等）
+惰性定期清理 （写入路径同事务，无后台线程）：
+
+- 事件账本每会话保最近 500 条、摘要每会话保最近 20 条、VFS 保 10 个（既有 MAX_KEEP）
