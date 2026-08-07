@@ -1,11 +1,11 @@
 {
-  "active_provider": "glm",
+  "active_provider": "qwen",
   "profiles": {
     "glm": {
       "provider": "glm",
       "api_format": "openai_chat_completions",
       "base_url": "https://open.bigmodel.cn/api/paas/v4",
-      "model_id": "glm-5-turbo",
+      "model_id": "glm-5",
       "api_key": "c260f69829f44a2e9eb7a9a9a353fa92.eSnpKKNzcIjCWifz",
       "display_name": "GLM-5V Turbo",
       "model_family": "glm",
@@ -14,10 +14,11 @@
       "tool_call_rounds": 200,
       "full_url": false,
       "multimodal": false,
-      "text_model_id": "glm-5-turbo",
+      "text_model_id": "glm-5",
       "vision_model_id": "glm-5v-turbo",
       "thinking_enabled": true,
       "reasoning_effort": "low",
+      "thinking_budget": null,
       "temperature": 1.0,
       "max_tokens": 16000
     },
@@ -38,6 +39,27 @@
       "vision_model_id": "glm-5v-turbo",
       "thinking_enabled": true,
       "reasoning_effort": "high",
+      "temperature": 1.0,
+      "max_tokens": 16000
+    },
+    "qwen": {
+      "provider": "qwen",
+      "api_format": "openai_chat_completions",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model_id": "qwen3.7-plus",
+      "api_key": "sk-ws-H.ERHXXRD.DOTL.MEUCIQCnaGvFLd41q4_rgFNsw1JOHsv1zaD1JVnVV8IWUL4lhQIgPSFrKlP9tnesvFR_IvUcwE4_xVKAFmPAs8XIYz3jGO0",
+      "display_name": "千问 Qwen3.7 Plus",
+      "model_family": "default",
+      "input_context": 64000,
+      "output_context": 8000,
+      "tool_call_rounds": 200,
+      "full_url": false,
+      "multimodal": true,
+      "text_model_id": "glm-5-turbo",
+      "vision_model_id": "glm-5v-turbo",
+      "thinking_enabled": true,
+      "reasoning_effort": "high",
+      "thinking_budget": 2000,
       "temperature": 1.0,
       "max_tokens": 16000
     }

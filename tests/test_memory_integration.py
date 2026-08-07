@@ -426,23 +426,25 @@ def test_record_patch_success_silent_when_memory_engine_none(memory_stack):
 
 def test_build_memory_prompt_suffix_returns_empty_when_no_session(memory_stack):
     """session_id=None 时返回空串（主流程无感知）。"""
-    suffix = _build_memory_prompt_suffix(
+    suffix, matched = _build_memory_prompt_suffix(
         memory_stack.engine,
         None,
         user_input="你好",
         current_vfs={"index.html": "<div></div>"},
     )
     assert suffix == ""
+    assert matched == []
 
 
 def test_build_memory_prompt_suffix_returns_empty_when_no_engine():
     """memory_engine=None 时返回空串。"""
-    suffix = _build_memory_prompt_suffix(
+    suffix, matched = _build_memory_prompt_suffix(
         None,
         "fake-session-id",
         user_input="你好",
     )
     assert suffix == ""
+    assert matched == []
 
 
 def test_build_memory_prompt_suffix_appends_profile_after_record(memory_stack):
@@ -470,7 +472,7 @@ def test_build_memory_prompt_suffix_appends_profile_after_record(memory_stack):
         skill_type="code_pattern",
     )
 
-    suffix = _build_memory_prompt_suffix(
+    suffix, _matched = _build_memory_prompt_suffix(
         engine,
         sid,
         user_input="继续修改",

@@ -25,6 +25,8 @@ from pydantic import BaseModel, Field, field_validator
 
 # Why: Code 模式要复用 GLM 多模态附件契约（仅 GLM 提供商支持视觉模型）。
 from glm_adapter import ChatAttachment, build_user_content, validate_attachment_mix
+# Why: 供应商能力判断唯一入口——禁止再新增 `"xxx" in model.lower()` 字符串嗅探。
+from model_settings import capabilities_for_model, ensure_direct_connection
 from terminal_service import TERMINAL_POOL as _DEFAULT_TERMINAL_POOL, filter_command
 
 # Why: 全栈/补丁生成链路的关键决策点需要可观测，便于定位"模型立即结束/无输出"等问题。
@@ -44,22 +46,29 @@ def _build_memory_prompt_suffix(
     user_input: str,
     messages: list[dict[str, Any]] | None = None,
     current_vfs: dict[str, str] | None = None,
-) -> str:
-    """合成记忆上下文，作为 system_prompt 的追加段。
+    skill_store: Any = None,
+) -> tuple[str, list[Any]]:
+    """合成记忆上下文，作为 system_prompt 的追加段；同时返回命中的 Skill 胶囊。
 
     Why: stream 函数已有自己的 CODE_SYSTEM_PROMPT / FIX_SYSTEM_PROMPT 等；
     记忆上下文不能覆盖这些基础规则，只能以追加段形式拼到 system 内容末尾，
-    让模型既遵守代码契约，又能感知历史档案卡/摘要/最近对话。
+    让模型既遵守代码契约，又能感知历史档案卡/摘要/最近对话/可复用 Skill。
     失败时返回空串，主流程无感知。
 
     Args:
         messages: 调用方已有的 messages 列表，用于提取滑动窗口；None 时跳过窗口段。
         current_vfs: 当前 VFS（仅列文件名，避免撑爆 token 预算）。
+        skill_store: 可选 SkillStore。提供时按 user_input 做两阶段匹配（无 llm_matcher，
+            走 quick_match 快速通道），把命中 Skill 的标准步骤/校验规则拼入上下文，
+            并返回胶囊列表供调用方推送 skill_matched SSE（计划书 T5.4）。
+
+    Returns:
+        (suffix, matched_skills)。suffix 可空串；matched_skills 为 SkillCapsule 列表。
     """
     if not session_id or memory_engine is None:
-        return ""
+        return "", []
     try:
-        return "\n\n" + memory_engine.build_context(
+        suffix = memory_engine.build_context(
             session_id=session_id,
             user_input=user_input,
             messages=messages or [],
@@ -70,7 +79,66 @@ def _build_memory_prompt_suffix(
             "[memory] build_context 失败 sid=%s，降级为空上下文。",
             session_id,
         )
-        return ""
+        suffix = ""
+
+    matched: list[Any] = []
+    if skill_store is not None and user_input.strip():
+        try:
+            matched = skill_store.match_skills(user_input) or []
+        except Exception:
+            logger.exception("[memory] match_skills 失败 sid=%s，跳过 Skill 注入。", session_id)
+            matched = []
+
+    if matched:
+        # Why: Skill 段超预算会稀释四层记忆信号；每 Skill 只取前 4 步 + 前 3 条校验规则，
+        # 名称触发条件一行，把 token 开销压在 ~500 以内（R5 预算的 Skill 份额）。
+        lines = ["## 可复用 Skill（历史成功经验，按此步骤执行可提升一次通过率）"]
+        for skill in matched[:3]:
+            lines.append(f"### {skill.skill_name}（{skill.skill_type}，已成功 {skill.success_count} 次）")
+            for step in list(skill.standard_steps)[:4]:
+                lines.append(f"- {step}")
+            for rule in list(skill.validation_rules)[:3]:
+                lines.append(f"- 校验: {rule}")
+        suffix = (suffix + "\n\n" if suffix else "") + "\n".join(lines)
+
+    return ("\n\n" + suffix) if suffix else "", matched
+
+
+def _skill_matched_events(matched_skills: list[Any]) -> list[str]:
+    """把命中的 Skill 胶囊转成 skill_matched SSE 事件列表。
+
+    Why: 前端 MemoryPanel/SkillInspector 需要实时反馈"已命中历史经验"。
+    confidence 暂无 LLM 精确打分，quick_match 命中即给 1.0。
+    """
+    events: list[str] = []
+    for skill in matched_skills:
+        events.append(format_sse({
+            "type": "skill_matched",
+            "skill_name": str(skill.skill_name),
+            "skill_type": str(skill.skill_type),
+            "confidence": 1.0,
+            "standard_steps": list(skill.standard_steps)[:6],
+            "done": True,
+        }))
+    return events
+
+
+def _extract_topics(text: str) -> list[str]:
+    """从文本中简单提取关键词作为对话摘要 topics。
+
+    Why: 零 LLM 开销，纯字符串匹配。匹配常见技术关键词，最多 5 个。
+    """
+    if not text:
+        return []
+    keywords = []
+    for kw in [
+        "修改", "新增", "删除", "修复", "重构", "全栈", "前端",
+        "后端", "API", "数据库", "文件", "样式", "功能", "页面", "组件",
+        "路由", "配置", "认证", "权限", "部署", "测试", "性能",
+    ]:
+        if kw in text:
+            keywords.append(kw)
+    return keywords[:5]
 
 
 def _record_patch_success(
@@ -174,6 +242,20 @@ def _record_patch_success(
                 logger.exception(
                     "[memory] maybe_create_skill_from_success 失败 sid=%s",
                     session_id,
+                )
+
+        # 5. 对话摘要（第 3 层记忆）：复用现有 summary 文本，零额外 LLM 调用。
+        # Why: 每次 patch 成功后，把模型生成的 summary 存为结构化摘要，
+        # 供前端 MemoryPanel 的「摘要」Tab 展示，也供 build_context 读取。
+        if summary:
+            try:
+                topics = _extract_topics(f"{instruction} {summary}")
+                events = memory_engine.query_events(session_id, limit=10000)
+                turn = len(events)
+                memory_engine.save_summary(session_id, turn, turn, summary, topics)
+            except Exception:
+                logger.exception(
+                    "[memory] save_summary 失败 sid=%s", session_id,
                 )
     except Exception:
         logger.exception(
@@ -325,6 +407,7 @@ async def stream_json_completion(
     status_stream_label: str | None = None,
     thinking: str = "enabled",
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    thinking_budget: int | None = None,
 ) -> tuple[str, list[str]]:
     """流式执行 JSON 模式 completions.create，返回 (完整文本, 要 yield 的 SSE 事件列表)。
 
@@ -354,10 +437,10 @@ async def stream_json_completion(
         }))
     # Why: GLM-5-turbo 在 response_format=json_object 与 stream 组合时，只会通过
     # reasoning_content 吐思考过程，content 恒为空（实测 content_total_len=0）。
-    # 导致 stream_json_completion 累积不到任何正文，fullstack 直接走空 answer 分支"已结束"。
-    # 因此对 GLM 家族整体禁用 json_object，改由 prompt 约束 + normalize_agent_envelope
-    # 的第一/最后一个 { } 提取 JSON（DeepSeek 等模型仍保留 json_object 保证格式）。
-    uses_json_format = "glm" not in model.lower()
+    # 因此对 GLM 家族整体禁用 json_object；千问/DeepSeek 保留 json_object 保证格式。
+    # 能力判断统一走 capabilities_for_model，禁止字符串嗅探。
+    caps = capabilities_for_model(model)
+    uses_json_format = caps.supports_json_format
     logger.debug("[stream_json_completion] model=%s uses_json_format=%s max_tokens=%s", model, uses_json_format, max_tokens)
     try:
         create_kwargs: dict[str, Any] = {
@@ -369,15 +452,22 @@ async def stream_json_completion(
         }
         if uses_json_format:
             create_kwargs["response_format"] = {"type": "json_object"}
-        # Why: 轮级思考（Turn-level Thinking）——GLM 支持按轮独立开关思考。
-        # 子任务执行等轻量轮次传 thinking="disabled" 不耗 reasoning token，直接输出；
-        # 任务拆解/完整生成等重轮次保留 thinking="enabled" 深度思考。
-        if "glm" in model.lower():
+        # Why: 轮级思考（Turn-level Thinking）——子任务执行等轻量轮次传 thinking="disabled"
+        # 不耗推理预算；任务拆解/完整生成等重轮次保留深度思考。
+        # 参数协议按供应商分发：GLM 用 thinking.type+reasoning_effort；千问用
+        # enable_thinking+thinking_budget（budget 必须 < max_tokens，否则挤占输出）。
+        if caps.thinking_control == "glm":
             thinking_body: dict[str, Any] = {"type": thinking}
             # reasoning_effort 仅在开启思考时有效；disabled 时传了会报错。
             if thinking != "disabled":
                 thinking_body["reasoning_effort"] = reasoning_effort
             create_kwargs["extra_body"] = {"thinking": thinking_body}
+        elif caps.thinking_control == "qwen_budget":
+            qwen_body: dict[str, Any] = {"enable_thinking": thinking != "disabled"}
+            if thinking != "disabled":
+                budget = thinking_budget or min(max(max_tokens // 2, 1_024), 16_000)
+                qwen_body["thinking_budget"] = min(budget, max(max_tokens - 1_024, 256))
+            create_kwargs["extra_body"] = qwen_body
         logger.debug("[stream_json_completion] 发起流式请求 ...")
         stream = await client.chat.completions.create(**create_kwargs)
         logger.debug("[stream_json_completion] 流式请求已建立，开始累积 ...")
@@ -964,7 +1054,7 @@ Return JSON only with the UNIFIED ENVELOPE SCHEMA below.
 # WHEN TO CHOOSE WHICH intent:
 - intent="patch"        → 你在做增量修改，payload 用 operations，或 payload 用 {"files":{}, "deleted":[]}（见 Path B 场景）。
 - intent="fullstack_bootstrap" → 当前只有 frontend 没有 backend，且用户要求数据 CRUD/鉴权/登录/持久化，你需要把项目升级为前后端分离（5 文件 VFS 必填）。
-- intent="answer"       → 纯咨询（例如"用 Python 还是 Java 合适"、"还能加什么功能"）。payload = {"text": "中文 Markdown"}。
+- intent="answer"       → 纯咨询（例如"用 Python 还是 Java 合适"、"还能加什么功能"）。payload = {"text": "中文 Markdown"}。**禁止在 intent=answer 时提供 operations；只要 payload 里有 operations，intent 必须是 patch。**
 - intent="ask_clarification" → 信息缺失必须反问。payload = {"text": "中文 Markdown"}。
 
 # IMPORTANT DISCOVERY RULES BEFORE WRITING (前后端分层 + 文档优先):
@@ -2525,6 +2615,35 @@ def apply_vfs_edit_operations(
     return validate_fullstack_vfs(updated)
 
 
+def patch_is_idempotent(current_vfs: dict[str, str], operations: list[Any]) -> bool:
+    """判断补丁是否为"需求已满足"的幂等补丁。
+
+    Why: 当上一轮修改已生效、用户重复同一指令时，模型（实测千问）会正确判断
+    "已经改过了"，产出 target==content 的 replace 操作。这类补丁应用后无差异，
+    不应走"拒绝→重试→完整重生成"风暴，而应直接回答"已满足"。
+    判定：operations 非空、全部为 replace、target 能在源文件中找到、且 content 与
+    target 逐字一致。空 operations（模型偷懒）不算幂等，仍需拒绝重试。
+    """
+    if not operations:
+        return False
+    for operation in operations:
+        if not isinstance(operation, dict):
+            return False
+        if operation.get("op") != "replace":
+            return False
+        file_path = operation.get("file")
+        target = operation.get("target")
+        content = operation.get("content")
+        if not isinstance(file_path, str) or not isinstance(target, str) or not isinstance(content, str):
+            return False
+        if not target or target != content:
+            return False
+        source = current_vfs.get(file_path)
+        if source is None or target not in source:
+            return False
+    return True
+
+
 def unique_vfs_anchors(vfs: dict[str, str], limit: int = 60) -> str:
     """Return short verbatim, unique source fragments for a patch replan."""
     anchors: list[str] = []
@@ -2906,6 +3025,7 @@ async def generate_code_stream(
     run_id: str,
     terminal_pool: Any,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    thinking_budget: int | None = None,
 ) -> AsyncIterator[str]:
     """代码模式 · 网页代码生成：模型现在按 UNIFIED ENVELOPE 输出（5 键 JSON）。
 
@@ -2943,6 +3063,7 @@ async def generate_code_stream(
             phase="generating",
             status_stream_label="正在规划页面结构、样式与交互逻辑…",
             reasoning_effort=reasoning_effort,
+            thinking_budget=thinking_budget,
         )
         for ev in sse_events:
             yield ev
@@ -3047,6 +3168,7 @@ async def fix_code_stream(
     run_id: str,
     terminal_pool: Any,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    thinking_budget: int | None = None,
     session_id: str | None = None,
     memory_engine: Any | None = None,
     vfs_store: Any | None = None,
@@ -3069,14 +3191,17 @@ async def fix_code_stream(
     code = _extract_html_from_mangled_envelope_source(code)
     content = ""
     # Why: Phase2 记忆上下文——以追加段形式拼到 system prompt 末尾，失败时返回空串。
-    memory_suffix = _build_memory_prompt_suffix(
+    memory_suffix, matched_skills = _build_memory_prompt_suffix(
         memory_engine,
         session_id,
         user_input=(error or "")[:500],
         current_vfs={"index.html": code} if code else None,
+        skill_store=skill_store,
     )
     try:
         yield format_sse({"type": "agent_activity", "channel": "status", "phase": "diagnosing", "content": "正在根据运行错误定位最小修复范围。", "done": False})
+        for ev in _skill_matched_events(matched_skills):
+            yield ev
         messages = build_fix_messages(code, error)
         # Why: 记忆上下文以追加段形式拼到 system prompt 末尾，不覆盖基础代码契约。
         if memory_suffix and messages:
@@ -3093,6 +3218,7 @@ async def fix_code_stream(
             phase="patching",
             status_stream_label="正在分析错误并生成修复方案…",
             reasoning_effort=reasoning_effort,
+            thinking_budget=thinking_budget,
         )
         for ev in sse_events:
             yield ev
@@ -3162,6 +3288,7 @@ async def fix_code_stream(
                 summary=envelope.get("summary", ""),
                 skill_type="fix_template",
             )
+            yield format_sse({"type": "memory_update", "layer": "vfs", "action": "updated", "detail": "patch 成功，记忆已更新。", "done": True})
             yield format_sse({"type": "code_update", "code": full_html_candidate, "done": False})
             yield format_sse({"type": "code_update", "code": full_html_candidate, "done": True})
             return
@@ -3200,6 +3327,7 @@ async def fix_code_stream(
             summary=envelope.get("summary", ""),
             skill_type="fix_template",
         )
+        yield format_sse({"type": "memory_update", "layer": "vfs", "action": "updated", "detail": "patch 成功，记忆已更新。", "done": True})
         yield format_sse({"type": "code_update", "code": updated_code, "done": False})
         yield format_sse({"type": "code_update", "code": updated_code, "done": True})
     except (ValueError, json.JSONDecodeError) as exc:
@@ -3264,6 +3392,7 @@ async def fix_code_stream(
                          if content.strip().startswith("{") else ""),
                 skill_type="fix_template",
             )
+            yield format_sse({"type": "memory_update", "layer": "vfs", "action": "updated", "detail": "patch 成功，记忆已更新。", "done": True})
             yield format_sse({"type": "code_update", "code": raw_html, "done": False})
             yield format_sse({"type": "code_update", "code": raw_html, "done": True})
             return
@@ -3293,6 +3422,7 @@ async def modify_code_stream(
     run_id: str,
     terminal_pool: Any,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    thinking_budget: int | None = None,
     session_id: str | None = None,
     memory_engine: Any | None = None,
     vfs_store: Any | None = None,
@@ -3317,12 +3447,15 @@ async def modify_code_stream(
                 yield format_sse({"type": "agent_activity", "channel": "status", "phase": "analyzing", "content": "视觉分析失败，已回退到纯文本指令。", "done": False})
 
         # Why: Phase2 记忆上下文——以追加段形式拼到 system prompt 末尾，失败时返回空串。
-        memory_suffix = _build_memory_prompt_suffix(
+        memory_suffix, matched_skills = _build_memory_prompt_suffix(
             memory_engine,
             session_id,
             user_input=(effective_instruction or "")[:500],
             current_vfs={"index.html": code} if code else None,
+            skill_store=skill_store,
         )
+        for ev in _skill_matched_events(matched_skills):
+            yield ev
         messages = build_modify_messages(code, effective_instruction, target_element, diagnostics)
         # Why: 记忆上下文以追加段形式拼到 system prompt 末尾，不覆盖基础代码契约。
         if memory_suffix and messages:
@@ -3342,6 +3475,7 @@ async def modify_code_stream(
                 phase="patching",
                 status_stream_label="正在分析需求并生成修改方案…",
                 reasoning_effort=reasoning_effort,
+                thinking_budget=thinking_budget,
             )
             for ev in sse_events:
                 yield ev
@@ -3405,6 +3539,7 @@ async def modify_code_stream(
                         summary=envelope.get("summary", ""),
                         skill_type="code_pattern",
                     )
+                    yield format_sse({"type": "memory_update", "layer": "vfs", "action": "updated", "detail": "patch 成功，记忆已更新。", "done": True})
                     yield format_sse({"type": "code_update", "code": full_html_candidate, "done": False})
                     yield format_sse({"type": "code_update", "code": full_html_candidate, "done": True})
                     yield format_sse({
@@ -3437,6 +3572,7 @@ async def modify_code_stream(
                     summary=envelope.get("summary", ""),
                     skill_type="code_pattern",
                 )
+                yield format_sse({"type": "memory_update", "layer": "vfs", "action": "updated", "detail": "patch 成功，记忆已更新。", "done": True})
                 yield format_sse({"type": "code_update", "code": updated_code, "done": False})
                 yield format_sse({"type": "code_update", "code": updated_code, "done": True})
                 yield format_sse({
@@ -3534,6 +3670,7 @@ async def modify_code_stream(
                          if content.strip().startswith("{") else ""),
                 skill_type="code_pattern",
             )
+            yield format_sse({"type": "memory_update", "layer": "vfs", "action": "updated", "detail": "patch 成功，记忆已更新。", "done": True})
             yield format_sse({"type": "code_update", "code": raw_html, "done": False})
             yield format_sse({"type": "code_update", "code": raw_html, "done": True})
             return
@@ -3801,7 +3938,7 @@ async def decompose_fullstack_task(
     返回: [{id, title, target_files, description, status:"pending"}]
     若拆解失败或判定不需要拆解，返回空列表（调用方走原单步逻辑）。
     """
-    is_glm = "glm" in model.lower()
+    supports_json = capabilities_for_model(model).supports_json_format
     vfs_summary = {k: f"({len(v)} chars)" for k, v in vfs.items()}
     messages = [
         {"role": "system", "content": _TASK_DECOMPOSE_SYSTEM_PROMPT},
@@ -3820,7 +3957,7 @@ async def decompose_fullstack_task(
             "temperature": 0.2,
             "max_tokens": 2_000,
         }
-        if not is_glm:
+        if supports_json:
             kwargs["response_format"] = {"type": "json_object"}
         completion = await client.chat.completions.create(**kwargs)
         raw = completion.choices[0].message.content or ""
@@ -4274,6 +4411,28 @@ async def dispatch_tool(
     }
 
 
+def _compute_vfs_delta(before: dict[str, str], after: dict[str, str]) -> dict[str, dict[str, int]]:
+    """对比两个 VFS 快照，返回每个文件的 {add, del} 行数。
+
+    Why: 子任务级 diff 需要知道"这个子任务改了什么"，而非整个项目的最终状态。
+    用逐行 diff 计算行数变化，前端据此渲染"文件修改 · N 个文件"卡片。
+    """
+    delta: dict[str, dict[str, int]] = {}
+    all_paths = set(before.keys()) | set(after.keys())
+    for path in sorted(all_paths):
+        old_lines = (before.get(path) or "").splitlines()
+        new_lines = (after.get(path) or "").splitlines()
+        if old_lines == new_lines:
+            continue
+        # 简单行 diff：统计新增/删除行数（不追求 LCS 精确，够用即可）
+        old_set = set(old_lines)
+        new_set = set(new_lines)
+        added = sum(1 for l in new_lines if l not in old_set)
+        deleted = sum(1 for l in old_lines if l not in new_set)
+        delta[path] = {"add": added, "del": deleted}
+    return delta
+
+
 async def stream_tool_loop(
     client: Any,
     model: str,
@@ -4292,8 +4451,15 @@ async def stream_tool_loop(
     """
     total_sse: list[str] = []
     tools = [t.to_openai_schema() for t in TOOL_REGISTRY.values()]
+    # Why: 思考参数按供应商能力分发；不支持的供应商（DeepSeek）不传 extra_body。
+    tool_caps = capabilities_for_model(model)
+    tool_extra_body: dict[str, Any] | None = None
+    if tool_caps.thinking_control == "glm":
+        tool_extra_body = {"thinking": {"type": "enabled", "reasoning_effort": "medium"}}
+    elif tool_caps.thinking_control == "qwen_budget":
+        tool_extra_body = {"enable_thinking": True, "thinking_budget": min(8_000, max(max_tokens - 1_024, 256))}
     for _round in range(max_rounds):
-        resp = await client.chat.completions.create(
+        create_kwargs: dict[str, Any] = dict(
             model=model,
             messages=messages,
             tools=tools,
@@ -4301,8 +4467,10 @@ async def stream_tool_loop(
             stream=False,
             temperature=0.2,
             max_tokens=max_tokens,
-            extra_body={"thinking": {"type": "enabled", "reasoning_effort": "medium"}},
         )
+        if tool_extra_body:
+            create_kwargs["extra_body"] = tool_extra_body
+        resp = await client.chat.completions.create(**create_kwargs)
         msg = resp.choices[0].message
         tool_calls = getattr(msg, "tool_calls", None) or []
         if tool_calls:
@@ -4358,6 +4526,7 @@ async def fullstack_generate_stream(
     run_id: str,
     terminal_pool: Any,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    thinking_budget: int | None = None,
     decompose: bool = True,
     session_id: str | None = None,
     memory_engine: Any | None = None,
@@ -4386,12 +4555,15 @@ async def fullstack_generate_stream(
                 yield format_sse({"type": "agent_activity", "channel": "status", "phase": "analyzing", "content": "视觉分析失败，已回退到纯文本 prompt。", "done": False})
 
         # Why: Phase2 记忆上下文——以追加段形式拼到 system prompt 末尾，失败时返回空串。
-        memory_suffix = _build_memory_prompt_suffix(
+        memory_suffix, matched_skills = _build_memory_prompt_suffix(
             memory_engine,
             session_id,
             user_input=(effective_prompt or "")[:500],
             current_vfs=None,
+            skill_store=skill_store,
         )
+        for ev in _skill_matched_events(matched_skills):
+            yield ev
 
         # ── 拆解链：复杂需求先拆成子任务，逐个单独生成该模块，实现"边写边做" ──
         # Why: 一次性生成整个 VFS 会让 GLM 思考量爆炸、max_tokens 被 reasoning_content 占满，
@@ -4408,6 +4580,8 @@ async def fullstack_generate_stream(
             task_results: list[dict[str, Any]] = []
             for task in task_list:
                 task_id = task["id"]
+                # Why: 子任务开始前快照，结束后对比计算 delta，前端据此渲染"文件修改 · N 个文件"。
+                vfs_before = dict(working_vfs)
                 yield format_sse({"type": "task_update", "task_id": task_id, "status": "in_progress", "done": False})
                 try:
                     # Why: 每个子任务跑一个独立 Agent 工具循环。write_file 等工具在循环内
@@ -4445,7 +4619,15 @@ async def fullstack_generate_stream(
                     })
                     if isinstance(sub_envelope.get("terminal_commands"), list) and sub_envelope.get("terminal_commands"):
                         envelope_for_terminal = sub_envelope
-                    yield format_sse({"type": "task_update", "task_id": task_id, "status": "completed", "done": False})
+                    # 计算子任务级 delta 并随 task_update 推送，前端据此渲染"文件修改 · N 个文件"卡片。
+                    delta = _compute_vfs_delta(vfs_before, working_vfs)
+                    yield format_sse({
+                        "type": "task_update",
+                        "task_id": task_id,
+                        "status": "completed",
+                        "delta": delta,
+                        "done": False,
+                    })
                     task_results.append({"id": task_id, "status": "completed"})
                 except Exception as exc:
                     logger.warning("[fullstack_generate_stream] 子任务 %d 失败：%s", task_id, str(exc)[:200])
@@ -4480,6 +4662,7 @@ async def fullstack_generate_stream(
                 max_tokens=16_000,
                 status_stream_label="正在规划全栈项目结构…",
                 reasoning_effort=reasoning_effort,
+                thinking_budget=thinking_budget,
             )
             for ev in sse_events:
                 yield ev
@@ -4605,6 +4788,7 @@ async def fullstack_generate_stream(
             summary=envelope.get("summary", ""),
             skill_type="task_flow",
         )
+        yield format_sse({"type": "memory_update", "layer": "vfs", "action": "updated", "detail": "patch 成功，记忆已更新。", "done": True})
         yield format_sse({"type": "code_update", "code": code, "done": True})
     except Exception:
         logger.error("[fullstack_generate_stream] 全栈生成异常。\n%s", traceback.format_exc())
@@ -4625,6 +4809,7 @@ async def fullstack_patch_stream(
     terminal_pool: Any,
     mentioned_files: list[str] | None = None,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    thinking_budget: int | None = None,
     decompose: bool = True,
     session_id: str | None = None,
     memory_engine: Any | None = None,
@@ -4644,6 +4829,11 @@ async def fullstack_patch_stream(
     # 保留：fullstack patch 需要 workspace_id/run_id/terminal_pool 给 terminal_commands 提案审批链（propose_command）。
     _ = (workspace_id, run_id, terminal_pool)
     last_error = ""
+    # Why: Phase3 诊断日志——快速定位"请求立刻结束"问题。
+    logger.info(
+        "[fullstack_patch_stream][diag] start run_id=%s instruction=%r vfs_files=%d session_id=%s",
+        run_id, (instruction or "")[:80], len(vfs) if isinstance(vfs, dict) else -1, session_id,
+    )
     try:
         yield format_sse({"type": "agent_activity", "channel": "status", "phase": "analyzing", "content": "正在检查相关文件以及前端、API、数据库之间的影响范围。", "done": False})
         current_vfs = validate_fullstack_vfs(vfs)
@@ -4683,12 +4873,15 @@ async def fullstack_patch_stream(
         # Why: Phase2 记忆上下文——以追加段形式拼到 system prompt 末尾，
         # 让模型既遵守代码契约，又能感知历史档案卡/摘要/最近对话。
         # 失败时返回空串，主流程无感知。
-        memory_suffix = _build_memory_prompt_suffix(
+        memory_suffix, matched_skills = _build_memory_prompt_suffix(
             memory_engine,
             session_id,
             user_input=(effective_instruction or "")[:500],
             current_vfs=current_vfs,
+            skill_store=skill_store,
         )
+        for ev in _skill_matched_events(matched_skills):
+            yield ev
 
         # ── 任务拆解：复杂指令先拆成子任务再逐个执行 ─────────────────
         # Why: GLM 在复杂补丁场景下思考量巨大，max_tokens 全被 reasoning_content 占满，
@@ -4727,6 +4920,7 @@ async def fullstack_patch_stream(
                             # 避免 GLM 的 reasoning_content 占光 max_tokens 导致 content 为空。
                             thinking="disabled",
                             reasoning_effort=reasoning_effort,
+                            thinking_budget=thinking_budget,
                         )
                         for ev in sub_sse:
                             yield ev
@@ -4837,6 +5031,7 @@ async def fullstack_patch_stream(
                         summary=envelope_for_summary.get("summary", "") if isinstance(envelope_for_summary, dict) else "",
                         skill_type="task_flow",
                     )
+                    yield format_sse({"type": "memory_update", "layer": "vfs", "action": "updated", "detail": "patch 成功，记忆已更新。", "done": True})
                     yield format_sse({"type": "code_update", "code": code, "done": False})
                     yield format_sse({"type": "code_update", "code": code, "done": True})
                     return
@@ -4868,11 +5063,14 @@ async def fullstack_patch_stream(
                     client,
                     model=model_name,
                     messages=messages,
-                    temperature=0.1,
+                    # Why: 温度爬坡——0.1 首轮保精度；被拒后若仍用 0.1，确定性模型（实测千问
+                    # 两次输出 content_len 完全相同）会复读同一个坏补丁，重试失去意义。
+                    temperature=(0.1, 0.4, 0.7)[synthesis_attempt],
                     max_tokens=6_000,
                     phase="patching",
                     status_stream_label="正在分析全栈项目并生成精确补丁…",
                     reasoning_effort=reasoning_effort,
+                    thinking_budget=thinking_budget,
                 )
                 for ev in sse_events:
                     yield ev
@@ -4887,6 +5085,19 @@ async def fullstack_patch_stream(
                     )
                 env_a: dict[str, Any] | None = None
                 if env_a_raw is not None:
+                    # Why: 模型有时会把含 operations/files 的修改请求标成 intent=answer，
+                    # 导致后端走回答分支、不执行代码变更。这里做兜底纠正：只要 payload 里有
+                    # operations 或 files，intent 必须是 patch。
+                    payload_a = env_a_raw.get("payload") if isinstance(env_a_raw.get("payload"), dict) else None
+                    if env_a_raw.get("intent") == "answer" and payload_a:
+                        has_ops = isinstance(payload_a.get("operations"), list) and len(payload_a["operations"]) > 0
+                        has_files = isinstance(payload_a.get("files"), dict) and len(payload_a["files"]) > 0
+                        if has_ops or has_files:
+                            logger.warning(
+                                "[terminal_cmd][patch_A] 意图纠正：intent=answer 但 payload 含 %s，已改为 patch。",
+                                "operations" if has_ops else "files",
+                            )
+                            env_a_raw["intent"] = "patch"
                     tc_list_a = env_a_raw.get("terminal_commands")
                     tc_count_a = len(tc_list_a) if isinstance(tc_list_a, list) else 0
                     logger.info(
@@ -4918,8 +5129,19 @@ async def fullstack_patch_stream(
                     logger.warning("[terminal_cmd][patch_A] attempt=%d envelope 为 None，跳过提案链。", synthesis_attempt)
                 if env_a is not None and synthesis_attempt == 0:
                     envelope_for_summary = env_a
+                logger.info(
+                    "[fullstack_patch_stream][diag] PathA attempt=%d intent=%s has_payload=%s run_id=%s",
+                    synthesis_attempt,
+                    env_a.get("intent") if env_a is not None else "None",
+                    bool(env_a is not None and isinstance(env_a.get("payload"), dict)),
+                    run_id,
+                )
                 # answer/ask_clarification 直接返回
                 if env_a is not None and env_a["intent"] in {"answer", "ask_clarification"}:
+                    logger.info(
+                        "[fullstack_patch_stream][diag] PathA intent=%s early_return run_id=%s",
+                        env_a.get("intent"), run_id,
+                    )
                     answer_text = (
                         env_a["payload"]["text"]
                         if isinstance(env_a.get("payload"), dict) and isinstance(env_a["payload"].get("text"), str)
@@ -4947,18 +5169,40 @@ async def fullstack_patch_stream(
                         if isinstance(p2.get("files"), dict) or isinstance(p2.get("deleted"), list):
                             candidate_vfs = apply_file_replace(current_vfs, p2)
                     # 分支 3：正常 operations
+                    ops_source: list[Any] | None = None
                     if candidate_vfs is None:
                         if env_a is not None and isinstance(env_a.get("payload"), dict) and isinstance(env_a["payload"].get("operations"), list):
                             ops_source = env_a["payload"]["operations"]
                         else:
                             ops_source = _parse_vfs_patch_payload(content)
                         candidate_vfs = apply_vfs_edit_operations(current_vfs, ops_source)
+                    # Why: 需求已被先前修改满足时，模型会产出 target==content 的幂等补丁
+                    # （实测千问行为）。此时重试与完整重生成都是纯浪费，直接按"已满足"回答。
+                    if candidate_vfs == current_vfs and patch_is_idempotent(current_vfs, ops_source or []):
+                        logger.info(
+                            "[fullstack_patch_stream][diag] PathA 幂等补丁（需求已满足），提前返回 run_id=%s",
+                            run_id,
+                        )
+                        already_text = (
+                            "该需求在当前代码中已经满足，无需重复修改。"
+                            "如果你想要不同的效果（例如换一批图片、调整样式细节），请补充说明具体差异。"
+                        )
+                        yield format_sse({"type": "runtime_summary", "content": already_text, "intent": "answer", "done": True})
+                        vfs_code = json.dumps(current_vfs, ensure_ascii=False, indent=2)
+                        yield format_sse({"type": "code_update", "code": vfs_code, "done": True})
+                        return
                     ensure_changed(current_vfs, candidate_vfs)
                     reject_destructive_patch(current_vfs, candidate_vfs, bootstrap_mode=False)
                     updated_vfs = validate_vfs_javascript(candidate_vfs)
                     break
                 except (ValueError, json.JSONDecodeError) as exc:
                     last_error = str(exc)
+                    # Why: 补丁被拒原因必须落日志——千问重试风暴（相同补丁反复被拒）
+                    # 只能靠这个日志定位是锚点不匹配还是操作格式问题。
+                    logger.warning(
+                        "[fullstack_patch_stream][diag] PathA attempt=%d 补丁被拒绝 run_id=%s reason=%s",
+                        synthesis_attempt, run_id, last_error[:300],
+                    )
                     if synthesis_attempt >= 2:
                         break
                     yield format_sse({
@@ -5015,6 +5259,7 @@ async def fullstack_patch_stream(
                     phase="patching",
                     status_stream_label="正在生成完整文件替换方案…",
                     reasoning_effort=reasoning_effort,
+                    thinking_budget=thinking_budget,
                 )
                 for ev in sse_events:
                     yield ev
@@ -5143,6 +5388,7 @@ async def fullstack_patch_stream(
                 phase="patching",
                 status_stream_label="正在重新生成完整项目…",
                 reasoning_effort=reasoning_effort,
+                thinking_budget=thinking_budget,
             )
             for ev in sse_events:
                 yield ev
@@ -5182,6 +5428,7 @@ async def fullstack_patch_stream(
             summary=provided_summary,
             skill_type="task_flow",
         )
+        yield format_sse({"type": "memory_update", "layer": "vfs", "action": "updated", "detail": "patch 成功，记忆已更新。", "done": True})
         yield format_sse({
             "type": "runtime_summary",
             "content": summarize_vfs_delta("patch", current_vfs, updated_vfs, provided_summary),
@@ -5223,27 +5470,41 @@ def create_code_router(
     router = APIRouter(prefix="/api/code", tags=["code"])
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     def active_client():
+        """返回 (client, model_id, reasoning_effort, thinking_budget)。
+
+        Why: settings_provider 现返回完整 ModelSettings 对象（兼容旧四元组），
+        千问的 thinking_budget 才能沿调用链传入 stream_json_completion。
+        """
         if settings_provider is None:
-            return client, model_name, "high"
-        settings_tuple = settings_provider()
-        current_api_key, current_base_url, current_model = settings_tuple[0], settings_tuple[1], settings_tuple[2]
-        reasoning_effort = settings_tuple[3] if len(settings_tuple) > 3 else "high"
-        return AsyncOpenAI(api_key=current_api_key, base_url=current_base_url), current_model, reasoning_effort
+            return client, model_name, "high", None
+        current = settings_provider()
+        if isinstance(current, tuple):  # 兼容旧的 (api_key, base_url, model_id, reasoning_effort) 元组
+            current_api_key, current_base_url, current_model = current[0], current[1], current[2]
+            effort = current[3] if len(current) > 3 else "high"
+            ensure_direct_connection(current_base_url)
+            return AsyncOpenAI(api_key=current_api_key, base_url=current_base_url), current_model, effort, None
+        ensure_direct_connection(current.base_url)
+        return (
+            AsyncOpenAI(api_key=current.api_key or "not-configured", base_url=current.base_url),
+            current.model_id,
+            current.reasoning_effort,
+            current.thinking_budget,
+        )
     archive_workspace = workspace_root or Path(
         os.getenv("CODE_WORKSPACE_PATH", Path.cwd() / "workspace")
     )
 
     @router.post("/generate")
     async def generate_code(request: CodeGenerateRequest):
-        client, model_name, reasoning_effort = active_client()
+        client, model_name, reasoning_effort, thinking_budget = active_client()
         prompt = request.prompt.strip()
         if not prompt:
             raise HTTPException(status_code=422, detail="网页需求不能为空。")
-        # Why: 多模态附件需要 GLM 视觉模型支持，DeepSeek/Custom provider 无法消费 image_url。
-        if request.attachments and "glm" not in model_name.lower():
+        # Why: 附件门禁走能力矩阵——视觉模型（GLM-5V / 千问 Qwen-VL）才能消费 image_url。
+        if request.attachments and not capabilities_for_model(model_name).supports_vision:
             raise HTTPException(
                 status_code=422,
-                detail="多模态附件当前仅支持 GLM 模型，请在顶部切换到 GLM-5V Turbo。",
+                detail="多模态附件当前仅支持视觉模型，请切换到 GLM-5V Turbo 或千问 Qwen-VL Max。",
             )
         try:
             validate_attachment_mix(request.attachments)
@@ -5267,7 +5528,7 @@ def create_code_router(
 
     @router.post("/fix")
     async def fix_code(request: CodeFixRequest):
-        client, model_name, reasoning_effort = active_client()
+        client, model_name, reasoning_effort, thinking_budget = active_client()
         code = request.code.strip()
         error = request.error.strip()
         if not code or not error:
@@ -5283,6 +5544,7 @@ def create_code_router(
                 run_id=request.run_id,
                 terminal_pool=terminal_pool or _DEFAULT_TERMINAL_POOL,
                 reasoning_effort=reasoning_effort,
+                thinking_budget=thinking_budget,
                 session_id=request.session_id,
                 memory_engine=memory_engine,
                 vfs_store=vfs_store,
@@ -5298,7 +5560,7 @@ def create_code_router(
 
     @router.post("/test")
     async def test_code(request: CodeAcceptanceRequest):
-        client, model_name, reasoning_effort = active_client()
+        client, model_name, reasoning_effort, thinking_budget = active_client()
         try:
             return await run_acceptance_agent(request, client, model_name)
         except (ValueError, json.JSONDecodeError) as exc:
@@ -5314,7 +5576,7 @@ def create_code_router(
 
     @router.post("/modify")
     async def modify_code(request: CodeModifyRequest):
-        client, model_name, reasoning_effort = active_client()
+        client, model_name, reasoning_effort, thinking_budget = active_client()
         code = request.code.strip()
         instruction = request.instruction.strip()
         if not code or not instruction:
@@ -5322,10 +5584,10 @@ def create_code_router(
                 status_code=422,
                 detail="当前代码和修改指令不能为空。",
             )
-        if request.attachments and "glm" not in model_name.lower():
+        if request.attachments and not capabilities_for_model(model_name).supports_vision:
             raise HTTPException(
                 status_code=422,
-                detail="多模态附件当前仅支持 GLM 模型，请在顶部切换到 GLM-5V Turbo。",
+                detail="多模态附件当前仅支持视觉模型，请切换到 GLM-5V Turbo 或千问 Qwen-VL Max。",
             )
         try:
             validate_attachment_mix(request.attachments)
@@ -5345,6 +5607,7 @@ def create_code_router(
                 run_id=request.run_id,
                 terminal_pool=terminal_pool or _DEFAULT_TERMINAL_POOL,
                 reasoning_effort=reasoning_effort,
+                thinking_budget=thinking_budget,
                 session_id=request.session_id,
                 memory_engine=memory_engine,
                 vfs_store=vfs_store,
@@ -5360,12 +5623,12 @@ def create_code_router(
 
     @router.post("/fullstack/generate")
     async def generate_fullstack(request: FullstackGenerateRequest):
-        client, model_name, reasoning_effort = active_client()
-        # Why: 多模态附件需要 GLM 视觉模型支持，DeepSeek/Custom provider 无法消费 image_url。
-        if request.attachments and "glm" not in model_name.lower():
+        client, model_name, reasoning_effort, thinking_budget = active_client()
+        # Why: 附件门禁走能力矩阵——视觉模型（GLM-5V / 千问 Qwen-VL）才能消费 image_url。
+        if request.attachments and not capabilities_for_model(model_name).supports_vision:
             raise HTTPException(
                 status_code=422,
-                detail="多模态附件当前仅支持 GLM 模型，请在顶部切换到 GLM-5V Turbo。",
+                detail="多模态附件当前仅支持视觉模型，请切换到 GLM-5V Turbo 或千问 Qwen-VL Max。",
             )
         try:
             validate_attachment_mix(request.attachments)
@@ -5378,6 +5641,7 @@ def create_code_router(
                 run_id=request.run_id,
                 terminal_pool=terminal_pool or _DEFAULT_TERMINAL_POOL,
                 reasoning_effort=reasoning_effort,
+                thinking_budget=thinking_budget,
                 session_id=request.session_id,
                 memory_engine=memory_engine,
                 vfs_store=vfs_store,
@@ -5389,42 +5653,69 @@ def create_code_router(
 
     @router.post("/fullstack/modify")
     async def modify_fullstack(request: FullstackModifyRequest):
-        client, model_name, reasoning_effort = active_client()
-        if request.attachments and "glm" not in model_name.lower():
+        client, model_name, reasoning_effort, thinking_budget = active_client()
+        if request.attachments and not capabilities_for_model(model_name).supports_vision:
             raise HTTPException(
                 status_code=422,
-                detail="多模态附件当前仅支持 GLM 模型，请在顶部切换到 GLM-5V Turbo。",
+                detail="多模态附件当前仅支持视觉模型，请切换到 GLM-5V Turbo 或千问 Qwen-VL Max。",
             )
         try:
             validate_attachment_mix(request.attachments)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        async def _logged_stream() -> AsyncIterator[str]:
+            # Why: Phase3 诊断——前端"瞬间已结束但后端仍在跑"问题定位。
+            # 记录每个 SSE 事件的 type/channel/done，若存在提前 done=True 或异常断流可立即定位。
+            seq = 0
+            try:
+                async for raw in fullstack_patch_stream(
+                    request.vfs,
+                    request.instruction.strip(),
+                    request.target_element.model_dump() if request.target_element else None,
+                    client,
+                    model_name,
+                    request.diagnostics.strip(),
+                    request.attachments,
+                    workspace_id=request.workspace_id or default_workspace_id,
+                    run_id=request.run_id,
+                    terminal_pool=terminal_pool or _DEFAULT_TERMINAL_POOL,
+                    mentioned_files=request.mentioned_files,
+                    reasoning_effort=reasoning_effort,
+                    thinking_budget=thinking_budget,
+                    session_id=request.session_id,
+                    memory_engine=memory_engine,
+                    vfs_store=vfs_store,
+                    skill_store=skill_store,
+                ):
+                    seq += 1
+                    try:
+                        payload = json.loads(raw.removeprefix("data:").strip())
+                        if payload.get("done") or payload.get("type") in {"error", "code_update", "runtime_summary"}:
+                            logger.info(
+                                "[modify_sse][diag] seq=%d type=%s channel=%s done=%s run_id=%s",
+                                seq, payload.get("type"), payload.get("channel"), payload.get("done"), request.run_id,
+                            )
+                    except (ValueError, AttributeError):
+                        pass
+                    yield raw
+                logger.info("[modify_sse][diag] stream finished normally seq_total=%d run_id=%s", seq, request.run_id)
+            except asyncio.CancelledError:
+                logger.warning("[modify_sse][diag] stream CANCELLED (client disconnected) seq=%d run_id=%s", seq, request.run_id)
+                raise
+            except Exception:
+                logger.exception("[modify_sse][diag] stream raised at seq=%d run_id=%s", seq, request.run_id)
+                raise
+
         return StreamingResponse(
-            fullstack_patch_stream(
-                request.vfs,
-                request.instruction.strip(),
-                request.target_element.model_dump() if request.target_element else None,
-                client,
-                model_name,
-                request.diagnostics.strip(),
-                request.attachments,
-                workspace_id=request.workspace_id or default_workspace_id,
-                run_id=request.run_id,
-                terminal_pool=terminal_pool or _DEFAULT_TERMINAL_POOL,
-                mentioned_files=request.mentioned_files,
-                reasoning_effort=reasoning_effort,
-                session_id=request.session_id,
-                memory_engine=memory_engine,
-                vfs_store=vfs_store,
-                skill_store=skill_store,
-            ),
+            _logged_stream(),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
     @router.post("/fullstack/fix")
     async def fix_fullstack(request: FullstackFixRequest):
-        client, model_name, reasoning_effort = active_client()
+        client, model_name, reasoning_effort, thinking_budget = active_client()
         return StreamingResponse(
             fullstack_patch_stream(
                 request.vfs,
@@ -5437,6 +5728,7 @@ def create_code_router(
                 run_id=request.run_id,
                 terminal_pool=terminal_pool or _DEFAULT_TERMINAL_POOL,
                 reasoning_effort=reasoning_effort,
+                thinking_budget=thinking_budget,
                 decompose=False,
                 session_id=request.session_id,
                 memory_engine=memory_engine,

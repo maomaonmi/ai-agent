@@ -1,11 +1,13 @@
 """
 全能型智能助手 FastAPI 服务
 支持：标准对话 / 深度思考 / 联网搜索 / 深度调研
-启动方式: uvicorn main:app --reload --port 8000
+启动方式: python main.py（必须走 __main__ 入口，reload_excludes 才会生效；
+CLI 直启 uvicorn main:app --reload 不会读取该配置，落盘 generated/ 会触发整站热重载）
 """
 
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Annotated, TypedDict, List, Dict, Literal, Optional, Any
@@ -31,7 +33,7 @@ from agent_factory import (
     generate_agent_config,
 )
 from session_memory import SessionNotFoundError, SessionStore
-from model_settings import ModelSettings, ModelSettingsStore
+from model_settings import MODEL_CATALOG, ModelSettings, ModelSettingsStore, capabilities_for_model, ensure_direct_connection
 from glm_adapter import ChatAttachment, build_user_content, choose_glm_model, reasoning_from_delta, validate_attachment_mix
 from App import create_code_router
 # Why: Phase2 记忆系统——三个 store 在 main.py 启动时统一初始化，
@@ -1733,9 +1735,30 @@ async def lifespan(app: FastAPI):
     print("[FastAPI] 启动中，预热 LangGraph...")
     get_langgraph_app()
     get_plan_execute_app()
+    _cleanup_old_generated_runs()
     print("[FastAPI] 启动完成，服务已就绪")
     yield
     print("[FastAPI] 关闭中...")
+
+
+def _cleanup_old_generated_runs(keep: int = 20) -> None:
+    """LRU 清理 generated/<run_id> 落盘目录，按修改时间保留最近 keep 个。
+
+    Why: 每次代码生成/修复都会把 VFS 落盘到 generated/<run_id>/，长期不清理
+    会无限占盘（计划书 R6）。此处不删仍在引用的 checkpoint——checkpoint 存的是
+    SQLite BLOB，与 generated/ 目录无强引用，删旧目录不影响跨会话 VFS 恢复。
+    """
+    generated_dir = Path(__file__).resolve().parent / "generated"
+    if not generated_dir.is_dir():
+        return
+    try:
+        run_dirs = [entry for entry in generated_dir.iterdir() if entry.is_dir()]
+        run_dirs.sort(key=lambda entry: entry.stat().st_mtime, reverse=True)
+        for stale in run_dirs[keep:]:
+            shutil.rmtree(stale, ignore_errors=True)
+            print(f"[FastAPI] 清理过期 run 目录: {stale.name}")
+    except Exception as exc:  # 清理失败不阻断启动
+        print(f"[FastAPI] generated/ LRU 清理失败（已忽略）: {exc}")
 
 
 app = FastAPI(
@@ -1756,12 +1779,7 @@ app.include_router(create_code_router(
     api_key=DEEPSEEK_API_KEY,
     base_url=DEEPSEEK_BASE_URL,
     model_name=ACTIVE_MODEL_ID,
-    settings_provider=lambda: (
-        model_settings_store.load().api_key or "not-configured",
-        model_settings_store.load().base_url,
-        model_settings_store.load().model_id,
-        model_settings_store.load().reasoning_effort,
-    ),
+    settings_provider=model_settings_store.load,
     terminal_pool=TERMINAL_POOL,
     # Why: Phase2 注入记忆系统三个 store——所有 stream 函数的记忆钩子依赖此处的实参；
     # None 时降级为 no-op，保持 router 独立可测。
@@ -1903,6 +1921,12 @@ async def get_model_settings(provider: Optional[str] = None):
     return model_settings_store.public(provider)
 
 
+@app.get("/api/settings/model-catalog")
+async def get_model_catalog():
+    """模型目录：前端快速切换器与设置界面的单一数据源，含各变体能力标记。"""
+    return {"providers": MODEL_CATALOG}
+
+
 @app.put("/api/settings/model")
 async def update_model_settings(settings: ModelSettings):
     """Persist and immediately activate the selected OpenAI-compatible model."""
@@ -1981,17 +2005,19 @@ async def chat_stream(request: ChatRequest):
         raise HTTPException(status_code=400, detail="消息不能为空")
     active_settings = model_settings_store.load()
     if request.attachments:
-        if active_settings.provider != "glm":
-            raise HTTPException(status_code=422, detail="多模态附件当前仅支持 GLM 模型")
+        # Why: 附件门禁走能力矩阵——GLM 在 provider 层有 vision_model_id 自动切换兜底；
+        # 其余供应商要求当前模型本身支持视觉（如千问 Qwen-VL Max），否则明确拒绝。
+        if active_settings.provider != "glm" and not capabilities_for_model(active_settings.model_id).supports_vision:
+            raise HTTPException(status_code=422, detail="当前模型不支持多模态附件，请切换到视觉模型（GLM-5V Turbo / 千问 Qwen-VL Max）")
         if request.mode not in {"standard", "deep"}:
             raise HTTPException(status_code=422, detail="附件目前仅支持标准对话和深度思考模式")
         try:
             validate_attachment_mix(request.attachments)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if active_settings.provider == "glm" and request.mode in {"standard", "deep"}:
+    if active_settings.provider in {"glm", "qwen"} and request.mode in {"standard", "deep"}:
         return StreamingResponse(
-            generate_glm_chat_events(request, active_settings),
+            generate_direct_chat_events(request, active_settings),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
         )
@@ -2014,8 +2040,8 @@ async def chat_stream(request: ChatRequest):
     )
 
 
-def generate_glm_chat_events(request: ChatRequest, settings: ModelSettings):
-    """Stream official GLM Chat Completions content and reasoning deltas."""
+def generate_direct_chat_events(request: ChatRequest, settings: ModelSettings):
+    """Stream OpenAI 兼容供应商（GLM / 千问）的 content 与 reasoning deltas。"""
     def event(name: str, data: dict) -> str:
         return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
@@ -2023,21 +2049,37 @@ def generate_glm_chat_events(request: ChatRequest, settings: ModelSettings):
     thinking = settings.thinking_enabled and (
         request.mode == "deep" or runtime.deep_thinking == "on"
     )
-    model_id = choose_glm_model(settings, request.attachments)
+    caps = capabilities_for_model(settings.model_id)
+    # Why: GLM 附件走 vision_model_id 自动切换；千问需要当前模型本身就是视觉模型（入口门禁已保证）。
+    model_id = choose_glm_model(settings, request.attachments) if settings.provider == "glm" else settings.model_id
+    provider_label = "GLM" if settings.provider == "glm" else "千问"
     response_limit = {"brief": 2_000, "balanced": 8_000, "detailed": settings.max_tokens}[runtime.response_length]
     max_tokens = min(settings.max_tokens, response_limit)
+    # Why: 思考参数按供应商协议分发，互不复用——GLM 用 thinking.type+reasoning_effort；
+    # 千问用 enable_thinking+thinking_budget，且 budget 必须小于 max_tokens，否则挤占输出导致 content 为空。
+    extra_body: dict | None = None
+    if caps.thinking_control == "glm":
+        extra_body = {"thinking": {"type": "enabled" if thinking else "disabled"}}
+    elif caps.thinking_control == "qwen_budget":
+        qwen_thinking: dict = {"enable_thinking": thinking}
+        if thinking and settings.thinking_budget:
+            qwen_thinking["thinking_budget"] = min(settings.thinking_budget, max(max_tokens - 1_024, 256))
+        extra_body = qwen_thinking
     answer_parts: list[str] = []
     reasoning_parts: list[str] = []
     try:
-        yield event("node", {"node_name": f"GLM · {model_id}", "status": "processing"})
-        stream = OpenAI(api_key=settings.api_key, base_url=settings.base_url, timeout=120).chat.completions.create(
+        yield event("node", {"node_name": f"{provider_label} · {model_id}", "status": "processing"})
+        create_kwargs: dict = dict(
             model=model_id,
             messages=[{"role": "user", "content": build_user_content(request.message, request.attachments)}],
             stream=True,
             max_tokens=max_tokens,
             temperature=settings.temperature,
-            extra_body={"thinking": {"type": "enabled" if thinking else "disabled"}},
         )
+        if extra_body:
+            create_kwargs["extra_body"] = extra_body
+        ensure_direct_connection(settings.base_url)
+        stream = OpenAI(api_key=settings.api_key, base_url=settings.base_url, timeout=120).chat.completions.create(**create_kwargs)
         for chunk in stream:
             if not chunk.choices:
                 continue
@@ -2058,12 +2100,12 @@ def generate_glm_chat_events(request: ChatRequest, settings: ModelSettings):
         })
     except Exception as exc:
         status = getattr(exc, "status_code", None)
-        message = "GLM 调用失败，请检查模型、密钥和额度"
+        message = f"{provider_label} 调用失败，请检查模型、密钥和额度"
         if status in {401, 403}:
-            message = "GLM API 密钥无效或无权限"
+            message = f"{provider_label} API 密钥无效或无权限"
         elif status == 429:
-            message = "GLM 请求过于频繁或额度不足"
-        yield event("error", {"message": message, "code": f"GLM_{status or 'REQUEST_ERROR'}"})
+            message = f"{provider_label} 请求过于频繁或额度不足"
+        yield event("error", {"message": message, "code": f"{settings.provider.upper()}_{status or 'REQUEST_ERROR'}"})
 
 
 @app.post("/deep_research")
@@ -2197,9 +2239,140 @@ async def root():
             "deep_research": "POST /deep_research",
             "agents": "GET|POST /api/agents",
             "agent_generate": "POST /api/agents/generate",
-            "health": "GET /health"
+            "health": "GET /health",
+            "memory_profile": "GET /api/memory/profile/{session_id}",
+            "memory_skills": "GET /api/memory/skills",
         }
     }
+
+
+# ==========================================
+# 8.5 记忆系统 REST 端点（Phase 3 前端展示层）
+# ==========================================
+# Why: 让前端 MemoryPanel / SkillInspector 通过 REST 拉取四层记忆数据。
+# 全部走 main.py 启动时已初始化的 memory_engine / skill_store / vfs_store 单例，
+# 与 Phase 2 注入 create_code_router 的实参是同一批实例，保证数据一致。
+
+
+class ProfileCardOut(BaseModel):
+    field_key: str
+    field_value: object
+    valid_start: float
+    valid_end: float
+    source: str
+
+
+@app.get("/api/memory/profile/{session_id}")
+async def get_memory_profile(session_id: str):
+    """按字段返回当前生效档案卡及其完整历史（含已失效记录）。
+
+    Why: 前端档案卡区需要"当前画像"做展示，同时 profile_history 用于审计追踪
+    （tech_stack 何时从 React 变为 Vue）。这里组装成统一的 cards 数组。
+    """
+    if not session_id or len(session_id) < 8:
+        raise HTTPException(status_code=400, detail="session_id 非法。")
+    valid = memory_engine.get_valid_profile(session_id)
+    cards: list[dict[str, object]] = []
+    for field_key in valid:
+        history = memory_engine.get_profile_history(session_id, field_key)
+        for item in history:
+            cards.append(
+                {
+                    "field_key": item["field_key"],
+                    "field_value": item["field_value"],
+                    "valid_start": item["valid_start"],
+                    "valid_end": item["valid_end"],
+                    "source": item["source"],
+                }
+            )
+    return {"profile": valid, "cards": cards}
+
+
+@app.get("/api/memory/summary/{session_id}")
+async def get_memory_summary(session_id: str):
+    """返回会话的全部对话摘要（按 turn_end 倒序）。"""
+    if not session_id or len(session_id) < 8:
+        raise HTTPException(status_code=400, detail="session_id 非法。")
+    summaries = memory_engine.get_all_summaries(session_id)
+    return {"summaries": summaries}
+
+
+@app.get("/api/memory/vfs/restore/{session_id}")
+async def restore_memory_vfs(session_id: str):
+    """恢复会话最新的 VFS checkpoint（跨会话持久化的核心读取端点）。"""
+    if not session_id or len(session_id) < 8:
+        raise HTTPException(status_code=400, detail="session_id 非法。")
+    restored = vfs_store.restore_vfs(session_id)
+    if restored is None:
+        return {"vfs": {}, "checkpoint_id": None}
+    vfs, checkpoint_id = restored
+    return {"vfs": vfs, "checkpoint_id": checkpoint_id}
+
+
+class VFSCheckpointRequest(BaseModel):
+    vfs: dict[str, str]
+    run_id: str = Field(min_length=1, max_length=64)
+    trigger_reason: str = Field(default="manual", min_length=1)
+
+
+@app.post("/api/memory/vfs/checkpoint/{session_id}")
+async def save_memory_vfs(session_id: str, req: VFSCheckpointRequest):
+    """手动/自动保存一个 VFS checkpoint（供前端"保存快照"按钮调用）。"""
+    if not session_id or len(session_id) < 8:
+        raise HTTPException(status_code=400, detail="session_id 非法。")
+    checkpoint_id = vfs_store.save_checkpoint(
+        session_id, req.run_id, req.vfs, trigger_reason=req.trigger_reason
+    )
+    return {"checkpoint_id": checkpoint_id}
+
+
+@app.get("/api/memory/vfs/checkpoints/{session_id}")
+async def list_memory_vfs(session_id: str, limit: int = 10):
+    """列出会话最近的 VFS checkpoint 元数据（不含 BLOB 内容）。"""
+    if not session_id or len(session_id) < 8:
+        raise HTTPException(status_code=400, detail="session_id 非法。")
+    checkpoints = vfs_store.list_checkpoints(session_id, limit=max(1, min(limit, 50)))
+    return {"checkpoints": checkpoints}
+
+
+@app.get("/api/memory/skills")
+async def list_memory_skills(skill_type: str | None = None):
+    """列出全部 Skill 胶囊，可按类型过滤。"""
+    skills = skill_store.list_skills(skill_type=skill_type)
+    return {"skills": [s.to_dict() for s in skills], "count": len(skills)}
+
+
+@app.get("/api/memory/skills/{skill_id}")
+async def get_memory_skill(skill_id: int):
+    """返回单个 Skill 胶囊详情。"""
+    skill = skill_store.get_skill(skill_id)
+    if skill is None:
+        raise HTTPException(status_code=404, detail="Skill 不存在。")
+    return skill.to_dict()
+
+
+class SkillMatchRequest(BaseModel):
+    user_input: str = Field(min_length=1, max_length=2000)
+
+
+@app.post("/api/memory/skills/match")
+async def match_memory_skills(req: SkillMatchRequest):
+    """按用户输入做 Skill 匹配（关键词预筛 + LLM 二阶段）。
+
+    Why: match_skills 在 llm_matcher 缺省时退化为 quick_match（同步、离线友好），
+    这里不额外注入 LLM，保证端点稳定且不阻塞主流程。
+    """
+    matched = skill_store.match_skills(req.user_input)
+    return {"matched_skills": [s.to_dict() for s in matched]}
+
+
+@app.get("/api/memory/events/{session_id}")
+async def list_memory_events(session_id: str, limit: int = 50):
+    """返回会话的追加账本事件（limit 限制条数）。"""
+    if not session_id or len(session_id) < 8:
+        raise HTTPException(status_code=400, detail="session_id 非法。")
+    events = memory_engine.query_events(session_id, limit=max(1, min(limit, 200)))
+    return {"events": events}
 
 
 # ==========================================
@@ -2214,6 +2387,14 @@ if __name__ == "__main__":
     print("聊天端点: POST http://127.0.0.1:8000/chat")
     print("深度调研: POST http://127.0.0.1:8000/deep_research")
     print("=" * 60)
+    # Why: uvicorn FileFilter 对"存在的目录"走 exclude_dirs 前缀过滤（exclude_dir in path.parents），
+    # 对 glob 走 Path.match——实测 Windows 下 "generated/**" / "**/generated/**" 全部匹配失败，
+    # 导致落盘 generated/<run_id>/ 触发整站热重载、SSE 流中途断连（前端瞬间"已结束"）。
+    # 只有传【已存在的绝对目录路径】才能可靠排除。
+    _generated_dir = Path(__file__).resolve().parent / "generated"
+    _generated_dir.mkdir(exist_ok=True)
+    _workspace_dir = Path(os.getenv("CODE_WORKSPACE_PATH", Path(__file__).resolve().parent / "workspace")).resolve()
+    _workspace_dir.mkdir(exist_ok=True)
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
@@ -2221,5 +2402,5 @@ if __name__ == "__main__":
         reload=True,
         # Why: 生成过程会持续写 generated/<run_id>/backend/*.py，若被 WatchFiles 监控，
         # 每次落盘都触发整个 App 重载，导致进行中的 SSE 断连（前端 Failed to fetch）。
-        reload_excludes=["generated/**"],
+        reload_excludes=[str(_generated_dir), str(_workspace_dir)],
     )

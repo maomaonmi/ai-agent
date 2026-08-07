@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LUXE MALL - 精品商场</title>
+  <link rel="stylesheet" href="styles.css">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo" onclick="resetView()">
+        <span class="logo-icon">◆</span>
+        <span class="logo-text">LUXE MALL</span>
+      </div>
+      <div class="search-box">
+        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        <input type="text" id="searchInput" placeholder="搜索商品..." oninput="handleSearch()">
+      </div>
+      <div class="header-actions">
+        <button class="cart-btn" onclick="toggleCart()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+          <span class="cart-badge" id="cartBadge" style="display:none;">0</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="main-layout">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-section">
+        <h3 class="sidebar-title">商品分类</h3>
+        <ul class="category-list" id="categoryList">
+          <li class="category-item active" data-id="all" onclick="filterByCategory('all', this)">全部商品</li>
+        </ul>
+      </div>
+      <div class="sidebar-section">
+        <h3 class="sidebar-title">价格区间</h3>
+        <ul class="category-list">
+          <li class="category-item" data-price="all" onclick="filterByPrice('all', this)">全部价格</li>
+          <li class="category-item" data-price="0-200" onclick="filterByPrice('0-200', this)">¥0 - ¥200</li>
+          <li class="category-item" data-price="200-500" onclick="filterByPrice('200-500', this)">¥200 - ¥500</li>
+          <li class="category-item" data-price="500-1000" onclick="filterByPrice('500-1000', this)">¥500 - ¥1000</li>
+          <li class="category-item" data-price="1000-99999" onclick="filterByPrice('1000-99999', this)">¥1000 以上</li>
+        </ul>
+      </div>
+    </aside>
+
+    <section class="content">
+      <div class="hero-banner" id="heroBanner">
+        <div class="hero-slides" id="heroSlides">
+          <div class="hero-slide active" data-index="0">
+            <div class="hero-content">
+              <span class="hero-tag">限时特惠</span>
+              <h2 class="hero-title">新品首发 限时折扣</h2>
+              <p class="hero-subtitle">精选全球好物，品质生活从这里开始</p>
+              <button class="hero-btn" onclick="scrollToProducts()">立即选购</button>
+            </div>
+          </div>
+          <div class="hero-slide" data-index="1">
+            <div class="hero-content">
+              <span class="hero-tag">会员专享</span>
+              <h2 class="hero-title">尊享会员特权</h2>
+              <p class="hero-subtitle">注册即享新人礼包，更多专属优惠等你发现</p>
+              <button class="hero-btn" onclick="scrollToProducts()">了解更多</button>
+            </div>
+          </div>
+          <div class="hero-slide" data-index="2">
+            <div class="hero-content">
+              <span class="hero-tag">品质保障</span>
+              <h2 class="hero-title">正品保证 售后无忧</h2>
+              <p class="hero-subtitle">7天无理由退换，顺丰包邮，放心购物</p>
+              <button class="hero-btn" onclick="scrollToProducts()">开始探索</button>
+            </div>
+          </div>
+        </div>
+        <div class="hero-indicators" id="heroIndicators">
+          <span class="indicator active" data-index="0" onclick="switchSlide(0)"></span>
+          <span class="indicator" data-index="1" onclick="switchSlide(1)"></span>
+          <span class="indicator" data-index="2" onclick="switchSlide(2)"></span>
+        </div>
+      </div>
+      <div class="category-zone">
+        <h2 class="zone-title">精选分类专区</h2>
+        <p class="zone-subtitle">探索各类精选好物，发现品质生活</p>
+        <div class="category-zone-grid">
+          <div class="category-zone-card" data-cat="electronics" onclick="filterByCategory('electronics', document.querySelector('#categoryList .category-item[data-id=\'electronics\']'))">
+            <div class="cz-icon">📱</div>
+            <h3 class="cz-name">数码电子</h3>
+            <div class="cz-subs">
+              <span class="cz-sub">耳机音箱</span>
+              <span class="cz-sub">笔记本电脑</span>
+              <span class="cz-sub">智能穿戴</span>
+            </div>
+          </div>
+          <div class="category-zone-card" data-cat="fashion" onclick="filterByCategory('fashion', document.querySelector('#categoryList .category-item[data-id=\'fashion\']'))">
+            <div class="cz-icon">👗</div>
+            <h3 class="cz-name">时尚服饰</h3>
+            <div class="cz-subs">
+              <span class="cz-sub">外套大衣</span>
+              <span class="cz-sub">休闲夹克</span>
+              <span class="cz-sub">箱包配饰</span>
+            </div>
+          </div>
+          <div class="category-zone-card" data-cat="home" onclick="filterByCategory('home', document.querySelector('#categoryList .category-item[data-id=\'home\']'))">
+            <div class="cz-icon">🏠</div>
+            <h3 class="cz-name">家居生活</h3>
+            <div class="cz-subs">
+              <span class="cz-sub">灯具照明</span>
+              <span class="cz-sub">床品寝具</span>
+              <span class="cz-sub">厨房用品</span>
+            </div>
+          </div>
+          <div class="category-zone-card" data-cat="beauty" onclick="filterByCategory('beauty', document.querySelector('#categoryList .category-item[data-id=\'beauty\']'))">
+            <div class="cz-icon">💄</div>
+            <h3 class="cz-name">美妆护肤</h3>
+            <div class="cz-subs">
+              <span class="cz-sub">精华面霜</span>
+              <span class="cz-sub">彩妆唇釉</span>
+              <span class="cz-sub">防晒隔离</span>
+            </div>
+          </div>
+          <div class="category-zone-card" data-cat="sports" onclick="filterByCategory('sports', document.querySelector('#categoryList .category-item[data-id=\'sports\']'))">
+            <div class="cz-icon">🚴</div>
+            <h3 class="cz-name">运动户外</h3>
+            <div class="cz-subs">
+              <span class="cz-sub">骑行装备</span>
+              <span class="cz-sub">瑜伽健身</span>
+              <span class="cz-sub">户外冲锋</span>
+            </div>
+          </div>
+          <div class="category-zone-card" data-cat="food" onclick="filterByCategory('food', document.querySelector('#categoryList .category-item[data-id=\'food\']'))">
+            <div class="cz-icon">☕</div>
+            <h3 class="cz-name">食品饮料</h3>
+            <div class="cz-subs">
+              <span class="cz-sub">精品咖啡</span>
+              <span class="cz-sub">坚果零食</span>
+              <span class="cz-sub">冲饮茶饮</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="content-header">
+        <h1 class="page-title" id="pageTitle">全部商品</h1>
+        <span class="product-count" id="productCount"></span>
+      </div>
+      <div class="product-grid" id="productGrid">
+        <div class="loading-spinner" id="loadingSpinner">
+          <div class="spinner"></div>
+          <p>加载中...</p>
+        </div>
+      </div>
+      <div class="empty-state" id="emptyState" style="display:none;">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="64" height="64"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><path d="M8 11h6"/></svg>
+        <p>没有找到匹配的商品</p>
+      </div>
+    </section>
+  </main>
+
+  <div class="cart-overlay" id="cartOverlay" onclick="toggleCart()"></div>
+  <div class="cart-drawer" id="cartDrawer">
+    <div class="cart-header">
+      <h2>购物车</h2>
+      <button class="close-btn" onclick="toggleCart()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="24" height="24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+    </div>
+    <div class="cart-body" id="cartBody">
+      <div class="cart-empty" id="cartEmpty">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" width="48" height="48"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+        <p>购物车是空的</p>
+        <button class="btn-primary" onclick="toggleCart()">去逛逛</button>
+      </div>
+      <div class="cart-items" id="cartItems"></div>
+    </div>
+    <div class="cart-footer" id="cartFooter" style="display:none;">
+      <div class="cart-total">
+        <span>合计</span>
+        <span class="total-price" id="totalPrice">¥0</span>
+      </div>
+      <button class="btn-checkout" onclick="handleCheckout()">结算</button>
+      <button class="btn-clear" onclick="clearCart()">清空购物车</button>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="modalOverlay" onclick="closeModal()">
+    <div class="modal" id="productModal" onclick="event.stopPropagation()">
+      <button class="modal-close" onclick="closeModal()">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="24" height="24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+      </button>
+      <div class="modal-body" id="modalBody"></div>
+    </div>
+  </div>
+
+  <div class="toast-container" id="toastContainer"></div>
+  <script src="app.js"></script>
+</body>
+</html>
