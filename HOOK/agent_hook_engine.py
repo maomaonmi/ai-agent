@@ -110,6 +110,24 @@ class HookRegistry:
             for item in registrations
         ]
 
+    def set_enabled(self, hook_id: str, enabled: bool) -> Optional[Dict[str, Any]]:
+        """Toggle one registered hook and return its public metadata."""
+
+        for registrations in self.hooks.values():
+            for item in registrations:
+                if item.hook_id != hook_id:
+                    continue
+                item.enabled = enabled
+                return {
+                    "id": item.hook_id,
+                    "name": item.name,
+                    "lifecycle": item.hook_type.value,
+                    "enabled": item.enabled,
+                    "priority": item.priority,
+                    "policy": item.policy,
+                }
+        return None
+
     def fork(self, event_sink: Optional[Callable[[HookEvent], None]] = None) -> "HookRegistry":
         """Create a per-run view with shared registrations and isolated events."""
 

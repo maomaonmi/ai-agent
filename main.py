@@ -47,6 +47,7 @@ from model_settings import MODEL_CATALOG, ModelSettings, ModelSettingsStore, Ser
 from glm_adapter import ChatAttachment, build_user_content, choose_glm_model, reasoning_from_delta, validate_attachment_mix
 from App import create_code_router
 from App import _build_memory_prompt_suffix, _skill_matched_events
+from HOOK.agent_hook_engine import global_hook_registry
 # Why: Phase2 记忆系统——三个 store 在 main.py 启动时统一初始化，
 # 共用 SESSION_DB_PATH 同一 SQLite，FK 约束由 SessionStore._initialize() 先建表保证。
 from memory_engine import MemoryEngine
@@ -1455,6 +1456,10 @@ def resolve_runtime_mode(
 
     # 3) 独立的大模式（plan / agent / code / distributed_plan）：返回自身并带上上面的 runtime 标志
     return mode, wants_web, use_deep_thinking
+
+
+class HookToggleRequest(BaseModel):
+    enabled: bool
 
 
 class ChatRequest(BaseModel):
@@ -4426,6 +4431,20 @@ async def delete_factory_agent(agent_id: str):
     if not deleted:
         raise HTTPException(status_code=404, detail="智能体不存在。")
     return {"status": "success", "deleted": agent_id}
+
+
+@app.get("/api/hooks")
+async def list_hooks():
+    hooks = global_hook_registry.list_hooks()
+    return {"hooks": hooks, "count": len(hooks)}
+
+
+@app.put("/api/hooks/{hook_id}/toggle")
+async def toggle_hook(hook_id: str, request: HookToggleRequest):
+    hook = global_hook_registry.set_enabled(hook_id, request.enabled)
+    if hook is None:
+        raise HTTPException(status_code=404, detail="HOOK 不存在。")
+    return {"hook": hook}
 
 
 def generate_session_title(first_message: str) -> str:
