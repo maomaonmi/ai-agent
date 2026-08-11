@@ -1,0 +1,36 @@
+{
+  "mcpServers": {
+    "sequential-thinking-mcp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "env": {},
+      "enabled": true,
+      "installed_at": "2026-08-08T11:25:12"
+    },
+    "context7-mcp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp"
+      ],
+      "env": {},
+      "enabled": true,
+      "installed_at": "2026-08-08T11:27:38"
+    },
+    "fetch-mcp": {
+      "command": "python",
+      "args": [
+        "-m",
+        "mcp_server_fetch"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      },
+      "enabled": true,
+      "installed_at": "2026-08-08T14:10:23"
+    }
+  }
+}

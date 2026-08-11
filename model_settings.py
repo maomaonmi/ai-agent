@@ -39,48 +39,80 @@ class ProviderCapabilities:
     """
 
     supports_json_format: bool        # response_format=json_object 是否可靠
-    thinking_control: str             # "glm" | "qwen_budget" | "none"
+    thinking_control: str             # "glm" | "qwen_budget" | "deepseek" | "none"
     supports_vision: bool             # 当前模型是否可直接消费多模态附件
 
 
 def capabilities_for_model(model_id: str) -> ProviderCapabilities:
-    """按模型 ID 解析能力。GLM 在 provider 层总有 vision_model_id 兜底，故 supports_vision 恒 True。"""
+    """按 model_id 在 MODEL_CATALOG 中反查能力；未命中走保守默认。
+
+    Why: 收口字符串嗅探（历史 `"glm" in name` / `"qwen" in name`），让运行时能力判断
+    与前端展示共用 MODEL_CATALOG 同一数据源。新供应商只需在 MODEL_CATALOG 加条目即可，
+    无需改本函数。兜底分支保持历史行为，避免未知模型回退炸裂。
+    """
     name = (model_id or "").lower()
-    if "glm" in name:
-        # Why: GLM-5-turbo 在 json_object + stream 组合下 content 恒为空，必须禁用。
-        return ProviderCapabilities(False, "glm", True)
-    if "qwen" in name:
-        return ProviderCapabilities(True, "qwen_budget", "vl" in name)
+    for provider_variants in MODEL_CATALOG.values():
+        for variant in provider_variants:
+            if variant["model_id"].lower() == name:
+                return ProviderCapabilities(
+                    supports_json_format=variant.get("supports_json_format", True),
+                    thinking_control=variant.get("thinking_control", "none"),
+                    supports_vision=variant.get("supports_vision", False),
+                )
+    # 兜底：未知模型走保守默认（与历史行为一致）
     return ProviderCapabilities(True, "none", False)
 
 
 # 模型目录：前端 ModelQuickSwitcher / SettingsDialog 的单一数据源（GET /api/settings/model-catalog）。
+# Why: capabilities_for_model() 也走本表反查，运行时能力判断与前端展示共用同一数据源，
+# 杜绝历史上"catalog 改了但 capabilities_for_model 还在字符串嗅探"的双数据源问题。
 MODEL_CATALOG: dict[str, list[dict]] = {
     "qwen": [
         {"value": "qwen:qwen3.8-max", "label": "千问 Qwen3.8 Max · 旗舰", "model_id": "qwen3.8-max",
-         "supports_vision": False, "thinking_control": "budget", "input_context": 256_000, "output_context": 32_000},
+         "supports_vision": False, "supports_json_format": True,
+         "thinking_control": "qwen_budget", "input_context": 256_000, "output_context": 32_000},
         {"value": "qwen:qwen3.7-plus", "label": "千问 Qwen3.7 Plus · 均衡", "model_id": "qwen3.7-plus",
-         "supports_vision": False, "thinking_control": "budget", "input_context": 256_000, "output_context": 16_000},
+         "supports_vision": False, "supports_json_format": True,
+         "thinking_control": "qwen_budget", "input_context": 256_000, "output_context": 16_000},
         {"value": "qwen:qwen3.7-flash", "label": "千问 Qwen3.7 Flash · 性价比", "model_id": "qwen3.7-flash",
-         "supports_vision": False, "thinking_control": "budget", "input_context": 256_000, "output_context": 16_000},
+         "supports_vision": False, "supports_json_format": True,
+         "thinking_control": "qwen_budget", "input_context": 256_000, "output_context": 16_000},
         {"value": "qwen:qwen-vl-max", "label": "千问 Qwen-VL Max · 视觉", "model_id": "qwen-vl-max",
-         "supports_vision": True, "thinking_control": "none", "input_context": 128_000, "output_context": 8_000},
+         "supports_vision": True, "supports_json_format": True,
+         "thinking_control": "none", "input_context": 128_000, "output_context": 8_000},
+        # Why: qwen-deep-research 是千问专用深度研究模型，使用 DashScope 原生 API（非 OpenAI 兼容），
+        #   支持两步式调用（反问确认 + 深入研究）和四阶段流式响应。
+        {"value": "qwen:qwen-deep-research", "label": "千问 Deep Research · 深度研究", "model_id": "qwen-deep-research",
+         "supports_vision": False, "supports_json_format": False,
+         "thinking_control": "none", "input_context": 131_072, "output_context": 8_192,
+         "is_deep_research": True},
     ],
     "glm": [
         {"value": "glm:glm-5", "label": "GLM-5", "model_id": "glm-5",
-         "supports_vision": False, "thinking_control": "effort", "input_context": 128_000, "output_context": 16_000},
+         "supports_vision": False, "supports_json_format": False,
+         "thinking_control": "glm", "input_context": 128_000, "output_context": 16_000},
         {"value": "glm:glm-5.1", "label": "GLM-5.1", "model_id": "glm-5.1",
-         "supports_vision": False, "thinking_control": "effort", "input_context": 128_000, "output_context": 16_000},
+         "supports_vision": False, "supports_json_format": False,
+         "thinking_control": "glm", "input_context": 128_000, "output_context": 16_000},
         {"value": "glm:glm-5.2", "label": "GLM-5.2", "model_id": "glm-5.2",
-         "supports_vision": False, "thinking_control": "effort", "input_context": 128_000, "output_context": 16_000},
+         "supports_vision": False, "supports_json_format": False,
+         "thinking_control": "glm", "input_context": 128_000, "output_context": 16_000},
         {"value": "glm:glm-5-turbo", "label": "GLM-5 Turbo", "model_id": "glm-5-turbo",
-         "supports_vision": False, "thinking_control": "effort", "input_context": 128_000, "output_context": 16_000},
+         "supports_vision": False, "supports_json_format": False,
+         "thinking_control": "glm", "input_context": 128_000, "output_context": 16_000},
         {"value": "glm:glm-5v-turbo", "label": "GLM-5V Turbo · 视觉", "model_id": "glm-5v-turbo",
-         "supports_vision": True, "thinking_control": "effort", "input_context": 128_000, "output_context": 16_000},
+         "supports_vision": True, "supports_json_format": False,
+         "thinking_control": "glm", "input_context": 128_000, "output_context": 16_000},
     ],
     "deepseek": [
-        {"value": "deepseek:deepseek-chat", "label": "DeepSeek Chat", "model_id": "deepseek-chat",
-         "supports_vision": False, "thinking_control": "none", "input_context": 64_000, "output_context": 8_000},
+        # Why: deepseek-chat 将于 2026/07/24 弃用，升级到 v4-flash/pro。
+        # 上下文 1M / 输出 384K，支持思考模式（thinking.type + 顶层 reasoning_effort）。
+        {"value": "deepseek:deepseek-v4-flash", "label": "DeepSeek V4 Flash · 性价比", "model_id": "deepseek-v4-flash",
+         "supports_vision": False, "supports_json_format": True,
+         "thinking_control": "deepseek", "input_context": 1_000_000, "output_context": 384_000},
+        {"value": "deepseek:deepseek-v4-pro", "label": "DeepSeek V4 Pro · 旗舰", "model_id": "deepseek-v4-pro",
+         "supports_vision": False, "supports_json_format": True,
+         "thinking_control": "deepseek", "input_context": 1_000_000, "output_context": 384_000},
     ],
 }
 
@@ -89,12 +121,12 @@ class ModelSettings(BaseModel):
     provider: Literal["deepseek", "glm", "qwen", "custom"] = "deepseek"
     api_format: Literal["openai_chat_completions"] = "openai_chat_completions"
     base_url: str = "https://api.deepseek.com"
-    model_id: str = "deepseek-chat"
+    model_id: str = "deepseek-v4-flash"
     api_key: str = ""
-    display_name: str = "DeepSeek Chat"
+    display_name: str = "DeepSeek V4 Flash"
     model_family: str = "default"
-    input_context: int = Field(default=64_000, ge=1, le=10_000_000)
-    output_context: int = Field(default=8_000, ge=1, le=1_000_000)
+    input_context: int = Field(default=1_000_000, ge=1, le=10_000_000)
+    output_context: int = Field(default=384_000, ge=1, le=1_000_000)
     tool_call_rounds: int = Field(default=200, ge=1, le=1_000)
     full_url: bool = False
     multimodal: bool = False
@@ -110,11 +142,19 @@ class ModelSettings(BaseModel):
 
     @field_validator("reasoning_effort")
     @classmethod
-    def validate_reasoning_effort(cls, value: str) -> str:
+    def validate_reasoning_effort(cls, value: str, info) -> str:
         value = (value or "high").strip().lower()
-        allowed = {"max", "xhigh", "high", "medium", "low", "minimal", "none"}
-        if value not in allowed:
-            raise ValueError(f"reasoning_effort 必须是 {', '.join(sorted(allowed))} 之一")
+        provider = info.data.get("provider")
+        # Why: DeepSeek 协议字面支持 low/high/xhigh/max（无 medium/minimal），
+        # 按 provider 分支校验避免无效档位串入 API。
+        if provider == "deepseek":
+            allowed = {"low", "high", "xhigh", "max"}
+            if value not in allowed:
+                raise ValueError(f"DeepSeek reasoning_effort 必须是 {', '.join(sorted(allowed))} 之一")
+        else:
+            allowed = {"max", "xhigh", "high", "medium", "low", "minimal", "none"}
+            if value not in allowed:
+                raise ValueError(f"reasoning_effort 必须是 {', '.join(sorted(allowed))} 之一")
         return value
 
     @field_validator("base_url", "model_id")
@@ -160,6 +200,15 @@ class ModelSettingsStore:
                 raw["model_id"] = "glm-5v-turbo"
             settings = ModelSettings.model_validate(raw)
             return {"active_provider": settings.provider, "profiles": {settings.provider: settings.model_dump()}}
+        # Why: deepseek-chat 将于 2026/07/24 弃用，此处一次性迁移到 v4-flash。
+        # 同时同步上下文长度（旧 64K/8K → 新 1M/384K），避免用户手动改配置。
+        # 迁移幂等：已是 v4 系列则跳过。
+        deepseek_profile = raw.get("profiles", {}).get("deepseek", {})
+        if deepseek_profile.get("model_id") == "deepseek-chat":
+            deepseek_profile["model_id"] = "deepseek-v4-flash"
+            deepseek_profile["display_name"] = "DeepSeek V4 Flash"
+            deepseek_profile["input_context"] = 1_000_000
+            deepseek_profile["output_context"] = 384_000
         return raw
 
     def load(self, provider: str | None = None) -> ModelSettings:
@@ -198,3 +247,119 @@ class ModelSettingsStore:
         data = settings.model_dump(exclude={"api_key"})
         data["has_api_key"] = bool(settings.api_key)
         return data
+
+
+# ==========================================
+# ServiceSettings：全局联网服务 Key（Tavily / SiliconFlow Reranker）
+# 与 LLM Provider 模型配置解耦，不随 deepseek/glm/qwen 分 profile。
+# 敏感 Key 同样 public() 时脱敏，禁止 GET 接口明文回传前端。
+# ==========================================
+SearchProvider = Literal["tavily", "firecrawl"]
+DeepResearchEngine = Literal["firecrawl", "native"]
+
+
+class ServiceSettings(BaseModel):
+    # --- 搜索服务选择 ---
+    # DeepSeek 无原生联网，走独立搜索服务。Tavily 需绑支付（额度有限），
+    # Firecrawl 免费档 500 credits/月且无需绑卡，作为默认兜底。
+    search_provider: SearchProvider = "firecrawl"
+    tavily_api_key: str = ""
+    firecrawl_api_key: str = ""
+    rerank_api_key: str = ""
+
+    # --- Firecrawl 高级参数（DeepSeek 联网 / 深度调研共用）---
+    # Highlights：对每条搜索结果返回"查询词命中的上下文片段 + score"，供前端面板显示。
+    # 约等于"0 cost"，但会多返回字段、略增响应体大小，默认开启。
+    firecrawl_enable_highlights: bool = True
+    # Scrape Top N：对搜索结果前 N 条（2~5，默认 3）调 /v1/scrape 拿全文 Markdown。
+    # 每条 1 credit，显著提升 Reranker/LLM 理解度，但过多会吃额度 + 拉长耗时。
+    firecrawl_scrape_top_n: int = 3
+    # Markdown Max Chars：单页 Markdown 截断长度，避免把整站（几十KB）塞进上下文。
+    # 1200~4000 之间，默认 2000。
+    firecrawl_markdown_max_chars: int = 2000
+    # 深度调研引擎：Firecrawl /v1/research 是官方异步 Job，端到端产出报告；
+    # "native" 保留原自研 day32+day33 链路（子查询→抓取→切片→Reranker→Day33 推理）。
+    deep_research_engine: DeepResearchEngine = "firecrawl"
+
+    @field_validator("tavily_api_key", "firecrawl_api_key", "rerank_api_key")
+    @classmethod
+    def strip_key(cls, value: str) -> str:
+        return (value or "").strip()
+
+    @field_validator("search_provider")
+    @classmethod
+    def normalize_provider(cls, value: str) -> str:
+        value = (value or "").strip().lower()
+        return value if value in {"tavily", "firecrawl"} else "firecrawl"
+
+    @field_validator("deep_research_engine")
+    @classmethod
+    def normalize_research_engine(cls, value: str) -> str:
+        value = (value or "").strip().lower()
+        return value if value in {"firecrawl", "native"} else "firecrawl"
+
+    @field_validator("firecrawl_scrape_top_n")
+    @classmethod
+    def clamp_scrape_top_n(cls, value: int) -> int:
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            v = 3
+        return max(0, min(5, v))
+
+    @field_validator("firecrawl_markdown_max_chars")
+    @classmethod
+    def clamp_markdown_chars(cls, value: int) -> int:
+        try:
+            v = int(value)
+        except (TypeError, ValueError):
+            v = 2000
+        return max(800, min(4000, v))
+
+
+class ServiceSettingsStore:
+    """极简单文件存储，无 profile 分层。"""
+
+    def __init__(self, path: Path | None = None):
+        self.path = path or Path(os.getenv(
+            "SERVICE_SETTINGS_PATH",
+            Path(__file__).resolve().parent / "data" / "service_settings.json",
+        ))
+        self._lock = RLock()
+
+    def load(self) -> ServiceSettings:
+        with self._lock:
+            if not self.path.exists():
+                return ServiceSettings()
+            try:
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                return ServiceSettings()
+            return ServiceSettings.model_validate(raw)
+
+    def save(self, settings: ServiceSettings) -> ServiceSettings:
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.path.with_suffix(".tmp")
+            temp.write_text(settings.model_dump_json(indent=2), encoding="utf-8")
+            temp.replace(self.path)
+            return self.load()
+
+    def public(self) -> dict:
+        s = self.load()
+        # Why: 脱敏，GET 接口不推明文 key 到前端，仅回传状态布尔 + 非敏感配置。
+        return {
+            # —— 搜索提供商与 Key 状态 ——
+            "search_provider": s.search_provider,
+            "has_tavily_key": bool(s.tavily_api_key),
+            "has_firecrawl_key": bool(s.firecrawl_api_key),
+            "has_rerank_key": bool(s.rerank_api_key),
+            "tavily_api_key": "",
+            "firecrawl_api_key": "",
+            "rerank_api_key": "",
+            # —— Firecrawl 高级参数（非敏感，允许 GET 回显，便于前端回填下拉/数值）——
+            "firecrawl_enable_highlights": s.firecrawl_enable_highlights,
+            "firecrawl_scrape_top_n": s.firecrawl_scrape_top_n,
+            "firecrawl_markdown_max_chars": s.firecrawl_markdown_max_chars,
+            "deep_research_engine": s.deep_research_engine,
+        }

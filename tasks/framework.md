@@ -645,3 +645,29 @@ R3 — VFS checkpoint 限频+限量 （ vfs_checkpoint.py ）
 惰性定期清理 （写入路径同事务，无后台线程）：
 
 - 事件账本每会话保最近 500 条、摘要每会话保最近 20 条、VFS 保 10 个（既有 MAX_KEEP）
+
+
+## 第 69 天战役：从零实现 MCP 协议双向通信
+### 我们需要构建两个核心模块：
+  * mcp_server_custom.py（MCP 服务端）：一个独立的进程，里面封装了如“获取系统性能”、“读取 Git 状态”等工具，遵循 JSON-RPC 2.0 标准输出。
+  * mcp_client_manager.py（MCP 客户端/主控中枢）：在你的 FastAPI 后端里，通过 subprocess 在后台拉起 MCP 服务端，通过 stdio（标准输入输出管道）握手并获取工具列表，自动融合进你的 LangGraph 状态机！
+1. 架构流程图：MCP 在你系统里的真实物理流转
+```Text
+[ 你的 Agent 主进程 (FastAPI + LangGraph) ]
+                    │
+                    ▼ (通过 subprocess.Popen 启动子进程，建立 stdio 管道)
+┌────────────────────────────────────────────────────────┐
+│ MCP Client Manager (MCP 客户端管理器)                  │
+│  1. 发送 initialize 握手                                │
+│  2. 发送 tools/list 获取工具说明书                     │
+│  3. 将工具转换为 LangChain/LangGraph 可用的 @tool 对象  │
+└───────────────────┬────────────────────────────────────┘
+                    │
+        双向 JSON-RPC 2.0 字符流 (stdin / stdout)
+                    │
+┌───────────────────▼────────────────────────────────────┐
+│ MCP Server (独立运行的微服务进程 mcp_server_custom.py)  │
+│  - 工具 A: get_system_metrics ()                       │
+│  - 工具 B: inspect_git_status ()                       │
+└────────────────────────────────────────────────────────┘
+```

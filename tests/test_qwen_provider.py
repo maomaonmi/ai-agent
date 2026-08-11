@@ -59,11 +59,47 @@ class CapabilitiesTests(unittest.TestCase):
     def test_qwen_vl_model_supports_vision(self):
         self.assertTrue(capabilities_for_model("qwen-vl-max").supports_vision)
 
+    def test_deepseek_v4_uses_deepseek_thinking_protocol(self):
+        """Why: DeepSeek V4 升级后走 deepseek 思考协议（extra_body.thinking + 顶层 reasoning_effort），
+        不再走兜底 none 分支。"""
+        caps = capabilities_for_model("deepseek-v4-flash")
+        self.assertTrue(caps.supports_json_format)
+        self.assertEqual(caps.thinking_control, "deepseek")
+        self.assertFalse(caps.supports_vision)
+
+        caps_pro = capabilities_for_model("deepseek-v4-pro")
+        self.assertEqual(caps_pro.thinking_control, "deepseek")
+
     def test_unknown_model_falls_back_to_plain_openai(self):
-        caps = capabilities_for_model("deepseek-chat")
+        # Why: 用真正未注册的模型 ID 验证兜底分支，不再是 deepseek-chat（已升级为 v4-flash）。
+        caps = capabilities_for_model("some-unknown-model-xyz")
         self.assertTrue(caps.supports_json_format)
         self.assertEqual(caps.thinking_control, "none")
         self.assertFalse(caps.supports_vision)
+
+    def test_capabilities_for_model_uses_catalog_not_string_sniff(self):
+        """Why: 验证能力判断走 MODEL_CATALOG 查表，而非历史字符串嗅探。
+        若改回字符串嗅探，deepseek-v4-flash 会命中兜底返回 thinking_control='none'。"""
+        from model_settings import MODEL_CATALOG
+        # 遍历 catalog 中所有模型 ID，验证 capabilities_for_model 返回值与 catalog 字段一致
+        for provider_variants in MODEL_CATALOG.values():
+            for variant in provider_variants:
+                caps = capabilities_for_model(variant["model_id"])
+                self.assertEqual(
+                    caps.thinking_control,
+                    variant.get("thinking_control", "none"),
+                    f"thinking_control mismatch for {variant['model_id']}",
+                )
+                self.assertEqual(
+                    caps.supports_vision,
+                    variant.get("supports_vision", False),
+                    f"supports_vision mismatch for {variant['model_id']}",
+                )
+                self.assertEqual(
+                    caps.supports_json_format,
+                    variant.get("supports_json_format", True),
+                    f"supports_json_format mismatch for {variant['model_id']}",
+                )
 
 
 class QwenProfileTests(unittest.TestCase):
@@ -127,10 +163,115 @@ class QwenThinkingDispatchTests(unittest.TestCase):
         self.assertEqual(captured["extra_body"], {"thinking": {"type": "enabled", "reasoning_effort": "high"}})
         self.assertNotIn("response_format", captured)
 
-    def test_deepseek_keeps_json_format_without_extra_body(self):
-        captured = self._capture("deepseek-chat")
+    def test_deepseek_v4_sends_thinking_extra_body_and_top_level_effort(self):
+        """Why: DeepSeek V4 升级后必须发送 thinking extra_body + 顶层 reasoning_effort。
+        与 GLM 关键差异：reasoning_effort 是顶层参数，不放 extra_body.thinking。
+        思考模式启用时 temperature 必须移除（官方文档明确不生效）。"""
+        captured = self._capture("deepseek-v4-flash", thinking="enabled", reasoning_effort="high")
         self.assertIn("response_format", captured)
-        self.assertNotIn("extra_body", captured)
+        self.assertEqual(captured["extra_body"], {"thinking": {"type": "enabled"}})
+        self.assertEqual(captured["reasoning_effort"], "high")
+        # reasoning_effort 不应出现在 extra_body.thinking 里（与 GLM 区分）
+        self.assertNotIn("reasoning_effort", captured["extra_body"]["thinking"])
+        # 思考启用时 temperature 必须移除
+        self.assertNotIn("temperature", captured)
+
+    def test_deepseek_v4_disabled_thinking_omits_effort(self):
+        """Why: 思考关闭时只传 thinking.type=disabled，不传 reasoning_effort，
+        且保留 temperature（非思考模式 temperature 生效）。"""
+        captured = self._capture("deepseek-v4-flash", thinking="disabled")
+        self.assertEqual(captured["extra_body"], {"thinking": {"type": "disabled"}})
+        self.assertNotIn("reasoning_effort", captured)
+        # 非思考模式保留 temperature
+        self.assertIn("temperature", captured)
+
+    def test_deepseek_v4_pro_also_uses_deepseek_protocol(self):
+        """Why: 验证 v4-pro 同样走 deepseek 协议，而非兜底 none。"""
+        captured = self._capture("deepseek-v4-pro", thinking="enabled", reasoning_effort="max")
+        self.assertEqual(captured["extra_body"], {"thinking": {"type": "enabled"}})
+        self.assertEqual(captured["reasoning_effort"], "max")
+
+
+class DeepSeekValidationTests(unittest.TestCase):
+    """DeepSeek reasoning_effort 字段校验——按 provider 分支，仅允许 low/high/xhigh/max。"""
+
+    def test_deepseek_accepts_four_effort_levels(self):
+        for effort in ["low", "high", "xhigh", "max"]:
+            settings = ModelSettings(provider="deepseek", reasoning_effort=effort)
+            self.assertEqual(settings.reasoning_effort, effort)
+
+    def test_deepseek_rejects_medium_and_minimal(self):
+        # Why: DeepSeek 协议字面值无 medium/minimal，传入应被校验拦截
+        for invalid in ["medium", "minimal", "none"]:
+            with self.assertRaises(ValidationError):
+                ModelSettings(provider="deepseek", reasoning_effort=invalid)
+
+    def test_glm_still_accepts_medium_and_minimal(self):
+        """Why: GLM 校验白名单不受 DeepSeek 收紧影响，保持 7 档。"""
+        for effort in ["medium", "minimal", "none"]:
+            settings = ModelSettings(provider="glm", reasoning_effort=effort)
+            self.assertEqual(settings.reasoning_effort, effort)
+
+
+class DeepSeekProfileMigrationTests(unittest.TestCase):
+    """持久化 profile 自动迁移：deepseek-chat → deepseek-v4-flash。"""
+
+    def test_legacy_deepseek_chat_is_migrated_to_v4_flash(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            # 模拟旧 profile（deepseek-chat + 64K/8K）
+            legacy_doc = {
+                "active_provider": "deepseek",
+                "profiles": {
+                    "deepseek": {
+                        "provider": "deepseek",
+                        "api_format": "openai_chat_completions",
+                        "base_url": "https://api.deepseek.com",
+                        "model_id": "deepseek-chat",
+                        "api_key": "sk-test",
+                        "display_name": "DeepSeek Chat",
+                        "input_context": 64000,
+                        "output_context": 8000,
+                        "thinking_enabled": True,
+                        "reasoning_effort": "high",
+                        "max_tokens": 16000,
+                    }
+                },
+            }
+            settings_path.write_text(json.dumps(legacy_doc), encoding="utf-8")
+            store = ModelSettingsStore(settings_path)
+            profile = store.load("deepseek")
+            # 迁移后应为 v4-flash + 1M/384K
+            self.assertEqual(profile.model_id, "deepseek-v4-flash")
+            self.assertEqual(profile.display_name, "DeepSeek V4 Flash")
+            self.assertEqual(profile.input_context, 1_000_000)
+            self.assertEqual(profile.output_context, 384_000)
+
+    def test_already_v4_is_not_migrated(self):
+        """Why: 迁移幂等——已是 v4 系列则保持不变。"""
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            v4_doc = {
+                "active_provider": "deepseek",
+                "profiles": {
+                    "deepseek": {
+                        "provider": "deepseek",
+                        "model_id": "deepseek-v4-pro",
+                        "base_url": "https://api.deepseek.com",
+                        "api_key": "sk-test",
+                        "display_name": "DeepSeek V4 Pro",
+                        "input_context": 1_000_000,
+                        "output_context": 384_000,
+                    }
+                },
+            }
+            settings_path.write_text(json.dumps(v4_doc), encoding="utf-8")
+            store = ModelSettingsStore(settings_path)
+            profile = store.load("deepseek")
+            self.assertEqual(profile.model_id, "deepseek-v4-pro")
+            self.assertEqual(profile.display_name, "DeepSeek V4 Pro")
 
 
 class DirectConnectionTests(unittest.TestCase):

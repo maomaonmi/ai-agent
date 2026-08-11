@@ -1,0 +1,268 @@
+{
+  "skills": [
+    {
+      "catalog_id": "web-artifacts-builder",
+      "name": "/web-artifacts-builder",
+      "author": "Anthropic",
+      "downloads": 1100000,
+      "category": "artifacts",
+      "updated_at": "2026-08-01",
+      "description": "创建精美多组件 HTML 产物的工具套件，使用现代前端 Web 技术构建复杂交互页面。",
+      "trigger_condition": "当用户要求创建 HTML 页面、Web 小应用、交互式 Demo、landing page 或可运行的前端原型时",
+      "standard_steps": [
+        "1. 明确产物结构：拆分头部导航、主内容区、交互组件与页脚，先给整体骨架再填细节",
+        "2. 采用组件化思维编写单文件 HTML：样式内联 <style>、脚本内联 <script>，确保零依赖可直接打开",
+        "3. 交互逻辑优先用原生 JS 实现，状态变更必须有视觉反馈（hover/激活/过渡动画）",
+        "4. 自检响应式：至少验证 1280px 与 375px 两种视口下布局不破裂",
+        "5. 交付前通读代码，确保无未闭合标签、无控制台报错风险"
+      ],
+      "validation_rules": [
+        "产物必须是单个可独立打开的 HTML 文件",
+        "禁止引用无法访问的外链资源（图片用占位或 data URI）",
+        "所有交互元素必须有对应的 JS 事件绑定"
+      ]
+    },
+    {
+      "catalog_id": "theme-factory",
+      "name": "/theme-factory",
+      "author": "Anthropic",
+      "downloads": 893300,
+      "category": "design",
+      "updated_at": "2026-07-28",
+      "description": "为产物套用主题风格的工具包，覆盖幻灯片、文档、报告、HTML 着陆页等场景。",
+      "trigger_condition": "当用户需要为幻灯片、文档、报告、着陆页等产物应用统一视觉主题或换肤时",
+      "standard_steps": [
+        "1. 确认主题三要素：主色板（primary/accent/背景）、字体配对（标题/正文）、间距节奏",
+        "2. 把三要素落成设计令牌（CSS 变量或配置对象），禁止散落硬编码色值",
+        "3. 按令牌逐层套用：背景 → 卡片/容器 → 文字层级 → 交互态（hover/active）",
+        "4. 对比度自检：正文文字与背景对比度不低于 4.5:1",
+        "5. 给出主题切换说明，方便用户后续替换令牌值"
+      ],
+      "validation_rules": [
+        "所有颜色必须来自令牌，禁止魔法色值",
+        "标题与正文字体必须有明确层级差异",
+        "暗色主题下需单独验证可读性"
+      ]
+    },
+    {
+      "catalog_id": "learn",
+      "name": "/learn",
+      "author": "Anthropic",
+      "downloads": 837100,
+      "category": "meta",
+      "updated_at": "2026-07-30",
+      "description": "当用户想要智识上的理解——学习某事物如何或为何运作时使用本技能。",
+      "trigger_condition": "当用户想理解某个概念、原理、机制，问「为什么」「怎么工作的」「解释一下」类问题时",
+      "standard_steps": [
+        "1. 先判层：确认用户当前理解水平（零基础/有背景/进阶），用一句话锚定讲解起点",
+        "2. 给心智模型：用一个贴切的类比或结构图建立整体直觉，再拆细节",
+        "3. 分层展开：先讲「是什么→为什么需要它→它怎么运作」，每层配一个最小例子",
+        "4. 主动指出常见误解点，并给出辨析",
+        "5. 收尾给「检验理解」的三个小问题或一个动手练习，引导用户固化"
+      ],
+      "validation_rules": [
+        "禁止堆砌术语而不解释，每个术语首次出现必须有一行白话注解",
+        "类比必须明示映射边界（哪里相似、哪里不相似）",
+        "讲解长度与用户问题的深度匹配，不过度展开"
+      ]
+    },
+    {
+      "catalog_id": "skill-creator",
+      "name": "/skill-creator",
+      "author": "Anthropic",
+      "downloads": 138100,
+      "category": "meta",
+      "updated_at": "2026-08-05",
+      "description": "创建新技能、修改改进现有技能、度量技能表现。当用户想沉淀可复用能力时使用。",
+      "trigger_condition": "当用户想创建新 Skill、改进现有 Skill，或把一段重复使用的提示词/流程固化为 Skill 时",
+      "standard_steps": [
+        "1. 采访需求：问清技能解决什么场景、什么输入该触发它、期望产出什么形态",
+        "2. 起草三段式：name（动词短语或功能名）、description（含明确触发场景的一句话）、instructions（可执行步骤）",
+        "3. instructions 必须步骤化：每步一个动作，含完成判据，避免「处理好」「优化一下」这类不可检验表述",
+        "4. 反查边界：列出该 Skill 不该响应的场景，防止误触发",
+        "5. 输出三段式供用户确认，确认后写入 Skill 库"
+      ],
+      "validation_rules": [
+        "description 必须包含触发信号词，否则匹配层无法命中",
+        "instructions 至少 3 步且每步可独立验证",
+        "与现有 Skill 的触发条件有重叠时必须提示用户合并或划界"
+      ]
+    },
+    {
+      "catalog_id": "morning",
+      "name": "/morning",
+      "author": "Anthropic",
+      "downloads": 6900,
+      "category": "productivity",
+      "updated_at": "2026-07-20",
+      "description": "把用户的晨间简报渲染为带样式的 HTML 产物，或设为周期性工作日任务。",
+      "trigger_condition": "当用户要求生成晨间简报、今日概览、每日摘要（天气/日程/待办/新闻）时",
+      "standard_steps": [
+        "1. 确认简报栏目：日程、待办、天气、新闻、纪念日等，缺栏目时用合理默认四栏",
+        "2. 逐栏收集素材；无数据源的栏目明确标注「示例数据」而非编造",
+        "3. 渲染为单文件 HTML：顶部日期问候条 + 栏目卡片网格，配色清爽适合晨读",
+        "4. 优先级排序：今日必办事项置顶并用强调色标记",
+        "5. 若用户要求周期性生成，说明如何固定为每日任务模板"
+      ],
+      "validation_rules": [
+        "无真实数据源的内容必须标注「示例」，禁止伪造天气/新闻",
+        "简报必须一屏可读，单栏目不超过 5 条",
+        "日期与星期必须与实际一致"
+      ]
+    },
+    {
+      "catalog_id": "canvas-design",
+      "name": "/canvas-design",
+      "author": "Anthropic",
+      "downloads": 1800000,
+      "category": "design",
+      "updated_at": "2026-08-03",
+      "description": "运用设计哲学在 .png 与 .pdf 文档中创造精美视觉艺术，适用于海报与视觉稿。",
+      "trigger_condition": "当用户要求设计海报、视觉稿、封面图、PDF 排版或艺术类图像生成时",
+      "standard_steps": [
+        "1. 定基调：确认主题情绪（极简/复古/科技/手绘等）与用途尺寸",
+        "2. 构图先行：描述视觉层级——焦点元素、辅助元素、留白比例，再动笔生成",
+        "3. 配色限制在三主色以内，给出具体色值并说明取色逻辑",
+        "4. 文字排版遵循「大标题一句话、副标题补信息、正文不超三行」",
+        "5. 输出后给两条可选变体方向，供用户迭代"
+      ],
+      "validation_rules": [
+        "设计说明必须包含构图与色值，禁止只给「好看一点」这类不可执行描述",
+        "文字内容必须与用户提供的信息一致，不杜撰标语",
+        "输出格式与用途匹配（打印用 pdf、屏幕用 png）"
+      ]
+    },
+    {
+      "catalog_id": "mcp-builder",
+      "name": "/mcp-builder",
+      "author": "Anthropic",
+      "downloads": 931700,
+      "category": "devtools",
+      "updated_at": "2026-08-06",
+      "description": "创建高质量 MCP（Model Context Protocol）服务端的指南，让 LLM 与外部服务交互。",
+      "trigger_condition": "当用户要开发 MCP server、封装工具给 LLM 调用、设计 tools/resources/prompts 接口时",
+      "standard_steps": [
+        "1. 明确能力边界：列出 server 要暴露的 tools（动作）、resources（数据）、prompts（模板）三类原语",
+        "2. 设计 tool schema：名称动词化、参数 JSON Schema 严格约束、description 写清何时该调用",
+        "3. 实现传输层：本地用 stdio、远程用 HTTP+SSE，错误必须返回结构化错误码而非崩溃",
+        "4. 安全收口：文件/网络/命令类工具加白名单与路径校验，凭证走环境变量不硬编码",
+        "5. 自测：用 tools/list 与逐工具调用验证，附示例请求响应"
+      ],
+      "validation_rules": [
+        "每个 tool 的 description 必须包含触发场景，否则模型无法正确选择",
+        "禁止在工具实现里拼接未校验的用户输入到 shell/SQL",
+        "schema 变更必须向后兼容或升版本号"
+      ]
+    },
+    {
+      "catalog_id": "brand-guidelines",
+      "name": "/brand-guidelines",
+      "author": "Anthropic",
+      "downloads": 806300,
+      "category": "design",
+      "updated_at": "2026-07-25",
+      "description": "把 Anthropic 官方品牌色与排版规范应用到任何需要品牌一致性的产物上。",
+      "trigger_condition": "当用户要求产物遵循品牌规范、统一视觉识别、应用品牌色与官方排版时",
+      "standard_steps": [
+        "1. 确认品牌资产：主色、辅助色、标志性字体、Logo 使用留白规范",
+        "2. 建立品牌令牌层：色值/字重/圆角/阴影统一登记，产物全部引用令牌",
+        "3. 应用优先级：Logo 与主标题先定调，正文与辅助元素随后呼应",
+        "4. 检查禁用项：不拉伸 Logo、不改品牌色色相、不混用体系外字体",
+        "5. 输出品牌应用小结，列出本次用到的令牌清单"
+      ],
+      "validation_rules": [
+        "品牌色必须精确到 hex，禁止近似替代",
+        "同一产物内字体家族不超过两种",
+        "所有产出物视觉语言保持一致"
+      ]
+    },
+    {
+      "catalog_id": "doc-coauthoring",
+      "name": "/doc-coauthoring",
+      "author": "Anthropic",
+      "downloads": 785000,
+      "category": "writing",
+      "updated_at": "2026-07-29",
+      "description": "引导用户完成文档协作写作的结构化工作流，适用于各类正式文档共创。",
+      "trigger_condition": "当用户想协作撰写文档、技术方案、说明书、规范文档并逐步完善时",
+      "standard_steps": [
+        "1. 对齐目标：确认文档读者、用途、篇幅与 deadline，缺信息先问再写",
+        "2. 先出大纲：三级标题结构，用户确认后再填正文，避免直接成稿后大改",
+        "3. 分节成稿：每节遵循「论点→论据→示例」结构，写完一节请用户确认再继续",
+        "4. 统一术语表：关键概念首次出现给定义，全文用词一致",
+        "5. 终稿自检：逻辑闭环、无悬空引用、格式统一"
+      ],
+      "validation_rules": [
+        "未经用户确认大纲前禁止直接写正文",
+        "每节修改保留可追踪的变更说明",
+        "引用数据/事实必须标注来源或标注「待核实」"
+      ]
+    },
+    {
+      "catalog_id": "internal-comms",
+      "name": "/internal-comms",
+      "author": "Anthropic",
+      "downloads": 607600,
+      "category": "writing",
+      "updated_at": "2026-07-22",
+      "description": "撰写各类内部沟通文案的资源集，使用公司惯用格式（公告/周报/会议纪要等）。",
+      "trigger_condition": "当用户要写内部公告、周报、会议纪要、邮件通知、OKR 同步等职场沟通文案时",
+      "standard_steps": [
+        "1. 识别文体：公告/周报/纪要/邮件各有格式范式，先确认文体再套结构",
+        "2. 头部三要素：结论先行（什么事）、影响范围（关谁的事）、行动项（要做什么）",
+        "3. 正文极简：段落不超三行，能列表不分段，能表格不长句",
+        "4. 行动项必须带负责人与时间点，禁止「尽快」「后续同步」这类无约束表述",
+        "5. 语气校准：专业但不僵硬，避免过度正式或过度随意"
+      ],
+      "validation_rules": [
+        "任何行动项必须有 owner 和 deadline",
+        "关键数字/日期必须高亮或加粗",
+        "篇幅控制在一屏可读完"
+      ]
+    },
+    {
+      "catalog_id": "algorithmic-art",
+      "name": "/algorithmic-art",
+      "author": "Anthropic",
+      "downloads": 594100,
+      "category": "design",
+      "updated_at": "2026-07-18",
+      "description": "用算法与代码创造生成艺术，p5.js 风格的程序化美学创作流程。",
+      "trigger_condition": "当用户想要生成艺术、程序化图案、创意编码（creative coding）、参数化视觉作品时",
+      "standard_steps": [
+        "1. 选算法基调：噪声流场/分形/粒子系统/几何平铺等，说明美学特征供用户选择",
+        "2. 参数化设计：把颜色、密度、尺度、随机种子暴露为可调参数",
+        "3. 用单文件 HTML+Canvas/p5.js 实现，附参数控制面板",
+        "4. 种子可复现：同一参数组合必须产出同一画面",
+        "5. 给三个预设风格（如「极简」「霓虹」「自然」）展示参数效果"
+      ],
+      "validation_rules": [
+        "必须支持随机种子固定以复现结果",
+        "动画帧率保持稳定，避免无界对象创建导致内存膨胀",
+        "参数调节实时生效，无需刷新"
+      ]
+    },
+    {
+      "catalog_id": "slack-gif-creator",
+      "name": "/slack-gif-creator",
+      "author": "Anthropic",
+      "downloads": 484700,
+      "category": "productivity",
+      "updated_at": "2026-07-15",
+      "description": "为 Slack 场景创建动图表情与 GIF 的制作流程，含尺寸与帧率规范。",
+      "trigger_condition": "当用户要制作 Slack 表情、GIF 动图、聊天用梗图或动效贴纸时",
+      "standard_steps": [
+        "1. 确认用途规格：Slack 表情 128x128、消息 GIF 不超 480px 宽、时长 2-4 秒循环",
+        "2. 内容设计：单动作循环优先（眨眼/摇摆/弹跳），动作首尾帧需无缝衔接",
+        "3. 逐帧描述或代码生成：给出帧序列与每帧画面要点",
+        "4. 体积控制：调色板减色 + 帧率 12-15fps，目标 < 1MB",
+        "5. 交付前预演循环三遍，确认无跳帧无顿挫"
+      ],
+      "validation_rules": [
+        "GIF 必须无缝循环，首尾帧一致",
+        "文件体积符合平台限制",
+        "画面主体在 128px 缩略图下仍可辨认"
+      ]
+    }
+  ]
+}

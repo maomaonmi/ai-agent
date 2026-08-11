@@ -22,7 +22,13 @@ from typing import Awaitable, Callable, Sequence
 
 logger = logging.getLogger("app.memory.skill")
 
-SKILL_TYPES = {"code_pattern", "task_flow", "fix_template"}
+SKILL_TYPES = {"code_pattern", "task_flow", "fix_template", "instruction"}
+
+# Skill 生命周期：自动沉淀默认 pending（待人工确认，不参与匹配），
+# 用户在记忆面板「上架」后置 published 才参与 match 注入。
+SKILL_STATUS_PENDING = "pending"
+SKILL_STATUS_PUBLISHED = "published"
+SKILL_STATUSES = {SKILL_STATUS_PENDING, SKILL_STATUS_PUBLISHED}
 
 # 两阶段匹配第二阶段的 LLM 精确匹配器类型：
 # 接收 (user_input, 候选 Skill 列表)，返回匹配的 Skill 列表；可同步或异步。
@@ -40,7 +46,7 @@ class SkillNotFoundError(LookupError):
 class SkillCapsule:
     skill_id: int
     skill_name: str
-    skill_type: str  # code_pattern | task_flow | fix_template
+    skill_type: str  # code_pattern | task_flow | fix_template | instruction
     trigger_condition: str
     trigger_keywords: list[str]
     standard_steps: list[str]
@@ -49,8 +55,18 @@ class SkillCapsule:
     success_count: int
     failure_count: int
     sample_envelope: str | None
+    content_md: str | None
     created_at: float
     updated_at: float
+    enabled: bool = True
+    # Why 默认 pending: 自动沉淀/手动创建的新 Skill 一律待人工确认，
+    # 防止噪声胶囊未经审核直接参与 prompt 注入（决策 1 人工确认上架）。
+    status: str = SKILL_STATUS_PENDING
+    # Why author/source: 市场目录（catalog）与手动创建引入后，需要区分来源——
+    # 'Anthropic'（catalog 安装）/ '我'（手动/上传）/ 'agent'（code 沉淀）；
+    # source 存 catalog_id 用于安装幂等判重与卸载回溯，非 catalog 来源为 None。
+    author: str = "local"
+    source: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -101,6 +117,7 @@ class SkillStore:
                     success_count     INTEGER DEFAULT 0,
                     failure_count     INTEGER DEFAULT 0,
                     sample_envelope   TEXT,
+                    content_md        TEXT,
                     created_at        REAL NOT NULL,
                     updated_at        REAL NOT NULL
                 );
@@ -110,9 +127,42 @@ class SkillStore:
                     ON skill_capsules(trigger_condition);
                 """
             )
+            # Why: enabled 列为后加字段，老库需幂等迁移（ALTER TABLE 无 IF NOT EXISTS，
+            # 用 PRAGMA table_info 探测后补齐），默认 1 保持存量行为不变。
+            columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(skill_capsules)")
+            }
+            if "enabled" not in columns:
+                connection.execute(
+                    "ALTER TABLE skill_capsules ADD COLUMN enabled INTEGER DEFAULT 1"
+                )
+            # Why: status 列为人工确认上架新增（决策 1）。存量数据是历史上已在用的
+            # 有效胶囊，迁移默认 published 避免突然失效；新增沉淀走 create_skill /
+            # maybe_create 默认 pending。
+            if "status" not in columns:
+                connection.execute(
+                    "ALTER TABLE skill_capsules ADD COLUMN status TEXT NOT NULL DEFAULT 'published'"
+                )
+            # Why: author/source 列为 Skill 市场目录新增（计划书 §2.4）。存量行全部是
+            # code 模式沉淀物，迁移时回填 author='agent'；列默认 'local' 仅兜底，
+            # create_skill 之后总是显式传 author。
+            if "author" not in columns:
+                connection.execute(
+                    "ALTER TABLE skill_capsules ADD COLUMN author TEXT NOT NULL DEFAULT 'local'"
+                )
+                connection.execute("UPDATE skill_capsules SET author = 'agent'")
+            if "source" not in columns:
+                connection.execute(
+                    "ALTER TABLE skill_capsules ADD COLUMN source TEXT"
+                )
+            if "content_md" not in columns:
+                connection.execute(
+                    "ALTER TABLE skill_capsules ADD COLUMN content_md TEXT"
+                )
 
     @staticmethod
     def _row_to_skill(row: sqlite3.Row) -> SkillCapsule:
+        keys = row.keys()
         return SkillCapsule(
             skill_id=row["skill_id"],
             skill_name=row["skill_name"],
@@ -125,8 +175,15 @@ class SkillStore:
             success_count=row["success_count"],
             failure_count=row["failure_count"],
             sample_envelope=row["sample_envelope"],
+            content_md=row["content_md"] if "content_md" in keys else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            # Why: 兼容迁移窗口内（列补齐前）的旧连接读取，缺列按启用处理。
+            enabled=bool(row["enabled"]) if "enabled" in keys else True,
+            # 缺列按 published 处理，与迁移默认值一致（存量视为已上架）。
+            status=row["status"] if "status" in keys else SKILL_STATUS_PUBLISHED,
+            author=row["author"] if "author" in keys else "local",
+            source=row["source"] if "source" in keys else None,
         )
 
     @staticmethod
@@ -143,16 +200,25 @@ class SkillStore:
         required_params: Sequence[str] | None = None,
         validation_rules: Sequence[str] | None = None,
         sample_envelope: str | None = None,
+        content_md: str | None = None,
+        status: str = SKILL_STATUS_PENDING,
+        author: str = "local",
+        source: str | None = None,
     ) -> SkillCapsule:
         """手动创建 Skill 胶囊。
 
         Why 参数校验: skill_type 决定 quick_match/list_skills 的过滤分支，脏数据会
         污染匹配逻辑；standard_steps 为空表示 Skill 无可执行步骤，无沉淀价值。
+        Why status 参数: 自动沉淀必须 pending 待人审（决策 1）；而市场安装/手动编写/
+        上传解析本身是用户主动行为，调用方显式传 published 直接上架（计划书 §3）。
         """
         if skill_type not in SKILL_TYPES:
             raise ValueError(f"Unsupported skill_type: {skill_type}")
+        if status not in SKILL_STATUSES:
+            raise ValueError(f"Unsupported status: {status}")
         cleaned_name = skill_name.strip()
         cleaned_trigger = trigger_condition.strip()
+        cleaned_author = author.strip() or "local"
         if not cleaned_name:
             raise ValueError("skill_name must not be empty")
         if not cleaned_trigger:
@@ -172,9 +238,9 @@ class SkillStore:
                 INSERT INTO skill_capsules
                     (skill_name, skill_type, trigger_condition, trigger_keywords,
                      standard_steps, required_params, validation_rules,
-                     success_count, failure_count, sample_envelope,
-                     created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)
+                     success_count, failure_count, sample_envelope, content_md,
+                     created_at, updated_at, status, author, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     cleaned_name,
@@ -185,13 +251,18 @@ class SkillStore:
                     params_json,
                     rules_json,
                     sample_envelope,
+                    content_md,
                     now,
                     now,
+                    status,
+                    cleaned_author,
+                    source,
                 ),
             )
             skill_id = cursor.lastrowid
         logger.debug(
-            "created skill id=%s name=%s type=%s", skill_id, cleaned_name, skill_type
+            "created skill id=%s name=%s type=%s status=%s source=%s",
+            skill_id, cleaned_name, skill_type, status, source,
         )
         # 直接由已知值构造，避免二次查询；字段与入库完全一致。
         return SkillCapsule(
@@ -206,9 +277,21 @@ class SkillStore:
             success_count=0,
             failure_count=0,
             sample_envelope=sample_envelope,
+            content_md=content_md,
             created_at=now,
             updated_at=now,
+            status=status,
+            author=cleaned_author,
+            source=source,
         )
+
+    def get_skill_by_source(self, source: str) -> SkillCapsule | None:
+        """按 catalog source 查找（市场安装幂等判重）。"""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM skill_capsules WHERE source = ?", (source,)
+            ).fetchone()
+        return self._row_to_skill(row) if row else None
 
     def get_skill(self, skill_id: int) -> SkillCapsule | None:
         with self._connection() as connection:
@@ -218,22 +301,53 @@ class SkillStore:
             ).fetchone()
         return self._row_to_skill(row) if row is not None else None
 
-    def list_skills(self, skill_type: str | None = None) -> list[SkillCapsule]:
+    def list_skills(
+        self,
+        skill_type: str | None = None,
+        status: str | None = None,
+    ) -> list[SkillCapsule]:
+        """列出 Skill 胶囊，可按类型 / 生命周期状态过滤。
+
+        Why status 过滤: 上架确认后，运行设置 Skill 区块与匹配注入只需 published；
+        记忆面板需同时看 pending（待确认）与 published，由调用方按需传参。
+        """
         with self._connection() as connection:
-            if skill_type is None:
+            if skill_type is None and status is None:
                 rows = connection.execute(
                     "SELECT * FROM skill_capsules ORDER BY updated_at DESC"
                 ).fetchall()
             else:
+                clauses: list[str] = []
+                params: list[object] = []
+                if skill_type is not None:
+                    clauses.append("skill_type = ?")
+                    params.append(skill_type)
+                if status is not None:
+                    clauses.append("status = ?")
+                    params.append(status)
+                where = " AND ".join(clauses)
                 rows = connection.execute(
-                    """
-                    SELECT * FROM skill_capsules
-                    WHERE skill_type = ?
-                    ORDER BY updated_at DESC
-                    """,
-                    (skill_type,),
+                    f"SELECT * FROM skill_capsules WHERE {where} ORDER BY updated_at DESC",
+                    tuple(params),
                 ).fetchall()
         return [self._row_to_skill(row) for row in rows]
+
+    def set_skill_status(self, skill_id: int, status: str) -> None:
+        """上架 / 下架 Skill（published / pending）。
+
+        Why 单独方法: 状态流转是人工确认动作，与 set_skill_enabled（临时停用）语义
+        不同——status 管"是否被审核上架"，enabled 管"上架后是否临时停用"，二者正交。
+        """
+        if status not in SKILL_STATUSES:
+            raise ValueError(f"Unsupported skill status: {status}")
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE skill_capsules SET status = ?, updated_at = ? WHERE skill_id = ?",
+                (status, time.time(), skill_id),
+            )
+            if cursor.rowcount == 0:
+                raise SkillNotFoundError(skill_id)
+        logger.debug("set skill status id=%s status=%s", skill_id, status)
 
     def delete_skill(self, skill_id: int) -> bool:
         with self._connection() as connection:
@@ -245,6 +359,72 @@ class SkillStore:
         if deleted:
             logger.debug("deleted skill id=%s", skill_id)
         return deleted
+
+    def set_skill_enabled(self, skill_id: int, enabled: bool) -> None:
+        """启停 Skill：停用的不参与 quick_match 注入，但保留数据供再启用。"""
+        with self._connection() as connection:
+            cursor = connection.execute(
+                "UPDATE skill_capsules SET enabled = ?, updated_at = ? WHERE skill_id = ?",
+                (1 if enabled else 0, time.time(), skill_id),
+            )
+            if cursor.rowcount == 0:
+                raise SkillNotFoundError(skill_id)
+
+    def update_skill(
+        self,
+        skill_id: int,
+        *,
+        skill_name: str | None = None,
+        trigger_condition: str | None = None,
+        trigger_keywords: Sequence[str] | None = None,
+        standard_steps: Sequence[str] | None = None,
+        content_md: str | None = None,
+    ) -> SkillCapsule:
+        """编辑 Skill 的可读字段（Skills 页签管理用）。仅更新非 None 字段。"""
+        updates: list[str] = []
+        params: list[object] = []
+        if skill_name is not None:
+            cleaned = skill_name.strip()
+            if not cleaned:
+                raise ValueError("skill_name must not be empty")
+            updates.append("skill_name = ?")
+            params.append(cleaned)
+        if trigger_condition is not None:
+            cleaned = trigger_condition.strip()
+            if not cleaned:
+                raise ValueError("trigger_condition must not be empty")
+            updates.append("trigger_condition = ?")
+            params.append(cleaned)
+        if trigger_keywords is not None:
+            updates.append("trigger_keywords = ?")
+            params.append(self._dump_json_array(trigger_keywords))
+        if standard_steps is not None:
+            if not standard_steps:
+                raise ValueError("standard_steps must not be empty")
+            updates.append("standard_steps = ?")
+            params.append(self._dump_json_array(standard_steps))
+        if content_md is not None:
+            updates.append("content_md = ?")
+            params.append(content_md)
+        if not updates:
+            refreshed = self.get_skill(skill_id)
+            if refreshed is None:
+                raise SkillNotFoundError(skill_id)
+            return refreshed
+        updates.append("updated_at = ?")
+        params.append(time.time())
+        params.append(skill_id)
+        with self._connection() as connection:
+            cursor = connection.execute(
+                f"UPDATE skill_capsules SET {', '.join(updates)} WHERE skill_id = ?",
+                tuple(params),
+            )
+            if cursor.rowcount == 0:
+                raise SkillNotFoundError(skill_id)
+        refreshed = self.get_skill(skill_id)
+        if refreshed is None:  # pragma: no cover - 刚更新必存在
+            raise RuntimeError(f"skill {skill_id} vanished after update")
+        return refreshed
 
     def record_success(self, skill_id: int) -> None:
         """success_count += 1, updated_at = now。
@@ -281,16 +461,39 @@ class SkillStore:
                 raise SkillNotFoundError(skill_id)
         logger.debug("recorded failure skill_id=%s", skill_id)
 
-    def quick_match(self, user_input: str) -> list[SkillCapsule]:
+    def quick_match(
+        self,
+        user_input: str,
+        allowed_ids: "set[int] | None" = None,
+    ) -> list[SkillCapsule]:
         """第一阶段：关键词快速预筛选。
 
         Why 纯字符串匹配: 不调 LLM，延迟 < 1ms，先过滤掉绝大多数无关 Skill，
         避免后续 LLM 调用的成本与延迟。仅返回 success_count >= AUTO_CREATE_THRESHOLD
         的 Skill——未达阈值的 Skill 统计显著性不足，不参与自动注入。
+
+        allowed_ids: 会话级白名单（决策 2 三态挂载）。None=auto（全部 published
+        参与）；空集=off（全拦）；非空集=custom（仅白名单内参与）。
         """
+        # off：空集白名单 → 一个都不注入，直接短路。
+        if allowed_ids is not None and not allowed_ids:
+            return []
         haystack = user_input.lower()
         candidates: list[SkillCapsule] = []
-        for skill in self.list_skills():
+        # Why 只查 published: pending（待人工确认）的 Skill 一律不参与注入，
+        # 从源头杜绝未审核胶囊污染 prompt（决策 1）。
+        for skill in self.list_skills(status=SKILL_STATUS_PUBLISHED):
+            if not skill.enabled:
+                continue  # 停用胶囊不参与注入（Skills 页签管理语义）
+            if allowed_ids is not None and skill.skill_id not in allowed_ids:
+                continue  # custom 模式：不在白名单内的 published 也跳过
+            # Why: instruction 类型（市场安装/手动创建）不受 success_count 阈值
+            #   和 trigger_keywords 约束——用户主动安装即表示信任，
+            #   匹配逻辑改为 trigger_condition 子串匹配（用户输入包含触发条件关键词即命中）。
+            if skill.skill_type == "instruction":
+                if skill.trigger_condition and skill.trigger_condition.lower() in haystack:
+                    candidates.append(skill)
+                continue
             if skill.success_count < self.AUTO_CREATE_THRESHOLD:
                 continue
             if not skill.trigger_keywords:
@@ -308,14 +511,16 @@ class SkillStore:
         self,
         user_input: str,
         llm_matcher: SkillMatcher | None = None,
+        allowed_ids: "set[int] | None" = None,
     ) -> list[SkillCapsule]:
         """两阶段匹配入口。
 
         Why 两阶段: quick_match 先用关键词预筛选（< 1ms），无候选时直接返回空，
         跳过 LLM 调用以省成本；有候选时才调 llm_matcher 做语义精确匹配。
         llm_matcher 可选：不传则直接返回 quick_match 结果（便于离线/测试场景）。
+        allowed_ids 透传给 quick_match 做会话级白名单过滤。
         """
-        candidates = self.quick_match(user_input)
+        candidates = self.quick_match(user_input, allowed_ids=allowed_ids)
         if not candidates:
             return []
         if llm_matcher is None:
@@ -381,6 +586,7 @@ class SkillStore:
                 trigger_keywords=list(trigger_keywords),
                 standard_steps=list(standard_steps),
                 sample_envelope=sample_envelope,
+                author="agent",  # 自动沉淀产物，与手动创建/市场安装区分
             )
             self.record_success(new_skill.skill_id)
             refreshed = self.get_skill(new_skill.skill_id)

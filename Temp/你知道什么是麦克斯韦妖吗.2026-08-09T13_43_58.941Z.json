@@ -1,0 +1,149 @@
+{
+  "id": "019fe6c4-1b43-704f-8241-70b135e5dd88",
+  "startedAt": "2026-08-09T13:43:58.941Z",
+  "endedAt": "2026-08-09T13:44:02.762Z",
+  "endpoint": "search",
+  "formState": {
+    "parseFile": null,
+    "parseFileMeta": null,
+    "extractSetupCompleted": false,
+    "urls": [],
+    "extractSchema": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "company_mission": {
+          "type": "string"
+        },
+        "supports_sso": {
+          "type": "boolean"
+        },
+        "is_open_source": {
+          "type": "boolean"
+        },
+        "is_in_yc": {
+          "type": "boolean"
+        }
+      }
+    },
+    "extractPrompt": "Extract the company details, following the schema.",
+    "enableWebSearch": false,
+    "constrainUrls": false,
+    "options": {
+      "onlyMainContent": true,
+      "parsePDF": true,
+      "stealthMode": false,
+      "excludeTags": [],
+      "includeTags": [],
+      "waitFor": "",
+      "timeout": "",
+      "maxAge": "2 days",
+      "ignoreSitemap": false,
+      "crawlEntireDomain": false,
+      "sitemap": "include",
+      "limit": "10",
+      "maxDepth": "",
+      "excludePaths": [],
+      "includePaths": [],
+      "includeSubdomains": false,
+      "search": "",
+      "scrapeContentFromSearchResults": true,
+      "timeBasedSearch": "",
+      "location": "",
+      "includeDomains": [],
+      "excludeDomains": [],
+      "prompt": ""
+    },
+    "formats": [],
+    "sources": [
+      "web"
+    ],
+    "categories": [],
+    "jsonSchema": {
+      "type": "object",
+      "required": [],
+      "properties": {
+        "company_name": {
+          "type": "string"
+        },
+        "company_description": {
+          "type": "string"
+        }
+      }
+    },
+    "jsonPrompt": "",
+    "questionPrompt": "",
+    "highlightsQuery": "",
+    "agent": {},
+    "url": "你知道什么是麦克斯韦妖吗",
+    "endpoint": "search"
+  },
+  "status": "success",
+  "version": "L8bJjN7K3ldeOu2tsdMvU",
+  "isPreview": false,
+  "web": [
+    {
+      "url": "https://zh.wikipedia.org/zh-hans/%E9%BA%A6%E5%85%8B%E6%96%AF%E9%9F%A6%E5%A6%96",
+      "title": "麦克斯韦妖- 维基百科，自由的百科全书",
+      "description": "麦克斯韦妖（英语：Maxwell's demon）是一个试图证伪热力学第二定律的假想实验，设想一只能探测并控制单个分子运动的妖怪，首先于1867年由英国物理学家詹姆斯·麦克斯韦提出 ...",
+      "position": 1
+    },
+    {
+      "url": "https://baike.baidu.com/item/%E9%BA%A6%E5%85%8B%E6%96%AF%E9%9F%A6%E5%A6%96/618888",
+      "title": "麦克斯韦妖（物理学假想的能探测并控制单分子运动的机制）",
+      "description": "麦克斯韦妖（Maxwell's demon），是在物理学中假想的妖，能探测并控制单个分子的运动，于1871年由英国物理学家詹姆斯·麦克斯韦为了说明违反热力学第二定律的可能性而设想的 ...",
+      "position": 2
+    },
+    {
+      "url": "https://in.iphy.ac.cn/emagazine/o/news.php?id=25156",
+      "title": "科学大佬们养的宠物妖怪们 - 物理所电子期刊",
+      "description": "麦克斯韦创造麦克斯韦妖的主要目的是想证明热力学第二定律——不可能把热从低温物体传到高温物体而不产生其他影响——存在可以被违反的情况。 麦克斯韦妖的宠物力：可以 ...",
+      "position": 3
+    },
+    {
+      "url": "https://zhuanlan.zhihu.com/p/367437767",
+      "title": "麦克斯韦妖再现江湖，熵减成真！曾纠缠物理学家一百多年",
+      "description": "这就是大名鼎鼎的麦克斯韦妖（Maxwell's demon），由著名物理学家麦克斯韦提出。 现在，居然有人把这个妖精造了个新版本出来，而且还是个“赌徒版”的！",
+      "position": 4
+    },
+    {
+      "url": "https://www.facebook.com/100076004377328/posts/%E9%BA%A6%E5%85%8B%E6%96%AF%E9%9F%A6%E5%A6%96157%E5%B9%B4%E7%9A%84%E7%89%A9%E7%90%86%E5%8D%9A%E5%BC%88%E6%8F%AD%E7%A7%98%E7%86%B5%E5%A2%9E%E7%9A%84%E6%9C%AC%E8%B4%A8/907584315118373/",
+      "title": "麦克斯韦妖：157年的物理博弈，揭秘熵增的本质",
+      "description": "麦克斯韦妖:157年的物理博弈,揭秘熵增的本质. 原本溫度相同的兩邊, 慢慢的就會出現溫差,右邊全是快速分子, 溫度越來越高, 左邊全是慢速分子,溫度越來越低 ...",
+      "position": 5
+    },
+    {
+      "url": "https://swarma.org/?p=27774",
+      "title": "什么是麦克斯韦妖| 集智百科",
+      "description": "麦克斯韦妖Maxwell's demon是英国物理学家詹姆斯·克拉克·麦克斯韦James Clerk Maxwell于1867年为了说明违反热力学第二定律second law of thermodynamics ...",
+      "position": 6
+    },
+    {
+      "url": "https://www.reddit.com/r/TheoreticalPhysics/comments/1c7hokq/can_someone_explain_to_me_like_i_am_a_five_year/?tl=zh-hans",
+      "title": "有人能用五岁小孩能听懂的方式，给我解释一下麦克斯韦妖吗？",
+      "description": "在这种情况下，麦克斯韦妖代表着那个带着邪恶笑容的小混蛋，坐在你的系统旁边，看着你的值一个接一个地输入。他让你拥有一个功能性的线性系统，但永远不会 ...",
+      "position": 7
+    },
+    {
+      "url": "https://www.thepaper.cn/newsDetail_forward_28730461",
+      "title": "熵与信息（三）：麦克斯韦妖的百年纠葛",
+      "description": "这个隐患就是被人戏称为物理学4 大神兽之一的“麦克斯韦妖”，是麦克斯韦在1871 年提出的一个可能违反热力学第二定律的思想实验。 热力学第二定律的“隐患” ...",
+      "position": 8
+    },
+    {
+      "url": "https://m.guokr.com/article/117008",
+      "title": "因为遗忘，麦克斯韦妖不可能存在",
+      "description": "麦克斯韦妖（Maxwell's demon），是一个假想出来的妖精，它能探测并控制单个分子的运动，于1871年由英国物理学家麦克斯韦为了说明违反热力学第二定律 ...",
+      "position": 9
+    },
+    {
+      "url": "https://x.com/Himalaya_bear1/status/2040152809010520281",
+      "title": "麦克斯韦妖其实并没有打破这条定律。 为了决定让哪些分子 ...",
+      "description": "麦克斯韦妖✍️ 这是物理学家詹姆斯·克拉克·麦克斯韦在1867年提出的一个著名思想实验。 想象一个装满气体的盒子，气体温度均匀，中间被一堵带小门的隔 ...",
+      "position": 10
+    }
+  ],
+  "news": [],
+  "images": [],
+  "creditsUsed": 2
+}

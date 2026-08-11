@@ -1,0 +1,70 @@
+[
+  {
+    "id": "github-mcp",
+    "name": "GitHub 开发者助手",
+    "icon": "🐙",
+    "category": "代码与 DevOps",
+    "description": "允许 Agent 搜索 GitHub 代码库、读取文件、管理 Issue 和 PR",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "env_schema": [
+      {
+        "key": "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "label": "GitHub Personal Access Token",
+        "type": "password",
+        "description": "去 GitHub -> Settings -> Developer settings 申请"
+      }
+    ]
+  },
+  {
+    "id": "postgres-mcp",
+    "name": "PostgreSQL 数据库诊断器",
+    "icon": "🐘",
+    "category": "数据库",
+    "description": "允许 Agent 结构化读取 PostgreSQL 表结构、执行只读 SQL 查询与性能分析",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-postgres"],
+    "env_schema": [
+      {
+        "key": "POSTGRES_CONNECTION_STRING",
+        "label": "数据库连接串",
+        "type": "text",
+        "description": "格式: postgresql://user:password@localhost:5432/dbname"
+      }
+    ]
+  },
+  {
+    "id": "brave-search-mcp",
+    "name": "Brave 极速网页搜索",
+    "icon": "🦁",
+    "category": "全网搜索",
+    "description": "基于 Brave 搜索引擎，为 Agent 提供毫秒级的全网网页与新闻检索",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+    "env_schema": [
+      {
+        "key": "BRAVE_API_KEY",
+        "label": "Brave Search API Key",
+        "type": "password",
+        "description": "去 api.search.brave.com 申请"
+      }
+    ]
+  },
+  {
+    "id": "filesystem-mcp",
+    "name": "本地指定目录读写器",
+    "icon": "📁",
+    "category": "系统与文件",
+    "description": "授权 Agent 安全读取与修改你电脑中指定的某个安全文件夹",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+    "env_schema": [
+      {
+        "key": "ALLOWED_DIRECTORY",
+        "label": "允许访问的本地文件夹绝对路径",
+        "type": "text",
+        "description": "例如: D:\\my_project 或 /Users/name/desktop"
+      }
+    ]
+  }
+]

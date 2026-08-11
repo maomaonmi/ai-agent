@@ -28,6 +28,7 @@ from glm_adapter import ChatAttachment, build_user_content, validate_attachment_
 # Why: 供应商能力判断唯一入口——禁止再新增 `"xxx" in model.lower()` 字符串嗅探。
 from model_settings import capabilities_for_model, ensure_direct_connection
 from terminal_service import TERMINAL_POOL as _DEFAULT_TERMINAL_POOL, filter_command
+from mcp_manager import parse_tool_name
 
 # Why: 全栈/补丁生成链路的关键决策点需要可观测，便于定位"模型立即结束/无输出"等问题。
 # 终端控制台（uvicorn 输出）即可看到 DEBUG 日志，无需改动前端。
@@ -47,6 +48,7 @@ def _build_memory_prompt_suffix(
     messages: list[dict[str, Any]] | None = None,
     current_vfs: dict[str, str] | None = None,
     skill_store: Any = None,
+    allowed_skill_ids: "set[int] | None" = None,
 ) -> tuple[str, list[Any]]:
     """合成记忆上下文，作为 system_prompt 的追加段；同时返回命中的 Skill 胶囊。
 
@@ -61,6 +63,8 @@ def _build_memory_prompt_suffix(
         skill_store: 可选 SkillStore。提供时按 user_input 做两阶段匹配（无 llm_matcher，
             走 quick_match 快速通道），把命中 Skill 的标准步骤/校验规则拼入上下文，
             并返回胶囊列表供调用方推送 skill_matched SSE（计划书 T5.4）。
+        allowed_skill_ids: 会话级 Skill 白名单（决策 2 三态挂载）。
+            None=auto（全部 published 参与）；空集=off（全拦）；非空集=custom。
 
     Returns:
         (suffix, matched_skills)。suffix 可空串；matched_skills 为 SkillCapsule 列表。
@@ -84,7 +88,9 @@ def _build_memory_prompt_suffix(
     matched: list[Any] = []
     if skill_store is not None and user_input.strip():
         try:
-            matched = skill_store.match_skills(user_input) or []
+            matched = skill_store.match_skills(
+                user_input, allowed_ids=allowed_skill_ids
+            ) or []
         except Exception:
             logger.exception("[memory] match_skills 失败 sid=%s，跳过 Skill 注入。", session_id)
             matched = []
@@ -459,8 +465,9 @@ async def stream_json_completion(
             create_kwargs["response_format"] = {"type": "json_object"}
         # Why: 轮级思考（Turn-level Thinking）——子任务执行等轻量轮次传 thinking="disabled"
         # 不耗推理预算；任务拆解/完整生成等重轮次保留深度思考。
-        # 参数协议按供应商分发：GLM 用 thinking.type+reasoning_effort；千问用
-        # enable_thinking+thinking_budget（budget 必须 < max_tokens，否则挤占输出）。
+        # 参数协议按供应商分发：GLM 用 thinking.type+reasoning_effort（都放 extra_body.thinking）；
+        # 千问用 enable_thinking+thinking_budget（budget 必须 < max_tokens，否则挤占输出）；
+        # DeepSeek 用 extra_body.thinking.type + 顶层 reasoning_effort（关键差异：effort 是顶层参数）。
         if caps.thinking_control == "glm":
             thinking_body: dict[str, Any] = {"type": thinking}
             # reasoning_effort 仅在开启思考时有效；disabled 时传了会报错。
@@ -473,6 +480,16 @@ async def stream_json_completion(
                 budget = thinking_budget or min(max(max_tokens // 2, 1_024), 16_000)
                 qwen_body["thinking_budget"] = min(budget, max(max_tokens - 1_024, 256))
             create_kwargs["extra_body"] = qwen_body
+        elif caps.thinking_control == "deepseek":
+            # Why: DeepSeek 协议——thinking 走 extra_body，reasoning_effort 走顶层参数。
+            # 与 GLM 关键差异：GLM 的 reasoning_effort 放 extra_body.thinking.reasoning_effort，
+            # DeepSeek 的 reasoning_effort 是 create_kwargs 顶层字段。
+            create_kwargs["extra_body"] = {"thinking": {"type": thinking}}
+            if thinking == "enabled":
+                create_kwargs["reasoning_effort"] = reasoning_effort
+                # Why: 官方文档明确思考模式启用时 temperature/top_p 不报错但不生效，
+                # 显式移除避免误导调试；非思考模式保留 temperature 让用户可调。
+                create_kwargs.pop("temperature", None)
         logger.debug("[stream_json_completion] 发起流式请求 ...")
         stream = await client.chat.completions.create(**create_kwargs)
         logger.debug("[stream_json_completion] 流式请求已建立，开始累积 ...")
@@ -1377,6 +1394,9 @@ class FullstackGenerateRequest(BaseModel):
     workspace_id: str = Field(default="default", min_length=1, max_length=64)
     run_id: str = Field(default="", max_length=64)
     session_id: str | None = Field(default=None, min_length=8, max_length=64)
+    # 会话级 MCP 注入开关（语义同聊天模式 RuntimeSettings）
+    mcp_mode: Literal["off", "auto", "custom"] = "auto"
+    mcp_server_ids: list[str] = Field(default_factory=list, max_length=50)
 
 
 class FullstackModifyRequest(BaseModel):
@@ -4445,6 +4465,9 @@ async def stream_tool_loop(
     review: ToolExecutionContext,
     max_rounds: int = 24,
     max_tokens: int = 8_000,
+    mcp_pool: Any | None = None,
+    mcp_allowed: set[str] | None = None,
+    plugins_store: Any | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Agent 工具循环：每轮模型思考 → 调用工具 → 结果回灌，直到 finalize 或达上限。
 
@@ -4453,16 +4476,40 @@ async def stream_tool_loop(
       从而实现"边想边做"，而不是一次性吐完整 JSON。
     - 用 stream=False：工具循环每轮都要等工具执行结果，流式收益低；真实的"实时感"来自
       工具动作本身的落盘与推送。
+    - mcp_pool 注入时，MCP 工具（mcp__ 前缀）与内置工具合并下发；mcp_allowed 为会话级
+      白名单（None=全部已启用，空集=本会话关闭 MCP）。
     """
     total_sse: list[str] = []
-    tools = [t.to_openai_schema() for t in TOOL_REGISTRY.values()]
-    # Why: 思考参数按供应商能力分发；不支持的供应商（DeepSeek）不传 extra_body。
+    # Why: Plugins 页签禁用的内置工具在此过滤（核心写链路工具锁定不可禁，见 plugins_registry）。
+    disabled_builtin: set[str] = set()
+    if plugins_store is not None:
+        try:
+            disabled_builtin = set(plugins_store.disabled_tools())
+        except Exception:
+            logger.warning("[stream_tool_loop] plugins 状态读取失败，按全部启用处理。")
+    tools = [
+        t.to_openai_schema()
+        for t in TOOL_REGISTRY.values()
+        if t.name not in disabled_builtin
+    ]
+    if mcp_pool is not None:
+        try:
+            tools += mcp_pool.all_tool_specs(mcp_allowed)
+        except Exception:
+            logger.warning("[stream_tool_loop] MCP 工具清单获取失败，本轮降级为仅内置工具。\n%s", traceback.format_exc())
+    # Why: 思考参数按供应商能力分发；DeepSeek 协议与 GLM/千问均不同。
     tool_caps = capabilities_for_model(model)
     tool_extra_body: dict[str, Any] | None = None
+    # DeepSeek 工具循环固定用 high 档（与 GLM 用 medium 对齐，避免过度思考拖慢工具调用）
+    tool_top_level_effort: str | None = None
     if tool_caps.thinking_control == "glm":
         tool_extra_body = {"thinking": {"type": "enabled", "reasoning_effort": "medium"}}
     elif tool_caps.thinking_control == "qwen_budget":
         tool_extra_body = {"enable_thinking": True, "thinking_budget": min(8_000, max(max_tokens - 1_024, 256))}
+    elif tool_caps.thinking_control == "deepseek":
+        # Why: DeepSeek reasoning_effort 是顶层参数，需在 create_kwargs 里设，不放 extra_body。
+        tool_extra_body = {"thinking": {"type": "enabled"}}
+        tool_top_level_effort = "high"
     for _round in range(max_rounds):
         create_kwargs: dict[str, Any] = dict(
             model=model,
@@ -4475,11 +4522,15 @@ async def stream_tool_loop(
         )
         if tool_extra_body:
             create_kwargs["extra_body"] = tool_extra_body
+        if tool_top_level_effort:
+            # Why: DeepSeek 思考模式启用时 temperature 不生效，显式移除避免误导。
+            create_kwargs.pop("temperature", None)
+            create_kwargs["reasoning_effort"] = tool_top_level_effort
         resp = await client.chat.completions.create(**create_kwargs)
         msg = resp.choices[0].message
         tool_calls = getattr(msg, "tool_calls", None) or []
         if tool_calls:
-            messages.append({
+            assistant_msg: dict[str, Any] = {
                 "role": "assistant",
                 "content": msg.content or "",
                 "tool_calls": [
@@ -4487,8 +4538,30 @@ async def stream_tool_loop(
                      "function": {"name": tc.function.name, "arguments": tc.function.arguments}}
                     for tc in tool_calls
                 ],
-            })
+            }
+            # Why: DeepSeek 思考模式下，工具调用轮次的 reasoning_content 在后续所有请求中
+            # 必须完整回传，否则 API 返回 400（官方文档明确要求）。GLM/千问无此要求。
+            if tool_caps.thinking_control == "deepseek":
+                assistant_msg["reasoning_content"] = getattr(msg, "reasoning_content", "") or ""
+            messages.append(assistant_msg)
             for tc in tool_calls:
+                # Why: MCP 工具（mcp__ 前缀）走进程池分发，不进内置 TOOL_REGISTRY 查表。
+                if mcp_pool is not None and parse_tool_name(tc.function.name) is not None:
+                    try:
+                        mcp_args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                    except json.JSONDecodeError:
+                        mcp_args = {}
+                    try:
+                        mcp_report = await mcp_pool.dispatch(tc.function.name, mcp_args, mcp_allowed)
+                        mcp_ok = True
+                    except Exception as exc:
+                        mcp_ok, mcp_report = False, f"MCP 工具调度异常：{str(exc)[:200]}"
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps({"ok": mcp_ok, "report": str(mcp_report)[:8000]}, ensure_ascii=False),
+                    })
+                    continue
                 res = await dispatch_tool(tc.function.name, tc.function.arguments, review)
                 total_sse += res.get("sse", [])
                 messages.append({
@@ -4537,6 +4610,9 @@ async def fullstack_generate_stream(
     memory_engine: Any | None = None,
     vfs_store: Any | None = None,
     skill_store: Any | None = None,
+    mcp_pool: Any | None = None,
+    mcp_allowed: set[str] | None = None,
+    plugins_store: Any | None = None,
 ) -> AsyncIterator[str]:
     # 兼容占位：保留 workspace_id/run_id/terminal_pool 给 terminal_commands 提案链。
     _ = (workspace_id, run_id, terminal_pool)
@@ -4605,7 +4681,11 @@ async def fullstack_generate_stream(
                         "禁止在正文里直接输出文件内容冒充已写入；不调用工具的文件内容一律视为未生效。"
                         "完成本子任务后必须调用 finalize 结束。\n\n" + sub_messages[0]["content"]
                     )
-                    sub_envelope, tool_sse = await stream_tool_loop(client, model_name, sub_messages, review)
+                    sub_envelope, tool_sse = await stream_tool_loop(
+                        client, model_name, sub_messages, review,
+                        mcp_pool=mcp_pool, mcp_allowed=mcp_allowed,
+                        plugins_store=plugins_store,
+                    )
                     for ev in tool_sse:
                         yield ev
                     # Why: review.working_vfs 与 working_vfs 是同一引用，write_file 等工具在循环内
@@ -5463,7 +5543,8 @@ def create_code_router(
     *,
     api_key: str,
     base_url: str = "https://api.deepseek.com",
-    model_name: str = "deepseek-chat",
+    # Why: deepseek-chat 2026/07/24 弃用，兜底默认值升级到 v4-flash。
+    model_name: str = "deepseek-v4-flash",
     workspace_root: Path | None = None,
     settings_provider=None,
     terminal_pool: Any | None = None,
@@ -5471,6 +5552,8 @@ def create_code_router(
     memory_engine: Any | None = None,
     vfs_store: Any | None = None,
     skill_store: Any | None = None,
+    mcp_pool: Any | None = None,
+    plugins_store: Any | None = None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api/code", tags=["code"])
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
@@ -5639,6 +5722,12 @@ def create_code_router(
             validate_attachment_mix(request.attachments)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # 会话级 MCP 过滤：off→空集（一个都不注入）；custom→白名单；auto→None（全部）。
+        mcp_allowed: set[str] | None = None
+        if request.mcp_mode == "off":
+            mcp_allowed = set()
+        elif request.mcp_mode == "custom":
+            mcp_allowed = set(request.mcp_server_ids)
         return StreamingResponse(
             fullstack_generate_stream(
                 request.prompt.strip(), client, model_name, request.attachments,
@@ -5651,6 +5740,9 @@ def create_code_router(
                 memory_engine=memory_engine,
                 vfs_store=vfs_store,
                 skill_store=skill_store,
+                mcp_pool=mcp_pool,
+                mcp_allowed=mcp_allowed,
+                plugins_store=plugins_store,
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},

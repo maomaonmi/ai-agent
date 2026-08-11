@@ -703,6 +703,8 @@ def test_skill_quick_match(setup):
     skill_store.record_success(skill_qualified.skill_id)
     skill_store.record_success(skill_qualified.skill_id)
     assert skill_store.get_skill(skill_qualified.skill_id).success_count == 2
+    # Why 决策 1：create_skill 默认 pending 不参与匹配，需上架后才可被 quick_match 命中。
+    skill_store.set_skill_status(skill_qualified.skill_id, "published")
 
     # 未达阈值 Skill（success_count=1 < 2）
     skill_unqualified = skill_store.create_skill(
@@ -714,6 +716,7 @@ def test_skill_quick_match(setup):
     )
     skill_store.record_success(skill_unqualified.skill_id)
     assert skill_store.get_skill(skill_unqualified.skill_id).success_count == 1
+    skill_store.set_skill_status(skill_unqualified.skill_id, "published")
 
     # 命中：输入含 "react" 和 "组件"
     matched = skill_store.quick_match("帮我生成一个react组件")
@@ -739,6 +742,7 @@ def test_skill_match_skills_no_llm(setup):
     )
     skill_store.record_success(skill.skill_id)
     skill_store.record_success(skill.skill_id)
+    skill_store.set_skill_status(skill.skill_id, "published")  # 决策 1：上架后才参与匹配
 
     # 有候选但 llm_matcher=None → 直接返回 quick_match 结果
     matched = skill_store.match_skills("这是一个匹配test的请求", llm_matcher=None)
@@ -792,6 +796,192 @@ def test_skill_auto_create(setup):
     all_skills = skill_store.list_skills()
     assert len(all_skills) == 1
     assert all_skills[0].skill_id == result3.skill_id
+
+
+# ==================================================================
+# Skill 生命周期（决策 1 人工确认上架）+ 三态挂载（决策 2）
+# ==================================================================
+
+
+def _make_mature_skill(store, trigger, keywords):
+    """连续成功 2 次，沉淀为成熟 Skill（success_count=2 达阈值）。返回胶囊。"""
+    store.maybe_create_skill_from_success(
+        trigger_condition=trigger, trigger_keywords=keywords, standard_steps=["s1"],
+    )
+    return store.maybe_create_skill_from_success(
+        trigger_condition=trigger, trigger_keywords=keywords, standard_steps=["s1"],
+    )
+
+
+def test_skill_pending_not_matched_until_published(setup):
+    """决策 1：自动沉淀的 Skill 默认 pending，不参与匹配；上架后才参与。"""
+    store = setup.skill_store
+    skill = _make_mature_skill(store, "配置数据库连接池", ["数据库", "连接池"])
+    assert skill is not None
+
+    # 沉淀后为 pending：list 默认能看到，但 match（内部只查 published）不命中
+    assert store.get_skill(skill.skill_id).status == "pending"
+    assert store.match_skills("帮我配置数据库连接池") == []
+
+    # 上架后命中
+    store.set_skill_status(skill.skill_id, "published")
+    matched = store.match_skills("帮我配置数据库连接池")
+    assert [s.skill_id for s in matched] == [skill.skill_id]
+
+    # 下架后再次不命中
+    store.set_skill_status(skill.skill_id, "pending")
+    assert store.match_skills("帮我配置数据库连接池") == []
+
+
+def test_skill_status_validation_and_notfound(setup):
+    """set_skill_status：非法状态抛 ValueError；不存在 id 抛 SkillNotFoundError。"""
+    from skill_store import SkillNotFoundError
+    store = setup.skill_store
+    skill = _make_mature_skill(store, "生成报表", ["报表"])
+    with pytest.raises(ValueError):
+        store.set_skill_status(skill.skill_id, "archived")
+    with pytest.raises(SkillNotFoundError):
+        store.set_skill_status(99999, "published")
+
+
+def test_skill_match_allowed_ids_three_modes(setup):
+    """决策 2：allowed_ids 三态——None=auto 全部 published；空集=off 全拦；白名单=custom。"""
+    store = setup.skill_store
+    skill_a = _make_mature_skill(store, "优化 SQL 查询", ["SQL"])
+    skill_b = _make_mature_skill(store, "编写单元测试", ["测试"])
+    for s in (skill_a, skill_b):
+        store.set_skill_status(s.skill_id, "published")
+
+    # auto（None）：输入同时含两个关键词，两个都命中
+    auto = store.match_skills("优化 SQL 并编写测试", allowed_ids=None)
+    assert {s.skill_id for s in auto} == {skill_a.skill_id, skill_b.skill_id}
+
+    # off（空集）：全拦
+    assert store.match_skills("优化 SQL 并编写测试", allowed_ids=set()) == []
+
+    # custom（白名单只含 A）：只命中 A
+    custom = store.match_skills("优化 SQL 并编写测试", allowed_ids={skill_a.skill_id})
+    assert [s.skill_id for s in custom] == [skill_a.skill_id]
+
+
+def test_list_skills_filter_by_status(setup):
+    """list_skills 按 status 过滤：pending 与 published 分组正确。"""
+    store = setup.skill_store
+    pending_skill = _make_mature_skill(store, "待确认技能", ["待确认"])
+    published_skill = _make_mature_skill(store, "已上架技能", ["已上架"])
+    store.set_skill_status(published_skill.skill_id, "published")
+
+    pendings = store.list_skills(status="pending")
+    publisheds = store.list_skills(status="published")
+    assert {s.skill_id for s in pendings} == {pending_skill.skill_id}
+    assert {s.skill_id for s in publisheds} == {published_skill.skill_id}
+    assert len(store.list_skills()) == 2
+
+
+# ==================================================================
+# Skill 市场目录支撑（计划书 §2.4：author/source 列 + instruction 类型）
+# ==================================================================
+
+
+def test_create_skill_with_author_source_and_published(setup):
+    """市场安装/手动创建：instruction 类型 + published + author/source 落库并立即可匹配。"""
+    store = setup.skill_store
+    skill = store.create_skill(
+        skill_name="/theme-factory",
+        skill_type="instruction",
+        trigger_condition="当需要主题换肤时",
+        trigger_keywords=[],
+        standard_steps=["1. 定主题", "2. 套令牌"],
+        status="published",
+        author="Anthropic",
+        source="theme-factory",
+    )
+    loaded = store.get_skill(skill.skill_id)
+    assert loaded is not None
+    assert loaded.skill_type == "instruction"
+    assert loaded.status == "published"
+    assert loaded.author == "Anthropic"
+    assert loaded.source == "theme-factory"
+    # published 直接参与匹配，无需人工上架
+    assert [s.skill_id for s in store.match_skills("当需要主题换肤时")] == [skill.skill_id]
+
+
+def test_get_skill_by_source(setup):
+    """source 判重：按 catalog_id 找到已安装胶囊；未安装返回 None。"""
+    store = setup.skill_store
+    assert store.get_skill_by_source("canvas-design") is None
+    skill = store.create_skill(
+        skill_name="/canvas-design",
+        skill_type="instruction",
+        trigger_condition="视觉设计",
+        trigger_keywords=[],
+        standard_steps=["1. 构图"],
+        status="published",
+        author="Anthropic",
+        source="canvas-design",
+    )
+    found = store.get_skill_by_source("canvas-design")
+    assert found is not None and found.skill_id == skill.skill_id
+
+
+def test_auto_precipitated_skill_author_is_agent(setup):
+    """自动沉淀链路标 author='agent'，与手动创建/市场安装区分。"""
+    store = setup.skill_store
+    skill = _make_mature_skill(store, "自动沉淀来源", ["来源"])
+    assert store.get_skill(skill.skill_id).author == "agent"
+
+
+def test_create_skill_rejects_bad_status(setup):
+    """status 校验：非法状态抛 ValueError（与 skill_type 校验同级）。"""
+    store = setup.skill_store
+    with pytest.raises(ValueError):
+        store.create_skill(
+            skill_name="x",
+            skill_type="instruction",
+            trigger_condition="t",
+            trigger_keywords=[],
+            standard_steps=["s"],
+            status="archived",
+        )
+
+
+def test_author_source_migration_from_legacy_schema(tmp_path):
+    """老库（无 author/source/status 列）打开后幂等补齐：存量行 author 回填 'agent'，
+    status 回填 published（视为已上架），source 为 NULL。"""
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE skill_capsules (
+            skill_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill_name        TEXT NOT NULL UNIQUE,
+            skill_type        TEXT NOT NULL,
+            trigger_condition TEXT NOT NULL,
+            trigger_keywords  TEXT DEFAULT '[]',
+            standard_steps    TEXT NOT NULL,
+            required_params   TEXT DEFAULT '[]',
+            validation_rules  TEXT DEFAULT '[]',
+            success_count     INTEGER DEFAULT 0,
+            failure_count     INTEGER DEFAULT 0,
+            sample_envelope   TEXT,
+            created_at        REAL NOT NULL,
+            updated_at        REAL NOT NULL
+        );
+        INSERT INTO skill_capsules
+            (skill_name, skill_type, trigger_condition, standard_steps, created_at, updated_at)
+        VALUES ('legacy', 'task_flow', '老触发', '["s1"]', 1.0, 1.0);
+        """
+    )
+    conn.close()
+
+    store = SkillStore(db_path)
+    loaded = store.list_skills()
+    assert len(loaded) == 1
+    assert loaded[0].author == "agent"
+    assert loaded[0].source is None
+    assert loaded[0].status == "published"
 
 
 # ==================================================================

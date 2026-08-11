@@ -1,0 +1,10 @@
+{
+  "search_provider": "firecrawl",
+  "tavily_api_key": "",
+  "firecrawl_api_key": "fc-d7c6885bb3004a39b290a51d5be649e6",
+  "rerank_api_key": "sk-sqyzbcluxkxwwdvwktqylqudmfhrudyvjnagmvannsonvfry",
+  "firecrawl_enable_highlights": true,
+  "firecrawl_scrape_top_n": 3,
+  "firecrawl_markdown_max_chars": 2000,
+  "deep_research_engine": "firecrawl"
+}

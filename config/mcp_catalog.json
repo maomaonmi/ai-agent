@@ -1,0 +1,210 @@
+[
+  {
+    "id": "github-mcp",
+    "name": "GitHub 开发者助手",
+    "icon": "🐙",
+    "category": "代码与 DevOps",
+    "description": "允许 Agent 搜索 GitHub 代码库、读取文件、管理 Issue 和 PR",
+    "transport": "stdio",
+    "provider": "MCP 官方",
+    "tags": ["git", "github", "devops"],
+    "homepage": "https://github.com/modelcontextprotocol/servers",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-github"],
+    "env_schema": [
+      {
+        "key": "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "label": "GitHub Personal Access Token",
+        "type": "password",
+        "required": true,
+        "description": "去 GitHub -> Settings -> Developer settings 申请"
+      }
+    ]
+  },
+  {
+    "id": "postgres-mcp",
+    "name": "PostgreSQL 数据库诊断器",
+    "icon": "🐘",
+    "category": "数据库",
+    "description": "允许 Agent 结构化读取 PostgreSQL 表结构、执行只读 SQL 查询与性能分析",
+    "transport": "stdio",
+    "provider": "MCP 官方",
+    "tags": ["sql", "postgres", "database"],
+    "homepage": "https://github.com/modelcontextprotocol/servers",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-postgres"],
+    "env_schema": [
+      {
+        "key": "POSTGRES_CONNECTION_STRING",
+        "label": "数据库连接串",
+        "type": "text",
+        "required": true,
+        "description": "格式: postgresql://user:password@localhost:5432/dbname"
+      }
+    ]
+  },
+  {
+    "id": "brave-search-mcp",
+    "name": "Brave 极速网页搜索",
+    "icon": "🦁",
+    "category": "全网搜索",
+    "description": "基于 Brave 搜索引擎，为 Agent 提供毫秒级的全网网页与新闻检索",
+    "transport": "stdio",
+    "provider": "MCP 官方",
+    "tags": ["search", "web"],
+    "homepage": "https://github.com/modelcontextprotocol/servers",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+    "env_schema": [
+      {
+        "key": "BRAVE_API_KEY",
+        "label": "Brave Search API Key",
+        "type": "password",
+        "required": true,
+        "description": "去 api.search.brave.com 申请"
+      }
+    ]
+  },
+  {
+    "id": "filesystem-mcp",
+    "name": "本地指定目录读写器",
+    "icon": "📁",
+    "category": "系统与文件",
+    "description": "授权 Agent 安全读取与修改你电脑中指定的某个安全文件夹",
+    "transport": "stdio",
+    "provider": "MCP 官方",
+    "tags": ["file", "local"],
+    "homepage": "https://github.com/modelcontextprotocol/servers",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+    "env_schema": [
+      {
+        "key": "ALLOWED_DIRECTORY",
+        "label": "允许访问的本地文件夹绝对路径",
+        "type": "text",
+        "required": true,
+        "description": "例如: D:\\my_project 或 /Users/name/desktop"
+      }
+    ]
+  },
+  {
+    "id": "fetch-mcp",
+    "name": "网页内容抓取器",
+    "icon": "🌐",
+    "category": "全网搜索",
+    "description": "抓取任意 URL 并转为 Markdown，让 Agent 能阅读你丢给它的网页链接（官方Python版本）",
+    "transport": "stdio",
+    "provider": "MCP 官方",
+    "tags": ["fetch", "web", "markdown"],
+    "homepage": "https://github.com/modelcontextprotocol/servers/tree/main/src/fetch",
+    "command": "python",
+    "args": ["-m", "mcp_server_fetch"],
+    "env_schema": []
+  },
+  {
+    "id": "memory-mcp",
+    "name": "知识图谱记忆体",
+    "icon": "🧠",
+    "category": "效率工具",
+    "description": "为 Agent 提供跨会话的实体-关系知识图谱记忆，记住你的偏好与项目事实",
+    "transport": "stdio",
+    "provider": "MCP 官方",
+    "tags": ["memory", "graph"],
+    "homepage": "https://github.com/modelcontextprotocol/servers",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-memory"],
+    "env_schema": []
+  },
+  {
+    "id": "sequential-thinking-mcp",
+    "name": "序列化深度思考器",
+    "icon": "🧩",
+    "category": "效率工具",
+    "description": "把复杂问题拆成可修正的思考步骤序列，适合规划类与推理类任务",
+    "transport": "stdio",
+    "provider": "MCP 官方",
+    "tags": ["thinking", "planning"],
+    "homepage": "https://github.com/modelcontextprotocol/servers",
+    "command": "npx",
+    "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+    "env_schema": []
+  },
+  {
+    "id": "context7-mcp",
+    "name": "Context7 最新文档检索",
+    "icon": "📚",
+    "category": "代码与 DevOps",
+    "description": "从官方源码实时拉取 10000+ 库的最新版本化文档与可运行示例，抑制 AI 训练数据过时导致的幻觉",
+    "transport": "stdio",
+    "provider": "Upstash",
+    "tags": ["docs", "llm", "search"],
+    "homepage": "https://github.com/upstash/context7",
+    "command": "npx",
+    "args": ["-y", "@upstash/context7-mcp"],
+    "env_schema": []
+  },
+  {
+    "id": "playwright-mcp",
+    "name": "Playwright 浏览器自动化",
+    "icon": "🎭",
+    "category": "浏览器自动化",
+    "description": "让 Agent 真实操控浏览器：导航、点击、填表、截图、抓取可访问性快照并自测前端。需先执行 npx playwright install 安装浏览器",
+    "transport": "stdio",
+    "provider": "Microsoft",
+    "tags": ["browser", "automation", "e2e"],
+    "homepage": "https://github.com/microsoft/playwright-mcp",
+    "command": "npx",
+    "args": ["-y", "@playwright/mcp"],
+    "env_schema": []
+  },
+  {
+    "id": "blender-mcp",
+    "name": "Blender 3D 建模助手",
+    "icon": "🧊",
+    "category": "创意与设计",
+    "description": "让 Agent 读取与操控 Blender 场景：获取场景信息、执行 Python 脚本、导入 PolyHaven 资产。需先在 Blender 内安装同名插件并启动本地服务",
+    "transport": "stdio",
+    "provider": "社区",
+    "tags": ["blender", "3d", "design"],
+    "homepage": "https://github.com/ahujasid/blender-mcp",
+    "command": "uvx",
+    "args": ["blender-mcp"],
+    "env_schema": []
+  },
+  {
+    "id": "canva-mcp",
+    "name": "Canva 应用开发助手",
+    "icon": "🎨",
+    "category": "创意与设计",
+    "description": "让 Agent 访问 Canva App UI Kit 组件与 Apps SDK 官方文档，辅助开发 Canva 应用与集成",
+    "transport": "stdio",
+    "provider": "Canva",
+    "tags": ["canva", "design", "sdk"],
+    "homepage": "https://www.npmjs.com/package/@canva/cli",
+    "command": "npx",
+    "args": ["-y", "@canva/cli@latest", "mcp"],
+    "env_schema": []
+  },
+  {
+    "id": "figma-mcp",
+    "name": "Figma 设计稿转代码",
+    "icon": "🖌️",
+    "category": "创意与设计",
+    "description": "让 Agent 读取 Figma 文件的布局、间距、颜色与组件信息，据此生成高保真前端代码",
+    "transport": "stdio",
+    "provider": "Framelink",
+    "tags": ["figma", "design", "ui"],
+    "homepage": "https://www.npmjs.com/package/figma-developer-mcp",
+    "command": "npx",
+    "args": ["-y", "figma-developer-mcp", "--stdio"],
+    "env_schema": [
+      {
+        "key": "FIGMA_API_KEY",
+        "label": "Figma Personal Access Token",
+        "type": "password",
+        "required": true,
+        "description": "Figma -> Account Settings -> Personal access tokens 申请（files:read 权限）"
+      }
+    ]
+  }
+]

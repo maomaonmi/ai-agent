@@ -328,10 +328,16 @@ def test_record_patch_success_called_twice_auto_creates_skill(memory_stack):
     assert len(skills_after_second) == 1  # 同 trigger_condition 复用同一条
     assert skills_after_second[0].success_count == 2
 
-    # 达阈值 → quick_match 命中
+    # Why 决策 1：达阈值后 Skill 为 pending（待人工确认），quick_match 不命中；
+    # 上架（published）后才命中。这保证自动沉淀不会未经审核直接污染 prompt。
+    skill_id = skills_after_second[0].skill_id
+    assert skill_store.quick_match(instruction) == []  # pending 不命中
+    skill_store.set_skill_status(skill_id, "published")
+
+    # 达阈值且已上架 → quick_match 命中
     matched = skill_store.quick_match(instruction)
     assert len(matched) == 1
-    assert matched[0].skill_id == skills_after_second[0].skill_id
+    assert matched[0].skill_id == skill_id
     assert matched[0].trigger_condition == instruction
     # standard_steps 由 _record_patch_success 内部固定模板生成
     assert len(matched[0].standard_steps) == 3
@@ -673,7 +679,13 @@ def test_fullstack_patch_stream_skill_threshold_after_two_successful_patches(mem
     assert len(skills_after_2) == 1
     assert skills_after_2[0].success_count == 2
 
-    # quick_match 命中
+    # Why 决策 1：达阈值后 Skill 为 pending（待人工确认），quick_match 不命中；
+    # 上架（published）后才命中。
+    skill_id = skills_after_2[0].skill_id
+    assert skill_store.quick_match(instruction) == []  # pending 不命中
+    skill_store.set_skill_status(skill_id, "published")
+
+    # 达阈值且已上架 → quick_match 命中
     matched = skill_store.quick_match(instruction)
     assert len(matched) == 1
     assert matched[0].trigger_condition == instruction
