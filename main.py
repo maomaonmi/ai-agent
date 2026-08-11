@@ -6,6 +6,8 @@ CLI 直启 uvicorn main:app --reload 不会读取该配置，落盘 generated/ �
 """
 
 import asyncio
+import ast
+import inspect
 import json
 import sqlite3
 import logging
@@ -47,7 +49,7 @@ from model_settings import MODEL_CATALOG, ModelSettings, ModelSettingsStore, Ser
 from glm_adapter import ChatAttachment, build_user_content, choose_glm_model, reasoning_from_delta, validate_attachment_mix
 from App import create_code_router
 from App import _build_memory_prompt_suffix, _skill_matched_events
-from HOOK.agent_hook_engine import global_hook_registry
+from HOOK.agent_hook_engine import HookType, global_hook_registry
 # Why: Phase2 记忆系统——三个 store 在 main.py 启动时统一初始化，
 # 共用 SESSION_DB_PATH 同一 SQLite，FK 约束由 SessionStore._initialize() 先建表保证。
 from memory_engine import MemoryEngine
@@ -1460,6 +1462,19 @@ def resolve_runtime_mode(
 
 class HookToggleRequest(BaseModel):
     enabled: bool
+
+
+class HookSourceRequest(BaseModel):
+    content: str = Field(max_length=200_000)
+
+
+class HookParseRequest(BaseModel):
+    filename: str = Field(min_length=1, max_length=240)
+    content: str = Field(max_length=200_000)
+
+
+class HookDraftRequest(BaseModel):
+    prompt: str = Field(min_length=1, max_length=8_000)
 
 
 class ChatRequest(BaseModel):
@@ -4436,6 +4451,13 @@ async def delete_factory_agent(agent_id: str):
 @app.get("/api/hooks")
 async def list_hooks():
     hooks = global_hook_registry.list_hooks()
+    for hook in hooks:
+        hook.update({
+            "source_kind": "builtin",
+            "editable": True,
+            "executable": False,
+            "has_source_draft": hook["id"] in _HOOK_SOURCE_DRAFTS,
+        })
     return {"hooks": hooks, "count": len(hooks)}
 
 
@@ -4445,6 +4467,120 @@ async def toggle_hook(hook_id: str, request: HookToggleRequest):
     if hook is None:
         raise HTTPException(status_code=404, detail="HOOK 不存在。")
     return {"hook": hook}
+
+
+_HOOK_SOURCE_DRAFTS: Dict[str, str] = {}
+
+
+def _hook_by_id(hook_id: str) -> Optional[Dict[str, Any]]:
+    return next((item for item in global_hook_registry.list_hooks() if item["id"] == hook_id), None)
+
+
+@app.get("/api/hooks/{hook_id}/source")
+async def get_hook_source(hook_id: str):
+    source = global_hook_registry.get_hook_source(hook_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="HOOK 不存在")
+    if hook_id in _HOOK_SOURCE_DRAFTS:
+        source["content"] = _HOOK_SOURCE_DRAFTS[hook_id]
+        source["is_draft"] = True
+    else:
+        source["is_draft"] = False
+    return source
+
+
+@app.put("/api/hooks/{hook_id}/source")
+async def save_hook_source(hook_id: str, request: HookSourceRequest):
+    if _hook_by_id(hook_id) is None:
+        raise HTTPException(status_code=404, detail="HOOK 不存在")
+    _HOOK_SOURCE_DRAFTS[hook_id] = request.content
+    return {
+        "hook_id": hook_id,
+        "saved": True,
+        "is_draft": True,
+        "executable": False,
+        "message": "已保存源文件草稿；当前版本不会热加载或执行此内容。",
+    }
+
+
+def _parse_hook_file(filename: str, content: str) -> Dict[str, Any]:
+    suffix = Path(filename).suffix.lower()
+    warnings: List[str] = []
+    parsed: Dict[str, Any] = {"name": Path(filename).stem, "description": "", "lifecycle": "before_tool_call", "policy": "observe"}
+    if suffix == ".json":
+        try:
+            raw = json.loads(content)
+            if isinstance(raw, dict):
+                for key in ("name", "description", "lifecycle", "policy", "priority"):
+                    if key in raw:
+                        parsed[key] = raw[key]
+            else:
+                warnings.append("JSON 根节点不是对象，已按文件名创建草稿。")
+        except json.JSONDecodeError as exc:
+            warnings.append(f"JSON 解析失败：{exc.msg}")
+    elif suffix in {".md", ".markdown"}:
+        lines = content.splitlines()
+        for line in lines[:40]:
+            if line.lower().startswith("name:"):
+                parsed["name"] = line.split(":", 1)[1].strip() or parsed["name"]
+            elif line.lower().startswith("description:"):
+                parsed["description"] = line.split(":", 1)[1].strip()
+            elif line.lower().startswith("lifecycle:"):
+                parsed["lifecycle"] = line.split(":", 1)[1].strip()
+            elif line.lower().startswith("policy:"):
+                parsed["policy"] = line.split(":", 1)[1].strip()
+    elif suffix == ".py":
+        try:
+            tree = ast.parse(content, filename=filename)
+            functions = [node for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            parsed["name"] = functions[0].name if functions else parsed["name"]
+            decorator_names = [ast.unparse(d) for fn in functions for d in fn.decorator_list]
+            lifecycle_hits = [name for name in HookType.__members__ if name.lower() in " ".join(decorator_names).lower()]
+            if lifecycle_hits:
+                parsed["lifecycle"] = lifecycle_hits[0].lower()
+            warnings.append("Python 文件仅完成元数据解析，不能直接作为可执行 HOOK。")
+        except SyntaxError as exc:
+            warnings.append(f"Python 语法解析失败：第 {exc.lineno or 0} 行")
+    else:
+        warnings.append("仅支持 .py、.md、.markdown、.json 文件。")
+    allowed_lifecycles = {item.value for item in HookType}
+    if parsed.get("lifecycle") not in allowed_lifecycles:
+        warnings.append("生命周期不在内置枚举中，已回退为 before_tool_call。")
+        parsed["lifecycle"] = "before_tool_call"
+    if parsed.get("policy") not in {"allow", "transform", "block", "observe"}:
+        warnings.append("策略不在受限枚举中，已回退为 observe。")
+        parsed["policy"] = "observe"
+    return {"filename": filename, "parsed": parsed, "warnings": warnings, "executable": False, "source_kind": "uploaded_draft"}
+
+
+@app.post("/api/hooks/parse")
+async def parse_hook_file(request: HookParseRequest):
+    return _parse_hook_file(request.filename, request.content)
+
+
+@app.post("/api/hooks/draft")
+async def create_hook_draft(request: HookDraftRequest):
+    system_prompt = (
+        "你是 HOOK 配置助手。只输出 JSON，不要 Markdown。字段必须是 name, description, "
+        "lifecycle, policy, priority。lifecycle 只能是 on_session_start/before_llm_call/after_llm_call/"
+        "before_tool_call/after_tool_call/on_error；policy 只能是 allow/transform/block/observe；"
+        "不要生成代码、脚本或 handler。"
+    )
+    try:
+        payload = extract_json_object(plan_llm_invoke(system_prompt, request.prompt, timeout=90))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"AI 草稿生成失败：{exc}") from exc
+    parsed = {
+        "name": str(payload.get("name", "未命名 HOOK"))[:120],
+        "description": str(payload.get("description", ""))[:500],
+        "lifecycle": str(payload.get("lifecycle", "before_tool_call")),
+        "policy": str(payload.get("policy", "observe")),
+        "priority": int(payload.get("priority", 100) or 100),
+    }
+    normalized = _parse_hook_file("ai-draft.json", json.dumps(parsed, ensure_ascii=False))
+    normalized["parsed"]["priority"] = max(0, min(1000, parsed["priority"]))
+    normalized["warnings"].append("AI 输出仅为声明式草稿，需用户确认后才能保存。")
+    return normalized
 
 
 def generate_session_title(first_message: str) -> str:

@@ -8,6 +8,7 @@ execution events.
 from __future__ import annotations
 
 import copy
+import inspect
 import re
 import time
 from dataclasses import dataclass, field
@@ -125,6 +126,31 @@ class HookRegistry:
                     "enabled": item.enabled,
                     "priority": item.priority,
                     "policy": item.policy,
+                }
+        return None
+
+    def get_hook_source(self, hook_id: str) -> Optional[Dict[str, Any]]:
+        """Return a read-only source snapshot for the management UI.
+
+        The source is intentionally exposed as a draftable document only; the
+        registry never evaluates edited text at runtime.
+        """
+        for registrations in self.hooks.values():
+            for item in registrations:
+                if item.hook_id != hook_id:
+                    continue
+                try:
+                    source = inspect.getsource(item.handler)
+                except (OSError, TypeError):
+                    source = ""
+                return {
+                    "id": item.hook_id,
+                    "name": item.name,
+                    "source_kind": "builtin",
+                    "source_path": inspect.getsourcefile(item.handler) or "",
+                    "content": source,
+                    "editable": True,
+                    "executable": False,
                 }
         return None
 
