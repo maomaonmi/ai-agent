@@ -23,6 +23,8 @@ except ImportError:  # pragma: no cover - only used for the standalone demo.
 
 class HookType(str, Enum):
     ON_SESSION_START = "on_session_start"
+    ON_CONVERSATION_START = "on_conversation_start"
+    ON_CONVERSATION_END = "on_conversation_end"
     BEFORE_LLM_CALL = "before_llm_call"
     AFTER_LLM_CALL = "after_llm_call"
     BEFORE_TOOL_CALL = "before_tool_call"

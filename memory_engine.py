@@ -425,6 +425,32 @@ class MemoryEngine:
         """
         return self.get_valid_profile(GLOBAL_PROFILE_SESSION)
 
+    def accumulate_token_usage(
+        self,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        session_id: str | None = None,
+    ) -> bool:
+        """Accumulate model usage in the single-user global memory profile."""
+        model_name = (model or "unknown").strip()[:120] or "unknown"
+        current = self.get_valid_profile(GLOBAL_PROFILE_SESSION).get("token_usage", {})
+        usage = dict(current) if isinstance(current, dict) else {}
+        bucket = dict(usage.get(model_name, {})) if isinstance(usage.get(model_name), dict) else {}
+        bucket["prompt_tokens"] = int(bucket.get("prompt_tokens", 0) or 0) + max(0, int(prompt_tokens or 0))
+        bucket["completion_tokens"] = int(bucket.get("completion_tokens", 0) or 0) + max(0, int(completion_tokens or 0))
+        bucket["total_tokens"] = int(bucket.get("total_tokens", 0) or 0) + max(0, int(total_tokens or 0))
+        bucket["calls"] = int(bucket.get("calls", 0) or 0) + 1
+        usage[model_name] = bucket
+        return self.update_profile_field(
+            session_id or GLOBAL_PROFILE_SESSION,
+            "token_usage",
+            usage,
+            source="hook_token_usage",
+            scope="global",
+        )
+
     def get_profile_history(self, session_id: str, field_key: str) -> list[dict[str, object]]:
         """返回某字段的全部历史记录（含已失效），按 valid_start 倒序。
 
