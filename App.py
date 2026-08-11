@@ -4568,9 +4568,45 @@ async def stream_tool_loop(
             # Why: DeepSeek 思考模式启用时 temperature 不生效，显式移除避免误导。
             create_kwargs.pop("temperature", None)
             create_kwargs["reasoning_effort"] = tool_top_level_effort
+        hook_registry = review.hook_registry
+        if hook_registry is not None:
+            llm_ctx = hook_registry.trigger(
+                HookType.BEFORE_LLM_CALL,
+                HookContext(
+                    session_id=review.session_id or review.run_id,
+                    event_type=HookType.BEFORE_LLM_CALL,
+                    data={"model": model, "messages": messages},
+                    agent_run_id=review.run_id,
+                ),
+            )
+            if llm_ctx.is_cancelled:
+                review.envelope = {
+                    "intent": "answer",
+                    "summary": llm_ctx.cancel_reason or "LLM call blocked by hook",
+                    "payload": {"files": dict(review.working_vfs)},
+                    "terminal_commands": [],
+                    "rationale": "",
+                }
+                return review.envelope, total_sse
+            messages = llm_ctx.data.get("messages", messages)
+            create_kwargs["messages"] = messages
         resp = await client.chat.completions.create(**create_kwargs)
         msg = resp.choices[0].message
         tool_calls = getattr(msg, "tool_calls", None) or []
+        if hook_registry is not None:
+            hook_registry.trigger(
+                HookType.AFTER_LLM_CALL,
+                HookContext(
+                    session_id=review.session_id or review.run_id,
+                    event_type=HookType.AFTER_LLM_CALL,
+                    data={
+                        "model": model,
+                        "has_content": bool(getattr(msg, "content", None)),
+                        "tool_call_count": len(tool_calls),
+                    },
+                    agent_run_id=review.run_id,
+                ),
+            )
         if tool_calls:
             assistant_msg: dict[str, Any] = {
                 "role": "assistant",
