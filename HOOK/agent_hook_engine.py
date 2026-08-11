@@ -110,6 +110,16 @@ class HookRegistry:
             for item in registrations
         ]
 
+    def fork(self, event_sink: Optional[Callable[[HookEvent], None]] = None) -> "HookRegistry":
+        """Create a per-run view with shared registrations and isolated events."""
+
+        forked = HookRegistry(event_sink=event_sink)
+        forked.hooks = {
+            hook_type: list(registrations)
+            for hook_type, registrations in self.hooks.items()
+        }
+        return forked
+
     def _emit(self, event: HookEvent) -> None:
         if self.event_sink is None:
             return

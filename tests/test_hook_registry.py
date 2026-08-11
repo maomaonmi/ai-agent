@@ -84,3 +84,22 @@ def test_registry_reports_handler_failure_without_blocking_context():
     failed = [event for event in events if event.event == "errored"]
     assert len(failed) == 1
     assert failed[0].status is HookEventStatus.FAILED
+
+
+def test_registry_fork_keeps_registrations_but_isolates_event_sequence():
+    root = HookRegistry()
+
+    @root.register(HookType.BEFORE_LLM_CALL, hook_id="shared")
+    def shared(ctx):
+        ctx.data["ok"] = True
+
+    events = []
+    forked = root.fork(event_sink=events.append)
+    context = forked.trigger(
+        HookType.BEFORE_LLM_CALL,
+        HookContext("session-1", HookType.BEFORE_LLM_CALL, {}, agent_run_id="run-1"),
+    )
+
+    assert context.data["ok"] is True
+    assert [event.sequence for event in events] == [1, 2]
+    assert root._sequences == {}

@@ -29,6 +29,7 @@ from glm_adapter import ChatAttachment, build_user_content, validate_attachment_
 from model_settings import capabilities_for_model, ensure_direct_connection
 from terminal_service import TERMINAL_POOL as _DEFAULT_TERMINAL_POOL, filter_command
 from mcp_manager import parse_tool_name
+from HOOK.agent_hook_engine import HookContext, HookRegistry, HookType, global_hook_registry
 
 # Why: 全栈/补丁生成链路的关键决策点需要可观测，便于定位"模型立即结束/无输出"等问题。
 # 终端控制台（uvicorn 输出）即可看到 DEBUG 日志，无需改动前端。
@@ -4130,6 +4131,8 @@ class ToolExecutionContext:
     sse: list[str] = field(default_factory=list)
     terminal_pool: Any = None
     workspace_id: str = "default"
+    session_id: str | None = None
+    hook_registry: HookRegistry | None = None
     finalized: bool = False
     envelope: dict[str, Any] | None = None
 
@@ -4422,12 +4425,51 @@ async def dispatch_tool(
     missing = [p.name for p in spec.parameters if p.required and p.name not in args]
     if missing:
         return {"ok": False, "report": f"缺少必需参数：{', '.join(missing)}", "sse": []}
+    hook_registry = review.hook_registry
+    if hook_registry is not None:
+        before_ctx = hook_registry.trigger(
+            HookType.BEFORE_TOOL_CALL,
+            HookContext(
+                session_id=review.session_id or review.run_id,
+                event_type=HookType.BEFORE_TOOL_CALL,
+                data={"tool_name": name, **args},
+                agent_run_id=review.run_id,
+            ),
+        )
+        if before_ctx.is_cancelled:
+            return {
+                "ok": False,
+                "report": before_ctx.cancel_reason or "Tool call blocked by hook",
+                "sse": list(review.drain_sse()),
+            }
+        args = before_ctx.data.copy()
+        args.pop("tool_name", None)
     try:
         result = await spec.handler(review, **args)
     except Exception as exc:
+        if hook_registry is not None:
+            hook_registry.trigger(
+                HookType.ON_ERROR,
+                HookContext(
+                    session_id=review.session_id or review.run_id,
+                    event_type=HookType.ON_ERROR,
+                    data={"tool_name": name, "error": str(exc)},
+                    agent_run_id=review.run_id,
+                ),
+            )
         review.push_error(f"{name} 执行失败：{str(exc)[:200]}")
         return {"ok": False, "report": f"{name} 失败：{str(exc)[:300]}", "sse": list(review.drain_sse())}
     report = result.get("report", "ok")
+    if hook_registry is not None:
+        hook_registry.trigger(
+            HookType.AFTER_TOOL_CALL,
+            HookContext(
+                session_id=review.session_id or review.run_id,
+                event_type=HookType.AFTER_TOOL_CALL,
+                data={"tool_name": name, "ok": bool(result.get("ok", True))},
+                agent_run_id=review.run_id,
+            ),
+        )
     return {
         "ok": bool(result.get("ok", True)),
         "report": report,
@@ -4613,6 +4655,7 @@ async def fullstack_generate_stream(
     mcp_pool: Any | None = None,
     mcp_allowed: set[str] | None = None,
     plugins_store: Any | None = None,
+    hook_registry: HookRegistry | None = None,
 ) -> AsyncIterator[str]:
     # 兼容占位：保留 workspace_id/run_id/terminal_pool 给 terminal_commands 提案链。
     _ = (workspace_id, run_id, terminal_pool)
@@ -4672,6 +4715,10 @@ async def fullstack_generate_stream(
                         working_vfs=working_vfs,
                         terminal_pool=terminal_pool,
                         workspace_id=workspace_id or "default",
+                        session_id=session_id,
+                    )
+                    review.hook_registry = (hook_registry or global_hook_registry).fork(
+                        event_sink=lambda event: review.sse.append(format_sse(event.to_dict()))
                     )
                     sub_messages = _build_generate_subtask_messages(effective_prompt, task, working_vfs)
                     # 注入强制规则：代码编写必须走工具，禁止在正文里冒充已写入。
