@@ -7,7 +7,6 @@ CLI 直启 uvicorn main:app --reload 不会读取该配置，落盘 generated/ �
 
 import asyncio
 import ast
-import inspect
 import json
 import sqlite3
 import logging
