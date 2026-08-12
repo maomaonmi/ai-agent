@@ -30,6 +30,7 @@ from model_settings import capabilities_for_model, ensure_direct_connection
 from terminal_service import TERMINAL_POOL as _DEFAULT_TERMINAL_POOL, filter_command
 from mcp_manager import parse_tool_name
 from HOOK.agent_hook_engine import HookContext, HookRegistry, HookType, global_hook_registry
+from HOOK.token_usage_hook import TokenUsageConversation, activate_tracker, deactivate_tracker, observe_response
 
 # Why: 全栈/补丁生成链路的关键决策点需要可观测，便于定位"模型立即结束/无输出"等问题。
 # 终端控制台（uvicorn 输出）即可看到 DEBUG 日志，无需改动前端。
@@ -439,6 +440,7 @@ async def stream_json_completion(
     sse_events: list[str] = []
     accumulated = ""
     accumulated_reasoning = ""
+    latest_usage: dict[str, Any] | None = None
     if status_stream_label:
         sse_events.append(format_sse({
             "type": "agent_activity",
@@ -495,6 +497,8 @@ async def stream_json_completion(
         stream = await client.chat.completions.create(**create_kwargs)
         logger.debug("[stream_json_completion] 流式请求已建立，开始累积 ...")
         async for chunk in stream:
+            if getattr(chunk, "usage", None) is not None:
+                latest_usage = observe_response(chunk, model_override=model)
             if not getattr(chunk, "choices", None):
                 continue
             delta = getattr(chunk.choices[0], "delta", None)
@@ -536,6 +540,7 @@ async def stream_json_completion(
                 # 流式模式下 content 为空是 GLM stream+json_object 的 bug。
                 ns_kwargs["response_format"] = {"type": "json_object"}
                 ns_resp = await client.chat.completions.create(**ns_kwargs)
+                latest_usage = observe_response(ns_resp, model_override=model)
                 ns_content = ns_resp.choices[0].message.content or ""
                 if ns_content:
                     logger.info("[stream_json_completion] 非流式重试成功，content_len=%d", len(ns_content))
@@ -546,12 +551,18 @@ async def stream_json_completion(
                         "content": ns_content,
                         "done": False,
                     }))
+                    if latest_usage:
+                        sse_events.append(format_sse({"type": "token_usage", "usage": latest_usage}))
                     return ns_content, sse_events
             except Exception as ns_exc:
                 logger.warning("[stream_json_completion] 非流式重试也失败：%s", str(ns_exc)[:200])
             logger.warning("[stream_json_completion] 非流式也无 content，回退用推理内容(len=%d)", len(accumulated_reasoning))
+            if latest_usage:
+                sse_events.append(format_sse({"type": "token_usage", "usage": latest_usage}))
             return accumulated_reasoning, sse_events
         logger.debug("[stream_json_completion] 完成：content_len=%d reasoning_len=%d", len(accumulated), len(accumulated_reasoning))
+        if latest_usage:
+            sse_events.append(format_sse({"type": "token_usage", "usage": latest_usage}))
         return accumulated, sse_events
     except Exception:
         logger.error("[stream_json_completion] 流式请求异常，回退到非流式。\n%s", traceback.format_exc())
@@ -566,6 +577,7 @@ async def stream_json_completion(
             fallback_kwargs["response_format"] = {"type": "json_object"}
         logger.debug("[stream_json_completion] 发起非流式回退请求 ...")
         fallback = await client.chat.completions.create(**fallback_kwargs)
+        latest_usage = observe_response(fallback, model_override=model)
         full_text = fallback.choices[0].message.content or ""
         if not full_text and hasattr(fallback.choices[0].message, "reasoning_content"):
             full_text = fallback.choices[0].message.reasoning_content or ""
@@ -577,6 +589,8 @@ async def stream_json_completion(
                 "content": full_text,
                 "done": False,
             }))
+        if latest_usage:
+            sse_events.append(format_sse({"type": "token_usage", "usage": latest_usage}))
         return full_text, sse_events
 
 
@@ -3052,6 +3066,54 @@ async def generate_code_stream(
     terminal_pool: Any,
     reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     thinking_budget: int | None = None,
+    session_id: str | None = None,
+) -> AsyncIterator[str]:
+    ctx = global_hook_registry.trigger(
+        HookType.ON_CONVERSATION_START,
+        HookContext(
+            session_id=session_id or run_id or "__global__",
+            event_type=HookType.ON_CONVERSATION_START,
+            data={"mode": "code", "model": model_name},
+            agent_run_id=run_id or session_id or "__global__",
+        ),
+    )
+    tracker = ctx.data.get("token_usage_tracker")
+    if not isinstance(tracker, TokenUsageConversation):
+        tracker = TokenUsageConversation(session_id=session_id, mode="code")
+    token = activate_tracker(tracker)
+    try:
+        async for event in _generate_code_stream_impl(
+            prompt, client, model_name, attachments,
+            workspace_id=workspace_id, run_id=run_id, terminal_pool=terminal_pool,
+            reasoning_effort=reasoning_effort, thinking_budget=thinking_budget,
+        ):
+            yield event
+        if tracker._models:
+            yield format_sse({"type": "token_usage", "usage": tracker.snapshot()})
+    finally:
+        global_hook_registry.trigger(
+            HookType.ON_CONVERSATION_END,
+            HookContext(
+                session_id=session_id or run_id or "__global__",
+                event_type=HookType.ON_CONVERSATION_END,
+                data={"mode": "code", "model": model_name, "token_usage_tracker": tracker},
+                agent_run_id=run_id or session_id or "__global__",
+            ),
+        )
+        deactivate_tracker(token)
+
+
+async def _generate_code_stream_impl(
+    prompt: str,
+    client: AsyncOpenAI,
+    model_name: str,
+    attachments: list[ChatAttachment] | None = None,
+    *,
+    workspace_id: str,
+    run_id: str,
+    terminal_pool: Any,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    thinking_budget: int | None = None,
 ) -> AsyncIterator[str]:
     """代码模式 · 网页代码生成：模型现在按 UNIFIED ENVELOPE 输出（5 键 JSON）。
 
@@ -4693,6 +4755,67 @@ async def fullstack_generate_stream(
     plugins_store: Any | None = None,
     hook_registry: HookRegistry | None = None,
 ) -> AsyncIterator[str]:
+    """Wrap code generation in the same conversation-scoped usage tracker as chat."""
+    registry = hook_registry or global_hook_registry
+    ctx = registry.trigger(
+        HookType.ON_CONVERSATION_START,
+        HookContext(
+            session_id=session_id or run_id or "__global__",
+            event_type=HookType.ON_CONVERSATION_START,
+            data={"mode": "code", "model": model_name},
+            agent_run_id=run_id or session_id or "__global__",
+        ),
+    )
+    tracker = ctx.data.get("token_usage_tracker")
+    if not isinstance(tracker, TokenUsageConversation):
+        tracker = TokenUsageConversation(session_id=session_id, mode="code")
+    token = activate_tracker(tracker)
+    try:
+        async for event in _fullstack_generate_stream_impl(
+            prompt, client, model_name, attachments,
+            workspace_id=workspace_id, run_id=run_id, terminal_pool=terminal_pool,
+            reasoning_effort=reasoning_effort, thinking_budget=thinking_budget,
+            decompose=decompose, session_id=session_id, memory_engine=memory_engine,
+            vfs_store=vfs_store, skill_store=skill_store, mcp_pool=mcp_pool,
+            mcp_allowed=mcp_allowed, plugins_store=plugins_store, hook_registry=registry,
+        ):
+            yield event
+        if tracker._models:
+            yield format_sse({"type": "token_usage", "usage": tracker.snapshot()})
+    finally:
+        registry.trigger(
+            HookType.ON_CONVERSATION_END,
+            HookContext(
+                session_id=session_id or run_id or "__global__",
+                event_type=HookType.ON_CONVERSATION_END,
+                data={"mode": "code", "model": model_name, "token_usage_tracker": tracker},
+                agent_run_id=run_id or session_id or "__global__",
+            ),
+        )
+        deactivate_tracker(token)
+
+
+async def _fullstack_generate_stream_impl(
+    prompt: str,
+    client: AsyncOpenAI,
+    model_name: str,
+    attachments: list[ChatAttachment] | None = None,
+    *,
+    workspace_id: str,
+    run_id: str,
+    terminal_pool: Any,
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+    thinking_budget: int | None = None,
+    decompose: bool = True,
+    session_id: str | None = None,
+    memory_engine: Any | None = None,
+    vfs_store: Any | None = None,
+    skill_store: Any | None = None,
+    mcp_pool: Any | None = None,
+    mcp_allowed: set[str] | None = None,
+    plugins_store: Any | None = None,
+    hook_registry: HookRegistry | None = None,
+) -> AsyncIterator[str]:
     # 兼容占位：保留 workspace_id/run_id/terminal_pool 给 terminal_commands 提案链。
     _ = (workspace_id, run_id, terminal_pool)
     logger.info("[fullstack_generate_stream] 进入，model_name=%s prompt=%r", model_name, (prompt or "")[:60])
@@ -5688,6 +5811,7 @@ def create_code_router(
                 workspace_id=request.workspace_id or default_workspace_id,
                 run_id=request.run_id,
                 terminal_pool=terminal_pool or _DEFAULT_TERMINAL_POOL,
+                session_id=request.session_id,
             ),
             media_type="text/event-stream",
             headers={

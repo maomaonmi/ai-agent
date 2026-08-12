@@ -431,6 +431,9 @@ class MemoryEngine:
         prompt_tokens: int,
         completion_tokens: int,
         total_tokens: int,
+        cached_tokens: int = 0,
+        cache_creation_input_tokens: int = 0,
+        reasoning_tokens: int = 0,
         session_id: str | None = None,
     ) -> bool:
         """Accumulate model usage in the single-user global memory profile."""
@@ -441,6 +444,12 @@ class MemoryEngine:
         bucket["prompt_tokens"] = int(bucket.get("prompt_tokens", 0) or 0) + max(0, int(prompt_tokens or 0))
         bucket["completion_tokens"] = int(bucket.get("completion_tokens", 0) or 0) + max(0, int(completion_tokens or 0))
         bucket["total_tokens"] = int(bucket.get("total_tokens", 0) or 0) + max(0, int(total_tokens or 0))
+        if cached_tokens:
+            bucket["cached_tokens"] = int(bucket.get("cached_tokens", 0) or 0) + max(0, int(cached_tokens))
+        if cache_creation_input_tokens:
+            bucket["cache_creation_input_tokens"] = int(bucket.get("cache_creation_input_tokens", 0) or 0) + max(0, int(cache_creation_input_tokens))
+        if reasoning_tokens:
+            bucket["reasoning_tokens"] = int(bucket.get("reasoning_tokens", 0) or 0) + max(0, int(reasoning_tokens))
         bucket["calls"] = int(bucket.get("calls", 0) or 0) + 1
         usage[model_name] = bucket
         return self.update_profile_field(

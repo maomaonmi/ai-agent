@@ -22,7 +22,14 @@ _CURRENT_TRACKER: ContextVar[Optional["TokenUsageConversation"]] = ContextVar(
 def normalize_usage(usage: Any) -> Dict[str, int]:
     """Normalize OpenAI-compatible usage objects into stable integer fields."""
     if usage is None:
-        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        return {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cached_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "reasoning_tokens": 0,
+        }
 
     def read(*names: str) -> int:
         for name in names:
@@ -37,7 +44,33 @@ def normalize_usage(usage: Any) -> Dict[str, int]:
     prompt = read("prompt_tokens", "input_tokens")
     completion = read("completion_tokens", "output_tokens")
     total = read("total_tokens") or prompt + completion
-    return {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total}
+    def nested_read(container_names: tuple[str, ...], names: tuple[str, ...]) -> int:
+        for container_name in container_names:
+            nested = usage.get(container_name) if isinstance(usage, dict) else getattr(usage, container_name, None)
+            if nested is not None:
+                value = read_from(nested, names)
+                if value:
+                    return value
+        return 0
+
+    def read_from(container: Any, names: tuple[str, ...]) -> int:
+        for name in names:
+            value = container.get(name) if isinstance(container, dict) else getattr(container, name, None)
+            if value is not None:
+                try:
+                    return max(0, int(value))
+                except (TypeError, ValueError):
+                    return 0
+        return 0
+
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+        "cached_tokens": nested_read(("prompt_tokens_details", "prompt_token_details"), ("cached_tokens", "cache_read_input_tokens")) or read("cached_tokens"),
+        "cache_creation_input_tokens": read("cache_creation_input_tokens"),
+        "reasoning_tokens": nested_read(("completion_tokens_details", "completion_token_details"), ("reasoning_tokens",)) or read("reasoning_tokens"),
+    }
 
 
 def activate_tracker(tracker: "TokenUsageConversation") -> Token:
@@ -48,19 +81,22 @@ def deactivate_tracker(token: Token) -> None:
     _CURRENT_TRACKER.reset(token)
 
 
-def observe_response(response: Any) -> Dict[str, Any]:
+def observe_response(response: Any, model_override: str | None = None) -> Dict[str, Any]:
     """Extract and, when a conversation is active, record one model response."""
     usage = {
-        "model": str(getattr(response, "model", "") or "unknown"),
+        "model": str(model_override or getattr(response, "model", "") or "unknown"),
         **normalize_usage(getattr(response, "usage", None)),
     }
     tracker = _CURRENT_TRACKER.get()
-    if tracker is not None:
+    if tracker is not None and getattr(response, "usage", None) is not None:
         tracker.record(
             model=usage["model"],
             prompt_tokens=usage["prompt_tokens"],
             completion_tokens=usage["completion_tokens"],
             total_tokens=usage["total_tokens"],
+            cached_tokens=usage["cached_tokens"],
+            cache_creation_input_tokens=usage["cache_creation_input_tokens"],
+            reasoning_tokens=usage["reasoning_tokens"],
         )
     return usage
 
@@ -73,12 +109,16 @@ class TokenUsageConversation:
     _models: Dict[str, Dict[str, int]] = field(default_factory=dict)
     _final_summary: Optional[Dict[str, Any]] = None
 
-    def record(self, *, model: str, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0) -> None:
+    def record(self, *, model: str, prompt_tokens: int = 0, completion_tokens: int = 0, total_tokens: int = 0,
+               cached_tokens: int = 0, cache_creation_input_tokens: int = 0, reasoning_tokens: int = 0) -> None:
         model_name = (model or "unknown").strip()[:120] or "unknown"
         normalized = normalize_usage({
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
+            "cached_tokens": cached_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "reasoning_tokens": reasoning_tokens,
         })
         bucket = self._models.setdefault(model_name, {
             "prompt_tokens": 0,
@@ -88,7 +128,18 @@ class TokenUsageConversation:
         })
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             bucket[key] += normalized[key]
+        for key in ("cached_tokens", "cache_creation_input_tokens", "reasoning_tokens"):
+            if normalized[key]:
+                bucket[key] = int(bucket.get(key, 0) or 0) + normalized[key]
         bucket["calls"] += 1
+
+    def snapshot(self) -> Dict[str, Any]:
+        models = {name: dict(values) for name, values in self._models.items()}
+        return {
+            "mode": self.mode,
+            "models": models,
+            "total_tokens": sum(item["total_tokens"] for item in models.values()),
+        }
 
     def finalize(self, memory_engine: Any) -> Dict[str, Any]:
         if self._final_summary is not None:
@@ -106,13 +157,23 @@ class TokenUsageConversation:
         if self.session_id:
             memory_engine.record_event(self.session_id, "token_usage", summary, chat_mode=True)
         for model, values in models.items():
-            memory_engine.accumulate_token_usage(
-                model=model,
-                prompt_tokens=values["prompt_tokens"],
-                completion_tokens=values["completion_tokens"],
-                total_tokens=values["total_tokens"],
-                session_id=self.session_id,
-            )
+            kwargs = {
+                "model": model,
+                "prompt_tokens": values["prompt_tokens"],
+                "completion_tokens": values["completion_tokens"],
+                "total_tokens": values["total_tokens"],
+                "session_id": self.session_id,
+            }
+            details = {
+                key: values.get(key, 0)
+                for key in ("cached_tokens", "cache_creation_input_tokens", "reasoning_tokens")
+                if values.get(key, 0)
+            }
+            try:
+                memory_engine.accumulate_token_usage(**kwargs, **details)
+            except TypeError:
+                # Keep compatibility with lightweight/test memory engines that predate details.
+                memory_engine.accumulate_token_usage(**kwargs)
         self._final_summary = summary
         return summary
 

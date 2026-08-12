@@ -3,10 +3,13 @@ from unittest.mock import patch
 
 from main import (
     MARKDOWN_REPORT_FORMAT,
+    RuntimeSettings,
     extract_json_object,
     generate_plan_execute_events,
     normalize_plan_tasks,
+    plan_llm_invoke,
     resolve_plan_agent,
+    run_plan_web_search,
     task_executor_node,
 )
 
@@ -137,6 +140,34 @@ class PlanEventStreamTests(unittest.IsolatedAsyncioTestCase):
             ["system_status", "plan_update", "plan_update", "done", "plan_done"],
         )
 
+    async def test_plan_graph_receives_runtime_search_policy_and_firecrawl_options(self):
+        class CapturingPlanApp:
+            def __init__(self):
+                self.inputs = None
+
+            def stream(self, inputs, config=None):
+                self.inputs = inputs
+                return iter(())
+
+        fake_app = CapturingPlanApp()
+        runtime = RuntimeSettings(
+            web_search="off",
+            web_search_options={"limit": 6, "scrape_top_n": 1},
+        )
+
+        with patch("main.get_plan_execute_app", return_value=fake_app):
+            list_events = [
+                event
+                async for event in generate_plan_execute_events(
+                    "analyze a market",
+                    runtime_settings=runtime,
+                )
+            ]
+
+        self.assertTrue(list_events)
+        self.assertFalse(fake_app.inputs["web_search_enabled"])
+        self.assertEqual(fake_app.inputs["web_search_options"]["limit"], 6)
+
 
 class DistributedExecutorTests(unittest.TestCase):
     def test_routes_task_to_assigned_expert(self):
@@ -210,6 +241,67 @@ class DistributedExecutorTests(unittest.TestCase):
         self.assertEqual(output["tasks"][0]["assigned_agent"], "pytest-expert")
         self.assertEqual(output["tasks"][0]["result"], "自定义专家完成")
 
+
+class PlanWebSearchTests(unittest.TestCase):
+    def test_uses_firecrawl_for_plan_tasks_when_it_is_the_active_provider(self):
+        state = {
+            "web_search_enabled": True,
+            "web_search_options": {
+                "limit": 7,
+                "time_range": "w",
+                "location": "China",
+                "scrape_top_n": 2,
+                "highlights": True,
+            },
+        }
+        candidates = [{"title": "Firecrawl result", "url": "https://example.com", "content": "evidence"}]
+
+        with patch("main.SEARCH_PROVIDER", "firecrawl"), patch(
+            "main._run_firecrawl_search",
+            return_value=(candidates, None, 1),
+        ) as firecrawl_search, patch("main._run_tavily_search") as tavily_search:
+            results, error = run_plan_web_search("latest market data", state)
+
+        self.assertIsNone(error)
+        self.assertEqual(results, candidates)
+        firecrawl_search.assert_called_once()
+        self.assertEqual(firecrawl_search.call_args.kwargs["options"].limit, 7)
+        tavily_search.assert_not_called()
+
+    def test_does_not_call_any_provider_when_plan_web_search_is_disabled(self):
+        with patch("main._run_firecrawl_search") as firecrawl_search, patch(
+            "main._run_tavily_search"
+        ) as tavily_search:
+            results, error = run_plan_web_search(
+                "latest market data",
+                {"web_search_enabled": False},
+            )
+
+        self.assertEqual(results, [])
+        self.assertIn("已关闭", error)
+        firecrawl_search.assert_not_called()
+        tavily_search.assert_not_called()
+
+
+class PlanModelProviderTests(unittest.TestCase):
+    def test_plan_llm_uses_openai_compatible_profile_for_all_supported_providers(self):
+        profiles = [
+            ("deepseek-v4-flash", "https://api.deepseek.com"),
+            ("qwen3.7-plus", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            ("glm-5", "https://open.bigmodel.cn/api/paas/v4"),
+        ]
+
+        for model_id, base_url in profiles:
+            with self.subTest(model_id=model_id), patch("main.ACTIVE_MODEL_ID", model_id), patch(
+                "main.DEEPSEEK_BASE_URL", base_url
+            ), patch("main.DEEPSEEK_API_KEY", "test-key"), patch("main.ChatOpenAI") as chat_cls:
+                chat_cls.return_value.invoke.return_value.content = '{"tasks": []}'
+
+                result = plan_llm_invoke("system", "user")
+
+                self.assertEqual(result, '{"tasks": []}')
+                self.assertEqual(chat_cls.call_args.kwargs["model"], model_id)
+                self.assertEqual(chat_cls.call_args.kwargs["base_url"], base_url)
 
 if __name__ == "__main__":
     unittest.main()
