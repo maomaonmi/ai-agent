@@ -38,6 +38,8 @@ import {
 } from '../Code/fullstackBundler';
 import { FileTreeExplorer, buildTreeFromVFS, type FileTreeAction } from '../Code/FileTreeExplorer';
 import MarkdownMessage from './MarkdownMessage';
+// Why: Phase3 记忆面板——Code 工作台左侧 aside 的「记忆」Tab 内容。
+import MemoryPanel from './MemoryPanel';
 // Why: xterm.js 在模块顶层引用 self（浏览器全局），SSR 阶段 Node 环境下没有 self → ReferenceError。
 // 用 next/dynamic + ssr:false 把 IntegratedTerminal 完全限定在客户端水合后加载，从根本避免 SSR 导入。
 const IntegratedTerminal = dynamic(
@@ -91,6 +93,7 @@ interface CodeWorkspaceProps {
   onRuntimeError: (error: RuntimeErrorReport) => void;
   onStopAutoRepair: () => void;
   onCaptureSnapshot: (vfs: VirtualFileSystem, summary: string) => void;
+  onPublishProject?: (vfs: VirtualFileSystem) => void;
   onRollbackVersion: (snapshot: VersionSnapshot) => void;
   onSaveManualVersion: (vfs: VirtualFileSystem, summary: string) => void;
   onProjectKindChange: (kind: 'frontend' | 'fullstack') => void;
@@ -236,6 +239,7 @@ export default function CodeWorkspace({
   onRuntimeError,
   onStopAutoRepair,
   onCaptureSnapshot,
+  onPublishProject,
   onRollbackVersion,
   onSaveManualVersion,
   onProjectKindChange,
@@ -253,6 +257,8 @@ export default function CodeWorkspace({
   const [activeView, setActiveView] = useState<'preview' | 'source'>('preview');
   const [vfs, setVfs] = useState<VirtualFileSystem>({});
   const [activeFile, setActiveFile] = useState('index.html');
+  // Why: Agent Loop 刚写入的文件路径，用于文件树实时高亮。随 file_written 事件更新。
+  const [writtenHighlight, setWrittenHighlight] = useState<string | null>(null);
   const [archiveState, setArchiveState] = useState<string | null>(null);
   const [isTimelineOpen, setIsTimelineOpen] = useState(false);
   const [hasUnsavedManualEdit, setHasUnsavedManualEdit] = useState(false);
@@ -267,8 +273,16 @@ export default function CodeWorkspace({
   const [activeTerminalTab, setActiveTerminalTab] = useState<'console' | 'terminal'>('console');
   // 手动终端前缀（区分自动 agent 终端 run_id）
   const [activeTerminalRunId, setActiveTerminalRunId] = useState<string>('');
+  // Why: code 模式下 useCodeAutoRepair hook 已接收 skill_matched SSE 并 dispatch
+  //   'skill-matched' CustomEvent，此处监听并展示"🧠 已加载技能：xxx"提示条，
+  //   与聊天模式同源反馈。新一轮请求开始时清空。
+  const [codeMatchedSkills, setCodeMatchedSkills] = useState<Array<{
+    skill_name: string;
+    standard_steps_count: number;
+  }>>([]);
   // Why: Day58 方案一：Header Tab 切换——左侧 aside 内容在「需求面板」「资源管理器」间切换，表单常显底部
-  type LeftPanelTab = 'prompts' | 'resources';
+  // Why: Phase3 新增「记忆」Tab——展示当前会话的四层记忆（档案卡/摘要/VFS/Skill/事件）。
+  type LeftPanelTab = 'prompts' | 'resources' | 'memory';
   const [leftPanelTab, setLeftPanelTab] = useState<LeftPanelTab>('prompts');
   // Why: Day58 拖拽目标高亮——从文件树拖拽到表单区域时显示绿色边框。
   const [isDragOver, setIsDragOver] = useState(false);
@@ -511,14 +525,31 @@ export default function CodeWorkspace({
   }, [attachments, onAttachmentsChange]);
 
   const runsForPrompts = useMemo(() => {
-    const usedRunIds = new Set<string>();
+    // Why: 同一指令可能被重复提交（重写/重试），产生多个 request 文本完全相同的 run。
+    // 旧逻辑 find(最旧匹配) 会把 prompt 绑定到历史僵尸 run（例如被热重载/断流冻结的
+    // 旧 run，restoreAgentRuns 恢复后 isRunning=false），导致新 run 明明在流式更新，
+    // 面板却显示旧 run 的"已结束"。修正：同一文本按出现次数取【最新的 k 个 run】按序绑定。
+    const runsByText = new Map<string, CodeAgentRun[]>();
+    for (const run of agentRuns) {
+      const key = run.request.trim();
+      const list = runsByText.get(key) ?? [];
+      list.push(run);
+      runsByText.set(key, list);
+    }
+    const totalByText = new Map<string, number>();
+    for (const prompt of prompts) {
+      const key = prompt.trim();
+      totalByText.set(key, (totalByText.get(key) ?? 0) + 1);
+    }
+    const usedByText = new Map<string, number>();
     return prompts.map((prompt) => {
-      const normalizedPrompt = prompt.trim();
-      const run = agentRuns.find((candidate) =>
-        !usedRunIds.has(candidate.id) && candidate.request.trim() === normalizedPrompt
-      );
-      if (run) usedRunIds.add(run.id);
-      return run;
+      const key = prompt.trim();
+      const candidates = runsByText.get(key);
+      if (!candidates || candidates.length === 0) return undefined;
+      const used = usedByText.get(key) ?? 0;
+      usedByText.set(key, used + 1);
+      const startIndex = Math.max(candidates.length - (totalByText.get(key) ?? 0), 0);
+      return candidates[startIndex + used];
     });
   }, [agentRuns, prompts]);
   const instrumentedCode = useMemo(
@@ -707,6 +738,16 @@ export default function CodeWorkspace({
       return next;
     });
   }, [serializeAndSyncVFS, activeFile]);
+
+  // Why: 监听 Agent Loop 的 file_written 事件，高亮文件树里刚写入的文件。
+  useEffect(() => {
+    const handleFileWritten = (event: Event) => {
+      const detail = (event as CustomEvent<{ path?: string }>).detail;
+      if (detail?.path) setWrittenHighlight(detail.path);
+    };
+    window.addEventListener('code-file-written', handleFileWritten);
+    return () => window.removeEventListener('code-file-written', handleFileWritten);
+  }, []);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -970,6 +1011,26 @@ export default function CodeWorkspace({
     });
   }, [repairLogs]);
 
+  // Why: 新一轮 code 请求开始时清空上一轮的 Skill 命中提示。
+  useEffect(() => {
+    if (isLoading) setCodeMatchedSkills([]);
+  }, [isLoading]);
+
+  // Why: 监听 useCodeAutoRepair hook dispatch 的 'skill-matched' CustomEvent，
+  //   将命中的 Skill 手册追加到提示条。事件 detail 形如 { skill_name: string }。
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ skill_name: string }>).detail;
+      if (!detail?.skill_name) return;
+      setCodeMatchedSkills((prev) => {
+        if (prev.some((s) => s.skill_name === detail.skill_name)) return prev;
+        return [...prev, { skill_name: detail.skill_name, standard_steps_count: 0 }];
+      });
+    };
+    window.addEventListener('skill-matched', handler);
+    return () => window.removeEventListener('skill-matched', handler);
+  }, []);
+
   const postInspectMode = (enabled: boolean) => {
     iframeRef.current?.contentWindow?.postMessage({
       type: SANDBOX_SET_INSPECT_MODE,
@@ -1086,7 +1147,7 @@ export default function CodeWorkspace({
       ref={workspaceRef}
       className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white fullscreen:h-screen fullscreen:rounded-none fullscreen:border-0"
     >
-      <header className="flex min-h-12 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-2">
+      <header className="flex min-h-12 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-5">
         <div className="flex items-center gap-3 flex-wrap">
           <h2 className="text-sm font-semibold text-slate-800">
             网页沙盒 <span className="ml-1 font-normal text-slate-500">· iframe 隔离渲染</span>
@@ -1116,6 +1177,18 @@ export default function CodeWorkspace({
               }`}
             >
               🌳 资源管理器
+            </button>
+            <button
+              type="button"
+              aria-pressed={leftPanelTab === 'memory'}
+              onClick={() => setLeftPanelTab('memory')}
+              className={`rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                leftPanelTab === 'memory'
+                  ? 'bg-slate-900 text-white shadow-sm'
+                  : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              🧠 记忆
             </button>
           </div>
         </div>
@@ -1219,6 +1292,14 @@ export default function CodeWorkspace({
           >
             保存到 workspace
           </button>
+          <button
+            type="button"
+            disabled={!hasProject || isLoading}
+            onClick={() => onPublishProject?.(vfs)}
+            className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+          >
+            发布作品
+          </button>
 
           <button
             type="button"
@@ -1255,8 +1336,30 @@ export default function CodeWorkspace({
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {/* Day58: Tab 内容切换——需求面板 / 资源管理器 */}
-          {leftPanelTab === 'prompts' ? (
+          {/* Why: Phase3 新增「记忆」Tab——优先命中，展示四层记忆面板 */}
+          {leftPanelTab === 'memory' ? (
+            <MemoryPanel />
+          ) : leftPanelTab === 'prompts' ? (
             <>
+          {/* Skill 命中提示——本轮注入了哪些 Skill 手册 */}
+          {codeMatchedSkills.length > 0 && (
+            <div className="mb-3 rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-xs">
+              <div className="flex items-center gap-1.5 text-violet-700">
+                <span className="text-sm">🧠</span>
+                <span className="font-medium">
+                  已加载 {codeMatchedSkills.length} 个技能手册
+                </span>
+              </div>
+              <ul className="mt-1.5 space-y-0.5 pl-5 text-violet-600">
+                {codeMatchedSkills.map((s, i) => (
+                  <li key={`${s.skill_name}-${i}`} className="flex items-start gap-1">
+                    <span>📖</span>
+                    <span className="font-mono">{s.skill_name}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div className="mb-3 flex items-center justify-between">
             <h3 className="text-sm font-semibold text-slate-800">用户需求</h3>
             <span className="text-xs text-slate-400">{prompts.length} 条</span>
@@ -1699,6 +1802,7 @@ export default function CodeWorkspace({
                 <FileTreeExplorer
                   treeData={buildTreeFromVFS(vfs)}
                   activeFile={activeFile}
+                  highlightPath={writtenHighlight ?? undefined}
                   onSelectFile={(path) => {
                     setActiveFile(path);
                     setActiveView('source');

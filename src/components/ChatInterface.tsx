@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, type CSSProperties } from 'react';
 import {
   sendChatMessage,
   sendDeepResearch,
@@ -12,6 +12,9 @@ import {
   PlanProgressEvent,
   DiscussionLength,
   CapabilityMode,
+  McpMode,
+  McpEvent,
+  SkillMatchedEvent,
   RuntimeSettings,
   SessionSummary,
   SessionSnapshot,
@@ -24,19 +27,50 @@ import {
   ChatAttachment,
   getModelSettings,
   ModelSettings,
+  restoreMemoryVfs,
+  getSkills,
+  SkillCapsule,
+  NodeEvent,
+  WebSearchOptions,
+  DEFAULT_WEB_SEARCH_OPTIONS,
+  QwenNativeSearchOptions,
+  DEFAULT_QWEN_NATIVE_SEARCH_OPTIONS,
+  ResearchEngine,
+  ResearchOptions,
+  DEFAULT_RESEARCH_OPTIONS,
+  TokenUsage,
+  publishCodeProject,
+  PublishedCodeProject,
+  getCodeProject,
 } from '../lib/api';
-import { Image as ImageIcon, Link, Paperclip, X } from 'lucide-react';
+import { Image as ImageIcon, Paperclip, X, Bot, ArrowUp, Sparkles, SlidersHorizontal, Plus, FileText, Video, Menu, Code2, Languages, WandSparkles, Telescope, Presentation } from 'lucide-react';
 import ResearchProgressPanel from './ResearchProgressPanel';
 import MarkdownMessage from './MarkdownMessage';
 import TaskExecutionPanel from './TaskExecutionPanel';
+import NodeProgressPanel from './NodeProgressPanel';
 import ModeSelector, { ModeType } from './ModeSelector';
 import AgentDrawer from './AgentDrawer';
 import SessionSidebar from './SessionSidebar';
 import RuntimeSettingsDrawer from './RuntimeSettingsDrawer';
+import FirecrawlSearchOptionsPopover from './FirecrawlSearchOptionsPopover';
+import ResearchOptionsPopover from './ResearchOptionsPopover';
+import QwenSearchOptionsPopover from './QwenSearchOptionsPopover';
+import DirectoryPage from './DirectoryPage';
+import HookCenter from './HookCenter';
+import HookMonitorPanel from './HookMonitorPanel';
 import SettingsDialog from './SettingsDialog';
 import ModelQuickSwitcher from './ModelQuickSwitcher';
 import ChatNodeNavigator, { ChatNode } from './ChatNodeNavigator';
 import CodeWorkspace from './CodeWorkspace';
+import CodeShowcasePage from './code-showcase/CodeShowcasePage';
+import WritingWorkspace from '../features/ai-writing/WritingWorkspace';
+import ResearchWorkspace from '../features/deep-research/ResearchWorkspace';
+import type { CompiledWritingPrompt } from '../features/ai-writing/writingTypes';
+import type { WritingDraft } from '../features/ai-writing/writingTypes';
+import type { WritingDocumentState } from '../features/ai-writing/writingDocumentTypes';
+import type { ThesisOutlineState } from '../features/ai-writing/thesis/thesisTypes';
+import { createDefaultWritingValues } from '../features/ai-writing/writingScenes';
+import { documentFromV1Result } from '../features/ai-writing/writingDocumentTypes';
 import useCodeAutoRepair from '../hooks/useCodeAutoRepair';
 import { SelectedElementContext } from '../lib/codeSandbox';
 import { bundleVFS, VirtualFileSystem } from '../Code/vfsBundler';
@@ -54,6 +88,12 @@ const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   webSearch: 'auto',
   deepThinking: 'auto',
   discussionRounds: 2,
+  mcpMode: 'auto',
+  mcpServerIds: [],
+  skillMode: 'auto',
+  skillIds: [],
+  webSearchOptions: DEFAULT_WEB_SEARCH_OPTIONS,
+  qwenNativeSearchOptions: DEFAULT_QWEN_NATIVE_SEARCH_OPTIONS,
 };
 
 function readRuntimeDefaults(): RuntimeSettings {
@@ -68,6 +108,14 @@ function readRuntimeDefaults(): RuntimeSettings {
   }
 }
 
+function buildCodeProjectCover(vfs: VirtualFileSystem, title: string): string {
+  const entry = Object.entries(vfs).find(([path]) => /index\.(html|tsx?|jsx?)$/i.test(path)) ?? Object.entries(vfs)[0];
+  const snippet = (entry?.[1] ?? '<main>Code project</main>').replace(/[<>&]/g, (char) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[char] ?? char)).slice(0, 220);
+  const safeTitle = title.replace(/[<>&]/g, (char) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[char] ?? char)).slice(0, 48);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720"><defs><linearGradient id="g" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#0f172a"/><stop offset="1" stop-color="#2563eb"/></linearGradient></defs><rect width="1280" height="720" rx="34" fill="url(#g)"/><rect x="60" y="58" width="1160" height="604" rx="24" fill="#f8fafc" opacity=".98"/><circle cx="94" cy="92" r="8" fill="#ef4444"/><circle cx="120" cy="92" r="8" fill="#f59e0b"/><circle cx="146" cy="92" r="8" fill="#22c55e"/><text x="72" y="180" font-family="Inter,Arial" font-size="38" font-weight="700" fill="#0f172a">${safeTitle}</text><text x="72" y="238" font-family="ui-monospace,monospace" font-size="19" fill="#475569">${snippet.replace(/\n/g, ' ').replace(/"/g, '&quot;')}</text><rect x="72" y="300" width="540" height="18" rx="9" fill="#dbeafe"/><rect x="72" y="338" width="820" height="18" rx="9" fill="#e2e8f0"/><rect x="72" y="376" width="680" height="18" rx="9" fill="#e2e8f0"/><text x="72" y="590" font-family="Inter,Arial" font-size="18" fill="#64748b">Code workspace · live preview</text></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const RESEARCH_STAGES = {
   fanout: '裂变意图',
@@ -77,18 +125,146 @@ const RESEARCH_STAGES = {
   reason: 'R1 深度思考',
 };
 
+// Why（Agent Loop 重构）：原 dedupeNodeProgress / mergeNodeCompleted 已移除。
+//   旧逻辑用于"合并同名 completed 节点"，源于后端 R1 完成时连发两条 DeepThinker completed
+//   （research_reason_done + stage=reason done）导致界面渲染重复。
+//   Agent Loop 模式下每轮 Think/Search/Observe/Final 都会重复发射同名节点，循环中重复是正常行为，
+//   不应再合并；前端改为 append-only 累积，由 NodeProgressPanel 按 iteration 分组渲染。
+
 export default function ChatInterface() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  const welcomeText = '你好，我是全能型智能助手';
+  const [typedWelcome, setTypedWelcome] = useState('');
+  // DEBUG: 暴露消息 nodeProgress 给 window，供 DevTools 验证（仅开发环境，上线前可删）
+  if (typeof window !== 'undefined') {
+    (window as unknown as { __debugMessages?: ChatMessage[] }).__debugMessages = messages;
+  }
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
   const [input, setInput] = useState('');
+  const [allSkills, setAllSkills] = useState<SkillCapsule[]>([]);
+  const [showSkillPicker, setShowSkillPicker] = useState(false);
+  const [skillPickerQuery, setSkillPickerQuery] = useState('');
+  const [skillPickerSelectedIndex, setSkillPickerSelectedIndex] = useState(0);
+  const [skillPickerHoveredIndex, setSkillPickerHoveredIndex] = useState<number | null>(null);
+  const [matchedSkill, setMatchedSkill] = useState<SkillCapsule | null>(null);
+  const [showMatchedSkillTooltip, setShowMatchedSkillTooltip] = useState(false);
+  const inputContainerRef = useRef<HTMLDivElement>(null);
   const [mode, setMode] = useState<ModeType>('standard');
   const [isLoading, setIsLoading] = useState(false);
+
+  useEffect(() => {
+    if (messages.length > 0 || isLoading) return;
+    setTypedWelcome('');
+    let index = 0;
+    const timer = window.setInterval(() => {
+      index += 1;
+      setTypedWelcome(welcomeText.slice(0, index));
+      if (index >= welcomeText.length) window.clearInterval(timer);
+    }, 72);
+    return () => window.clearInterval(timer);
+  }, [messages.length, isLoading]);
   const [currentNode, setCurrentNode] = useState<string | null>(null);
+  // Why: 节点进度事件累积栈——web_search / chat / web_analyst 等节点 SSE 一条不落追加，
+  //   UI 渲染成实时时间线，用户能看到"[Node: WebSearch] 🌐 正在全网搜索..." 与终端一致。
+  // Why 拆成「本轮临时状态 + 每条消息绑定字段」：
+  //   - 流式回答过程中，onToken / onWebDocs / onNode / onResearchDone 等回调
+  //     无法等到"最终消息落位"后再 setState，需要一个中间容器（per-round refs）
+  //     快速累积本轮状态；
+  //   - 回调结束（onDone/onResearchDone/finally）时，一次性把 refs 中累积的
+  //     nodeProgress / webDocs / researchChunks 写到最后一条 assistant 消息的
+  //     扩展字段；刷新后这些字段随 SessionSnapshot.messages 整体持久化恢复，
+  //     历史多轮对话不再共享同一个全局抽屉。
+  const nodeProgressCounter = useRef(0);
+  const perRoundNodeEventsRef = useRef<NodeEvent[]>([]);
+  const perRoundWebDocsRef = useRef<WebDoc[]>([]);
+  const perRoundResearchChunksRef = useRef<ResearchChunk[]>([]);
+  const perRoundPlanProgressRef = useRef<PlanProgressEvent | null>(null);
+  const perRoundTokenUsageRef = useRef<TokenUsage | null>(null);
+  const perRoundCurrentNodeRef = useRef<string | null>(null);
+  const perRoundPanelOpenRef = useRef<boolean>(true);
+
+  // 消息级的「是否展开过程面板」：用消息 content 哈希作 key，避免多轮复用同一 toggle。
+  const [msgPanelOpenKeys, setMsgPanelOpenKeys] = useState<Record<string, boolean>>({});
+  const isMsgPanelOpen = useCallback((_msg: ChatMessage, idx: number): boolean => {
+    const key = `msg-${idx}`;
+    return msgPanelOpenKeys[key] ?? perRoundPanelOpenRef.current ?? true;
+  }, [msgPanelOpenKeys]);
+  const toggleMsgPanel = useCallback((idx: number) => {
+    setMsgPanelOpenKeys((prev) => {
+      const key = `msg-${idx}`;
+      return { ...prev, [key]: !(prev[key] ?? perRoundPanelOpenRef.current) };
+    });
+  }, []);
+
+  // Why：将本轮累积的进度 / 搜索结果同步到「最后一条 assistant 消息」。
+  //   - streaming 中每隔一段时间同步一次，保证中断/刷新也不丢最近状态；
+  //   - 流结束时同步一次作为最终版本。
+  const syncRoundStateToLastMessage = useCallback(() => {
+    setMessages((prev) => {
+      if (prev.length === 0) return prev;
+      const updated = [...prev];
+      let lastAi = -1;
+      for (let i = updated.length - 1; i >= 0; i -= 1) {
+        if (updated[i].role === 'assistant') { lastAi = i; break; }
+      }
+      if (lastAi === -1) return prev;
+      const msg = { ...updated[lastAi] };
+      // Why 非空才覆盖：空数组覆盖会把上一轮恢复的历史结果清空。
+      if (perRoundNodeEventsRef.current.length > 0) msg.nodeProgress = perRoundNodeEventsRef.current;
+      if (perRoundWebDocsRef.current.length > 0) msg.webDocs = perRoundWebDocsRef.current;
+      if (perRoundResearchChunksRef.current.length > 0) msg.researchChunks = perRoundResearchChunksRef.current;
+      if (perRoundTokenUsageRef.current) msg.tokenUsage = perRoundTokenUsageRef.current;
+      updated[lastAi] = msg;
+      return updated;
+    });
+  }, []);
+
+  const handleNodeEvent = useCallback((event: NodeEvent) => {
+    // Why（Agent Loop 重构）：原"同名节点 processing→completed 升级 + 同名 completed 合并"逻辑已移除。
+    //   Agent Loop 每轮 Think/Search/Observe 都会重复发射同名 completed 节点，循环中重复是正常行为，
+    //   不应再合并——前端改为 append-only 累积，由 NodeProgressPanel 按 iteration 分组渲染展示。
+    //   旧链路（fanout/fetch/chunk/rerank/reason）走相同路径，无 iteration 字段时面板按"无迭代"分组渲染。
+    const nextId = nodeProgressCounter.current + 1;
+    nodeProgressCounter.current = nextId;
+    perRoundNodeEventsRef.current = [...perRoundNodeEventsRef.current, { ...event, id: nextId }];
+    if (event.status === 'completed') {
+      perRoundCurrentNodeRef.current = event.node_name;
+      setTimeout(() => {
+        if (perRoundCurrentNodeRef.current === event.node_name) {
+          perRoundCurrentNodeRef.current = null;
+        }
+      }, 1000);
+    } else {
+      perRoundCurrentNodeRef.current = event.node_name;
+    }
+    // 立即同步到最后一条 assistant 消息（已存在的话），保证流式中已有面板能看到
+    syncRoundStateToLastMessage();
+  }, [syncRoundStateToLastMessage]);
+
+  // Why：流结束时兜底——后端某些路径可能漏发 completed 事件，
+  //   导致前端面板中对应节点永久转圈。这里把所有仍在 processing 的节点
+  //   强制标记为 completed，确保 UI 不会残留转圈状态。
+  const sealOffProcessingNodes = useCallback(() => {
+    let changed = false;
+    perRoundNodeEventsRef.current = perRoundNodeEventsRef.current.map((e) => {
+      if (e.status === 'processing') {
+        changed = true;
+        return { ...e, status: 'completed' as const };
+      }
+      return e;
+    });
+    if (changed) syncRoundStateToLastMessage();
+  }, [syncRoundStateToLastMessage]);
+
   const [reasoningSteps, setReasoningSteps] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Why 保留 setWebDocs / setResearchChunks 仅作旧链路兼容：
+  //   真正的每轮状态来源已经切换到 perRoundXxxRef + ChatMessage.xxx 扩展字段，
+  //   右抽屉也被移除（下面的 Sidebar + Overlay + Float Button 会删掉）。
+  //   这里的 state 仅给 buildSnapshot/readSnapshot 的字段赋值留个"安全兜底"。
   const [webDocs, setWebDocs] = useState<WebDoc[]>([]);
   const [researchChunks, setResearchChunks] = useState<ResearchChunk[]>([]);
-  const [showSidebar, setShowSidebar] = useState(false);
-  const [sidebarType, setSidebarType] = useState<'web' | 'research'>('web');
   const [researchProgress, setResearchProgress] = useState<ResearchProcessEvent | null>(null);
   // 多智能体协同树
   const [agentTalks, setAgentTalks] = useState<AgentTalkEvent[]>([]);
@@ -99,17 +275,83 @@ export default function ChatInterface() {
   const [discussionRounds, setDiscussionRounds] = useState(2);
   const [webSearch, setWebSearch] = useState<CapabilityMode>('auto');
   const [deepThinking, setDeepThinking] = useState<CapabilityMode>('auto');
+  // Why: MCP 会话级注入三态（off/auto/custom）+ 自定义模式下的服务器多选，
+  //   与 webSearch/deepThinking 走完全相同的持久化与 meta 透传链路。
+  const [mcpMode, setMcpMode] = useState<McpMode>('auto');
+  const [selectedMcpServerIds, setSelectedMcpServerIds] = useState<string[]>([]);
+  // Why: Skill 会话级挂载三态（决策 2），与 mcpMode 同一持久化/透传链路；
+  //   custom 模式下 selectedSkillIds 为已上架 Skill 的白名单 skill_id。
+  const [skillMode, setSkillMode] = useState<McpMode>('auto');
+  const [selectedSkillIds, setSelectedSkillIds] = useState<number[]>([]);
+  // Why: 会话级 Firecrawl 搜索高级选项，仅 DeepSeek 走 web_search_node 时生效；
+  //   持久化到 SessionSnapshot，刷新/重启后恢复。
+  const [webSearchOptions, setWebSearchOptions] = useState<WebSearchOptions>(DEFAULT_WEB_SEARCH_OPTIONS);
+  // 调研模式引擎切换：firecrawl（Deep Research API）/ self-built（自研 day32+day33）/ qwen（千问原生）
+  const [researchEngine, setResearchEngine] = useState<ResearchEngine>('firecrawl');
+  const [researchOptions, setResearchOptions] = useState<ResearchOptions>(DEFAULT_RESEARCH_OPTIONS);
+  // Why: 千问深度调研的反问确认开关，仅 researchEngine='qwen' 时生效。
+  //   默认关闭（enable_feedback=false），直接研究；开启后走两步式流程。
+  const [enableFeedback, setEnableFeedback] = useState(false);
+  // Why: 千问反问确认交互状态——模型提出澄清问题后暂停，等待用户回答
+  const [qwenFeedbackPending, setQwenFeedbackPending] = useState(false);
+  const [qwenFeedbackQuestion, setQwenFeedbackQuestion] = useState('');
+  const [qwenFeedbackAnswer, setQwenFeedbackAnswer] = useState('');
+  const [qwenOriginalQuery, setQwenOriginalQuery] = useState('');
+  // Why: 会话级千问原生搜索参数，仅 Qwen 走原生联网时生效；
+  //   持久化到 SessionSnapshot，刷新/重启后恢复。
+  const [qwenNativeSearchOptions, setQwenNativeSearchOptions] = useState<QwenNativeSearchOptions>(DEFAULT_QWEN_NATIVE_SEARCH_OPTIONS);
+  // Why: 本轮对话 MCP 工具调用轨迹，实时在 UI 显示"正在调用 / 调用结果"，
+  //   回答完成后保留 5s 再清空，让用户确认"MCP 真的被调用了"。
+  const [mcpTrace, setMcpTrace] = useState<Array<{
+    tool_name: string;
+    status: 'calling' | 'ok' | 'error';
+    preview?: string;
+  }>>([]);
+  const [mcpActive, setMcpActive] = useState(false);
+  // Why: 本轮 Skill 匹配命中的手册，回答开始前清空，收到 skill_matched SSE 追加，
+  //   让用户在对话区顶部看到"🧠 已加载技能：xxx"，与 MCP trace 同源反馈。
+  const [matchedSkills, setMatchedSkills] = useState<SkillMatchedEvent[]>([]);
   const [isRuntimeSettingsOpen, setIsRuntimeSettingsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  // Why: SPA 全屏视图切换（计划书 §1 D1）——'chat' 正常聊天 / 'marketplace' 市场全屏页。
+  const [view, setView] = useState<'chat' | 'marketplace' | 'hooks' | 'code-showcase' | 'writing'>('chat');
+  const [directoryTab, setDirectoryTab] = useState<'skills' | 'connectors' | 'plugins'>('connectors');
+  // Why: SettingsDialog 深链——市场页齿轮点击后打开设置并定位到 directory section + 子页签。
+  const [settingsInitialSection, setSettingsInitialSection] = useState<string | null>(null);
+  const [settingsInitialSubTab, setSettingsInitialSubTab] = useState<string | null>(null);
   // Why: standard/deep 模式消息列表点击图片缩略图后放大预览。
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
-  const [attachmentType, setAttachmentType] = useState<ChatAttachment['type']>('image_url');
-  const [attachmentUrl, setAttachmentUrl] = useState('');
+  const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
+  const [moreToolsOpen, setMoreToolsOpen] = useState(false);
+  const [publishVfs, setPublishVfs] = useState<VirtualFileSystem | null>(null);
+  const [publishTitle, setPublishTitle] = useState('');
+  const [publishCoverImage, setPublishCoverImage] = useState('/code-showcase/covers-contact-sheet.png');
+  const [publishCategory, setPublishCategory] = useState<PublishedCodeProject['category']>('web');
+  const [isPublishing, setIsPublishing] = useState(false);
   // Why: Code 模式需要感知当前模型是否支持多模态，决定是否开放粘贴/上传图片入口。
   const [currentModelSettings, setCurrentModelSettings] = useState<ModelSettings | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [writingSessionRestore, setWritingSessionRestore] = useState<{
+    sessionId: string;
+    revision: number;
+    instruction: string;
+    result: string;
+    draft?: WritingDraft;
+    document?: WritingDocumentState;
+    thesisOutline?: ThesisOutlineState;
+  } | null>(null);
+  const [writingWorkspaceState, setWritingWorkspaceState] = useState<{
+    draft: WritingDraft;
+    document: WritingDocumentState;
+    thesisOutline: ThesisOutlineState;
+  } | null>(null);
+  const writingRestoreRevisionRef = useRef(0);
+  // A showcase card opens an unsaved Code workbench draft. It becomes a real
+  // conversation only when the user submits the first requirement.
+  const [codeWorkbenchDraft, setCodeWorkbenchDraft] = useState(false);
+  const [isCodeWorkbenchTransitioning, setIsCodeWorkbenchTransitioning] = useState(false);
   const [isSessionReady, setIsSessionReady] = useState(false);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [isHistoryCollapsed, setIsHistoryCollapsed] = useState(false);
@@ -128,6 +370,7 @@ export default function ChatInterface() {
     status: codeStatus,
     runId: codeRunId,
     repairLogs,
+    agentTrace,
     agentRuns,
     terminalWorkspaceId,
     trustedTerminalPrefixes,
@@ -143,32 +386,29 @@ export default function ChatInterface() {
   } = useCodeAutoRepair();
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const imageInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
+  const pendingAttachmentTypeRef = useRef<ChatAttachment['type']>('image_url');
 
-  const addAttachmentUrl = () => {
-    const url = attachmentUrl.trim();
-    if (!url.startsWith('https://')) { setError('附件 URL 必须使用 HTTPS'); return; }
-    // Why: Code 模式后端 analyze_screenshot_with_vision 只处理 image_url，强制按图片添加避免被后端拒绝。
-    const effectiveType: ChatAttachment['type'] = mode === 'code' ? 'image_url' : attachmentType;
-    if (attachments.length > 0 && attachments[0].type !== effectiveType) { setError('同一次请求不能混合图片、视频和文件'); return; }
-    setAttachments((current) => [...current, { type: effectiveType, url, name: url.split('/').pop() || 'URL 附件' }]);
-    setAttachmentUrl(''); setError(null);
+  const openAttachmentPicker = (type: ChatAttachment['type']) => {
+    pendingAttachmentTypeRef.current = type;
+    setAttachmentMenuOpen(false);
+    attachmentInputRef.current?.click();
   };
 
-  const addLocalImage = (file?: File) => {
+  const addLocalAttachment = (file?: File) => {
     if (!file) return;
-    if (!['image/jpeg','image/png','image/webp','image/gif'].includes(file.type)) { setError('仅支持 JPG、PNG、WebP 或 GIF 图片'); return; }
-    if (file.size > 8 * 1024 * 1024) { setError('图片不能超过 8MB'); return; }
-    if (attachments.some((item) => item.type !== 'image_url')) { setError('同一次请求不能混合图片、视频和文件'); return; }
+    const type = pendingAttachmentTypeRef.current;
+    const maxSize = type === 'image_url' ? 8 : 20;
+    if (file.size > maxSize * 1024 * 1024) { setError(`附件不能超过 ${maxSize}MB`); return; }
+    if (type === 'image_url' && !file.type.startsWith('image/')) { setError('请选择图片文件'); return; }
+    if (type === 'video_url' && !file.type.startsWith('video/')) { setError('请选择视频文件'); return; }
+    if (attachments.some((item) => item.type !== type)) { setError('同一次请求不能混合图片、视频和文件'); return; }
     const reader = new FileReader();
-    reader.onload = () => setAttachments((current) => [...current, { type: 'image_url', url: String(reader.result), name: file.name }]);
-    reader.onerror = () => setError('读取图片失败'); reader.readAsDataURL(file);
+    reader.onload = () => setAttachments((current) => [...current, { type, url: String(reader.result), name: file.name }]);
+    reader.onerror = () => setError('读取附件失败');
+    reader.readAsDataURL(file);
   };
-
-  // Why: 把"是否显示附件上传区"抽成布尔变量，避免在 JSX 里直接写复合条件导致 TS 把 mode 过度收窄。
-  // 此变量仅服务 standard/deep 模式；code 模式的附件 UI 通过 attachmentControl prop 注入到 CodeWorkspace。
-  const showAttachmentRow = mode === 'standard' || mode === 'deep';
 
   useEffect(() => {
     setIsHistoryCollapsed(
@@ -194,29 +434,148 @@ export default function ChatInterface() {
     };
   }, []);
 
+  useEffect(() => {
+    const loadSkills = async () => {
+      try {
+        const res = await getSkills();
+        setAllSkills(res.skills.filter(s => s.status === 'published'));
+      } catch {
+        /* ignore */
+      }
+    };
+    loadSkills();
+    const handler = () => loadSkills();
+    window.addEventListener('skill-deleted', handler);
+    return () => window.removeEventListener('skill-deleted', handler);
+  }, []);
+
+  const filteredSkills = useMemo(() => {
+    if (!showSkillPicker) return [];
+    const query = skillPickerQuery.toLowerCase();
+    return allSkills.filter(s => 
+      s.skill_name.toLowerCase().includes(query) || 
+      (s.description && s.description.toLowerCase().includes(query))
+    ).slice(0, 10);
+  }, [allSkills, showSkillPicker, skillPickerQuery]);
+
+  useEffect(() => {
+    setSkillPickerSelectedIndex(0);
+  }, [skillPickerQuery, showSkillPicker]);
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.target.value;
+    setInput(value);
+  };
+
+  // Why: 用 useEffect 监听 input 变化，统一处理 matchedSkill 检测和斜杠匹配，
+  //   避免 insertSkill 直接 setInput 绕过匹配逻辑的问题。
+  useEffect(() => {
+    const fullMatch = input.match(/\/([a-zA-Z0-9_-]+)(?=\s|$)/g);
+    if (fullMatch) {
+      const lastMatch = fullMatch[fullMatch.length - 1].slice(1);
+      const found = allSkills.find(s => s.skill_name === lastMatch);
+      setMatchedSkill(found || null);
+    } else {
+      setMatchedSkill(null);
+    }
+
+    const slashMatch = input.match(/\/([^\s/]*)$/);
+    if (slashMatch && !slashMatch[0].match(/\/([a-zA-Z0-9_-]+)\s$/)) {
+      setShowSkillPicker(true);
+      setSkillPickerQuery(slashMatch[1]);
+    } else {
+      setShowSkillPicker(false);
+    }
+  }, [input, allSkills]);
+
+  const insertSkill = (skillName: string) => {
+    const newValue = input.replace(/\/([^\s/]*)$/, `/${skillName} `);
+    setInput(newValue);
+    setShowSkillPicker(false);
+    setTimeout(() => inputRef.current?.focus(), 0);
+  };
+
+  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (showSkillPicker && filteredSkills.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSkillPickerSelectedIndex(i => Math.min(i + 1, filteredSkills.length - 1));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSkillPickerSelectedIndex(i => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        insertSkill(filteredSkills[skillPickerSelectedIndex].skill_name);
+        return;
+      }
+      if (e.key === 'Escape') {
+        setShowSkillPicker(false);
+        return;
+      }
+    }
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+      e.preventDefault();
+      if (input.trim() && !isLoading && isSessionReady) {
+        handleSubmit({ preventDefault: () => {} } as React.FormEvent);
+      }
+    }
+  };
+
   const changeHistoryCollapsed = (collapsed: boolean) => {
     setIsHistoryCollapsed(collapsed);
     localStorage.setItem('historySidebarCollapsed', String(collapsed));
   };
 
-  const buildSnapshot = (): SessionSnapshot => ({
-    messages,
-    reasoningSteps,
-    webDocs,
-    researchChunks,
-    agentTalks,
-    planProgress,
-    discussionLength,
-    discussionAgentIds,
-    discussionRounds,
-    webSearch,
-    deepThinking,
-    generatedCode,
-    codeVersions,
-    activeCodeVersionId,
-    codeProjectKind,
-    codeAgentRuns: agentRuns,
-  });
+  const buildSnapshot = (): SessionSnapshot => {
+    // 为什么这里单独拼一次 global nodeProgress/webDocs/researchChunks：
+    //   - SessionSnapshot 顶层字段是「老会话恢复兼容」所需（applySnapshot 里会把这些字段迁移到最后一条 assistant 消息）；
+    //   - 真正的持久化主体是 messages[i].nodeProgress/webDocs/researchChunks（每轮绑定），这里顶层只同步「当前轮」的 refs 作兜底。
+    let lastAiMsg: ChatMessage | undefined;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'assistant') { lastAiMsg = messages[i]; break; }
+    }
+    const globalNodeProgress: NodeEvent[] = perRoundNodeEventsRef.current.length > 0
+      ? perRoundNodeEventsRef.current
+      : (lastAiMsg?.nodeProgress ?? []);
+    const globalWebDocs: WebDoc[] = perRoundWebDocsRef.current.length > 0
+      ? perRoundWebDocsRef.current
+      : (lastAiMsg?.webDocs ?? webDocs);
+    const globalResearchChunks: ResearchChunk[] = perRoundResearchChunksRef.current.length > 0
+      ? perRoundResearchChunksRef.current
+      : (lastAiMsg?.researchChunks ?? researchChunks);
+    return {
+      messages,
+      reasoningSteps,
+      webDocs: globalWebDocs,
+      researchChunks: globalResearchChunks,
+      agentTalks,
+      planProgress,
+      nodeProgress: globalNodeProgress,
+      currentNode,
+      discussionLength,
+      discussionAgentIds,
+      discussionRounds,
+      webSearch,
+      deepThinking,
+      mcpMode,
+      mcpServerIds: selectedMcpServerIds,
+      skillMode,
+      skillIds: selectedSkillIds,
+      webSearchOptions,
+      researchEngine,
+      researchOptions,
+      qwenNativeSearchOptions,
+      generatedCode,
+      codeVersions,
+      activeCodeVersionId,
+      codeProjectKind,
+      codeAgentRuns: agentRuns,
+    };
+  };
 
   const resetConversation = () => {
     setMessages([]);
@@ -229,7 +588,15 @@ export default function ChatInterface() {
     setPlanProgress(null);
     setSelectedElement(null);
     setCurrentNode(null);
-    setShowSidebar(false);
+    perRoundNodeEventsRef.current = [];
+    perRoundWebDocsRef.current = [];
+    perRoundResearchChunksRef.current = [];
+    perRoundPlanProgressRef.current = null;
+    perRoundTokenUsageRef.current = null;
+    perRoundCurrentNodeRef.current = null;
+    perRoundPanelOpenRef.current = true;
+    nodeProgressCounter.current = 0;
+    setMsgPanelOpenKeys({});
     resetCode();
     setCodeVersions([]);
     setActiveCodeVersionId('');
@@ -239,10 +606,61 @@ export default function ChatInterface() {
 
   const applySnapshot = (snapshot: Partial<SessionSnapshot>) => {
     const defaults = readRuntimeDefaults();
-    setMessages(snapshot.messages ?? []);
+    // 新格式优先 ChatMessage 扩展字段；老格式全局字段兜底挂到最后一条 assistant
+    const rawMessages = snapshot.messages ?? [];
+    let normalizedMessages: ChatMessage[] = rawMessages;
+    // Why（Agent Loop 重构）：原 dedupeNodeProgress 调用已移除。
+    //   Agent Loop 模式下同名节点重复是正常的迭代行为，不应在快照恢复阶段合并去重。
+    //   旧快照里若存了 R1 完成时连发的两条 DeepThinker completed，面板会按时间序渲染两条，
+    //   前端 NodeProgressPanel 已具备按 iteration 分组与 fallback 渲染能力，可正确显示。
+    if (normalizedMessages.length > 0) {
+      let lastAi = -1;
+      for (let i = rawMessages.length - 1; i >= 0; i -= 1) {
+        if (rawMessages[i].role === 'assistant') { lastAi = i; break; }
+      }
+      if (lastAi !== -1) {
+        const last = rawMessages[lastAi];
+        if (!last.nodeProgress && snapshot.nodeProgress && snapshot.nodeProgress.length > 0) {
+          normalizedMessages = [...rawMessages];
+          normalizedMessages[lastAi] = { ...last, nodeProgress: snapshot.nodeProgress };
+        }
+        const m1 = normalizedMessages[lastAi];
+        if (!m1.webDocs && snapshot.webDocs && snapshot.webDocs.length > 0) {
+          normalizedMessages = [...normalizedMessages];
+          normalizedMessages[lastAi] = { ...m1, webDocs: snapshot.webDocs };
+        }
+        const m2 = normalizedMessages[lastAi];
+        if (!m2.researchChunks && snapshot.researchChunks && snapshot.researchChunks.length > 0) {
+          normalizedMessages = [...normalizedMessages];
+          normalizedMessages[lastAi] = { ...m2, researchChunks: snapshot.researchChunks };
+        }
+        const m3 = normalizedMessages[lastAi];
+        if (!m3.planProgress && snapshot.planProgress) {
+          normalizedMessages = [...normalizedMessages];
+          normalizedMessages[lastAi] = { ...m3, planProgress: snapshot.planProgress };
+        }
+      }
+    }
+    setMessages(normalizedMessages);
     setReasoningSteps(snapshot.reasoningSteps ?? []);
     setWebDocs(snapshot.webDocs ?? []);
     setResearchChunks(snapshot.researchChunks ?? []);
+    let finalLastAi = -1;
+    for (let i = normalizedMessages.length - 1; i >= 0; i -= 1) {
+      if (normalizedMessages[i].role === 'assistant') { finalLastAi = i; break; }
+    }
+    perRoundNodeEventsRef.current = finalLastAi >= 0 ? (normalizedMessages[finalLastAi].nodeProgress ?? []) : [];
+    perRoundWebDocsRef.current = finalLastAi >= 0
+      ? (normalizedMessages[finalLastAi].webDocs ?? [])
+      : (snapshot.webDocs ?? []);
+    perRoundResearchChunksRef.current = finalLastAi >= 0
+      ? (normalizedMessages[finalLastAi].researchChunks ?? [])
+      : (snapshot.researchChunks ?? []);
+    perRoundPlanProgressRef.current = finalLastAi >= 0
+      ? (normalizedMessages[finalLastAi].planProgress ?? snapshot.planProgress ?? null)
+      : (snapshot.planProgress ?? null);
+    perRoundCurrentNodeRef.current = snapshot.currentNode ?? null;
+    nodeProgressCounter.current = perRoundNodeEventsRef.current.length;
     setAgentTalks(snapshot.agentTalks ?? []);
     setPlanProgress(snapshot.planProgress ?? null);
     setDiscussionLength(
@@ -254,6 +672,14 @@ export default function ChatInterface() {
     );
     setWebSearch(snapshot.webSearch ?? defaults.webSearch);
     setDeepThinking(snapshot.deepThinking ?? defaults.deepThinking);
+    setMcpMode(snapshot.mcpMode ?? defaults.mcpMode);
+    setSelectedMcpServerIds(snapshot.mcpServerIds ?? defaults.mcpServerIds);
+    setSkillMode(snapshot.skillMode ?? defaults.skillMode);
+    setSelectedSkillIds(snapshot.skillIds ?? defaults.skillIds);
+    setWebSearchOptions(snapshot.webSearchOptions ?? DEFAULT_WEB_SEARCH_OPTIONS);
+    setResearchEngine(snapshot.researchEngine ?? 'firecrawl');
+    setResearchOptions(snapshot.researchOptions ?? DEFAULT_RESEARCH_OPTIONS);
+    setQwenNativeSearchOptions(snapshot.qwenNativeSearchOptions ?? DEFAULT_QWEN_NATIVE_SEARCH_OPTIONS);
     restoreCode(snapshot.generatedCode ?? '');
     restoreAgentRuns(snapshot.codeAgentRuns ?? []);
     setCodeVersions((snapshot.codeVersions ?? []).map((version) => ({
@@ -266,8 +692,8 @@ export default function ChatInterface() {
     );
     setResearchProgress(null);
     setAgentStatus('');
-    setCurrentNode(null);
-    setShowSidebar(false);
+    setCurrentNode(snapshot.currentNode ?? null);
+    setMsgPanelOpenKeys({});
     setError(null);
     setSelectedElement(null);
   };
@@ -307,33 +733,188 @@ export default function ChatInterface() {
     setIsSessionReady(false);
     try {
       const history = await getSessionHistory(session.session_id);
+      const historyMessages = history.snapshot.messages ?? [];
+      if (session.mode === 'writing') {
+        const lastUserMessage = historyMessages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
+        const lastAssistantMessage = historyMessages.filter((message) => message.role === 'assistant').at(-1)?.content ?? '';
+        const legacyWritingContent = session.title.trim();
+        // 正文生成指令是会话中的后续操作，不应覆盖创建论文时的原始研究主题。
+        const legacyInstruction = history.snapshot.writingDraft?.instruction || lastUserMessage || legacyWritingContent.split(/\r?\n/)[0] || '历史 AI 写作';
+        const legacyResult = lastAssistantMessage || legacyWritingContent;
+        const migratedDraft: WritingDraft | undefined = history.snapshot.writingDraft ?? (
+          history.snapshot.writingDocument ? undefined : {
+            scene: 'thesis',
+            instruction: legacyInstruction,
+            valuesByScene: createDefaultWritingValues(),
+          }
+        );
+        const migratedDocument = history.snapshot.writingDocument ?? (
+          history.snapshot.writingDraft ? undefined : documentFromV1Result('thesis', legacyResult, legacyInstruction)
+        );
+        setWritingSessionRestore({
+          sessionId: session.session_id,
+          revision: writingRestoreRevisionRef.current += 1,
+          // Early AI-writing sessions stored their generated content in the
+          // session title before structured writing snapshots were introduced.
+          instruction: legacyInstruction,
+          result: legacyResult,
+          draft: migratedDraft,
+          document: migratedDocument,
+          thesisOutline: history.snapshot.thesisOutline,
+        });
+        setWritingWorkspaceState(null);
+      } else {
+        setWritingSessionRestore(null);
+      }
       setActiveSessionId(session.session_id);
       setMode(session.mode as ModeType);
+      setView(session.mode === 'writing' ? 'writing' : 'chat');
       applySnapshot(history.snapshot);
       localStorage.setItem('activeSessionId', session.session_id);
       setIsHistoryOpen(false);
+      // Why: UI 快照里的 generatedCode 可能滞后（仅在流结束后持久化）；VFS checkpoint
+      //   在每次 patch 成功时写入，是更新的状态源。快照为空时用 checkpoint 冷启动恢复，
+      //   否则以 checkpoint 为准覆盖，保证刷新后代码不丢（计划书 T4.1/T4.3）。
+      try {
+        const restored = await restoreMemoryVfs(session.session_id);
+        if (restored.checkpoint_id !== null && Object.keys(restored.vfs).length > 0) {
+          const restoredVfs = deepCopyVFS(restored.vfs);
+          restoreCode(isFullstackVFS(restoredVfs)
+            ? serializeProjectVFS(restoredVfs)
+            : bundleVFS(restoredVfs, { injectInspector: false }));
+        }
+      } catch {
+        // checkpoint 恢复失败不阻断会话打开，UI 快照已可用。
+      }
     } finally {
       setIsSessionReady(true);
     }
   };
 
   const startDraftSession = (sessionMode: ModeType = mode) => {
+    setView('chat');
     resetConversation();
+    setInput('');
+    setAttachments([]);
     const defaults = readRuntimeDefaults();
     setDiscussionLength(defaults.responseLength);
     setDiscussionRounds(defaults.discussionRounds);
     setWebSearch(defaults.webSearch);
     setDeepThinking(defaults.deepThinking);
+    setMcpMode(defaults.mcpMode);
+    setSelectedMcpServerIds(defaults.mcpServerIds);
+    setSkillMode(defaults.skillMode);
+    setSelectedSkillIds(defaults.skillIds);
     setDiscussionAgentIds([]);
     setMode(sessionMode);
+    setCodeWorkbenchDraft(false);
     setActiveSessionId(null);
+    setWritingSessionRestore(null);
+    setWritingWorkspaceState(null);
     localStorage.removeItem('activeSessionId');
     setIsHistoryOpen(false);
     setIsSessionReady(true);
   };
 
+  const openPublishedCodeProject = async (project?: PublishedCodeProject) => {
+    startDraftSession('code');
+    setCodeWorkbenchDraft(true);
+    if (!project) return;
+    try {
+      const detail = project.vfs ? project : await getCodeProject(project.project_id);
+      const restoredVfs = deepCopyVFS(detail.vfs ?? {});
+      if (Object.keys(restoredVfs).length > 0) {
+        restoreCode(isFullstackVFS(restoredVfs)
+          ? serializeProjectVFS(restoredVfs)
+          : bundleVFS(restoredVfs, { injectInspector: false }));
+        setCodeProjectKind(detail.project_kind);
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : '无法打开已发布作品');
+    }
+  };
+
+  const openWritingWorkspace = async () => {
+    await persistCurrentSession();
+    localStorage.removeItem('ai-writing-document-v2');
+    localStorage.removeItem('ai-writing-submitted-instruction-v1');
+    startDraftSession('writing');
+    setView('writing');
+  };
+
+  const ensureWritingSession = async (instruction: string) => {
+    let sessionId = activeSessionId;
+    if (!sessionId || mode !== 'writing') {
+      const session = await createSession('writing', instruction.slice(0, 36) || 'AI 写作');
+      sessionId = session.session_id;
+      setActiveSessionId(sessionId);
+      setMode('writing');
+      setSessions((previous) => [session, ...previous.filter((item) => item.session_id !== session.session_id)]);
+      localStorage.setItem('activeSessionId', sessionId);
+    }
+    return sessionId;
+  };
+
+  const submitWritingDraft = async ({ instruction, compiledPrompt }: { instruction: string; compiledPrompt: CompiledWritingPrompt }) => {
+    const sessionId = await ensureWritingSession(instruction);
+    const request = [compiledPrompt.systemPrompt, ...compiledPrompt.constraints, '', `用户要求：${compiledPrompt.userPrompt}`].join('\n');
+    let answer = '';
+    await sendChatMessage(request, 'standard', {
+      onToken: (token) => { answer += token; },
+      onDone: (event) => { if (event.answer) answer = event.answer; },
+      onError: (event) => { throw new Error(event.message); },
+    }, { sessionId, runtimeSettings });
+    const writingMessages: ChatMessage[] = [{ role: 'user', content: instruction }, { role: 'assistant', content: answer }];
+    setMessages(writingMessages);
+    // Save the completed writing payload directly. The general debounced
+    // autosave can otherwise race with navigation and persist stale messages.
+    const updated = await saveSessionSnapshot(sessionId, {
+      ...buildSnapshot(),
+      messages: writingMessages,
+    }, true);
+    setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+    setWritingSessionRestore({
+      sessionId,
+      revision: writingRestoreRevisionRef.current += 1,
+      instruction,
+      result: answer,
+    });
+    return answer || '写作任务已完成。';
+  };
+
+  const handleThesisBodyRequest = async ({ phase, title }: { phase: 'start' | 'complete' | 'failed'; title: string }) => {
+    const instruction = '我要基于大纲生成正文';
+    const sessionId = await ensureWritingSession(instruction);
+    const previous = messagesRef.current;
+    const nextMessages = phase === 'start'
+      ? [
+          ...previous,
+          { role: 'user' as const, content: instruction },
+          { role: 'assistant' as const, content: '正文生成中，请稍候…', writingArtifact: { type: 'word' as const, title, status: 'generating' as const } },
+        ]
+      : previous.map((message, index, all) => index === all.map((item) => item.role).lastIndexOf('assistant')
+        ? { ...message, content: phase === 'complete' ? '正文已生成，可在右侧文档工作台继续编辑。' : '正文生成失败，请稍后重试。', writingArtifact: { type: 'word' as const, title, status: phase } }
+        : message);
+    messagesRef.current = nextMessages;
+    setMessages(nextMessages);
+    // Persist the conversation event immediately; the writing workspace's
+    // structured snapshot is saved separately by its existing autosave.
+    await saveSessionSnapshot(sessionId, { ...buildSnapshot(), messages: nextMessages }, false);
+  };
+
+  const enterCodeWorkbench = async (project?: PublishedCodeProject) => {
+    setIsCodeWorkbenchTransitioning(true);
+    await new Promise((resolve) => window.setTimeout(resolve, 360));
+    await openPublishedCodeProject(project);
+    setIsCodeWorkbenchTransitioning(false);
+  };
+
   const persistCurrentSession = async () => {
     if (!activeSessionId || !isSessionReady) return;
+    // AI writing persists atomically when generation completes. Its workspace
+    // owns richer local document state, so the generic chat autosave must not
+    // overwrite a valid writing snapshot with transient/empty React messages.
+    if (mode === 'writing') return;
     const shouldGenerateTitle =
       messages.some((message) => message.role === 'user') &&
       !titleRequestedRef.current.has(activeSessionId);
@@ -405,17 +986,35 @@ export default function ChatInterface() {
     researchChunks,
     agentTalks,
     planProgress,
+    currentNode,
     discussionLength,
     discussionAgentIds,
     discussionRounds,
     webSearch,
     deepThinking,
+    mcpMode,
+    selectedMcpServerIds,
     generatedCode,
     codeVersions,
     activeCodeVersionId,
     codeProjectKind,
     agentRuns,
   ]);
+
+  useEffect(() => {
+    if (!activeSessionId || mode !== 'writing' || !writingWorkspaceState) return;
+    const timeout = window.setTimeout(() => {
+      void saveSessionSnapshot(activeSessionId, {
+        ...buildSnapshot(),
+        writingDraft: writingWorkspaceState.draft,
+        writingDocument: writingWorkspaceState.document,
+        thesisOutline: writingWorkspaceState.thesisOutline,
+      }, false);
+    }, 500);
+    return () => window.clearTimeout(timeout);
+    // Structured writing state is the intentional persistence trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSessionId, mode, writingWorkspaceState]);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -433,7 +1032,13 @@ export default function ChatInterface() {
     webSearch,
     deepThinking,
     discussionRounds,
-  }), [discussionLength, webSearch, deepThinking, discussionRounds]);
+    mcpMode,
+    mcpServerIds: selectedMcpServerIds,
+    skillMode,
+    skillIds: selectedSkillIds,
+    webSearchOptions,
+    qwenNativeSearchOptions,
+  }), [discussionLength, webSearch, deepThinking, discussionRounds, mcpMode, selectedMcpServerIds, skillMode, selectedSkillIds, webSearchOptions, qwenNativeSearchOptions]);
 
   // Why: 内联箭头函数作为 prop 传给 CodeWorkspace，每轮 render 新引用 → CodeWorkspace
   //   内部 useCallback/useMemo 把它们当 dep → 每轮失效 → 连环 setState → 无限循环。
@@ -486,17 +1091,182 @@ export default function ChatInterface() {
     updateRuntimeDefaults({ discussionRounds: value });
   };
 
+  const changeMcpMode = (value: McpMode) => {
+    setMcpMode(value);
+    updateRuntimeDefaults({ mcpMode: value });
+  };
+
+  const changeSelectedMcpServerIds = (value: string[]) => {
+    setSelectedMcpServerIds(value);
+    updateRuntimeDefaults({ mcpServerIds: value });
+  };
+
+  const changeSkillMode = (value: McpMode) => {
+    setSkillMode(value);
+    updateRuntimeDefaults({ skillMode: value });
+  };
+
+  const changeSelectedSkillIds = (value: number[]) => {
+    setSelectedSkillIds(value);
+    updateRuntimeDefaults({ skillIds: value });
+  };
+
+  // Why: openDirectory 语义从"开弹窗"改为"切视图"（计划书 §1）。
+  //   侧边栏入口、设置页 Browse 按钮、运行设置抽屉入口统一走它。
+  const openDirectory = useCallback((tab?: 'skills' | 'connectors' | 'plugins') => {
+    if (tab) setDirectoryTab(tab);
+    setView('marketplace');
+  }, []);
+  const closeDirectory = useCallback(() => setView('chat'), []);
+  const openHooks = useCallback(() => setView('hooks'), []);
+  const closeHooks = useCallback(() => setView('chat'), []);
+
+  // Why: Create with agent（计划书 §3.1 D4）——关市场→新建会话→输入框预填随机提示词（不发送）。
+  const handleCreateWithAgent = useCallback(async (prompt: string) => {
+    setView('chat');
+    if (isLoading) return;
+    try {
+      await persistCurrentSession();
+      startDraftSession('standard');
+    } catch {
+      // 创建失败不阻塞预填
+    }
+    setInput(prompt);
+    // 异步聚焦——等 setInput 渲染完后聚焦输入框
+    window.setTimeout(() => inputRef.current?.focus(), 50);
+  }, [isLoading, mode]);
+
+  // Why: 市场页齿轮 → 打开 SettingsDialog 并定位到 directory section + 子页签（计划书 §5 深链）。
+  const handleOpenSettingsFromDirectory = useCallback(
+    (section: 'directory', subTab?: 'skills' | 'connectors' | 'plugins') => {
+      setSettingsInitialSection(section);
+      if (subTab) setSettingsInitialSubTab(subTab);
+      setIsSettingsOpen(true);
+    },
+    [],
+  );
+
   const resetRuntimeSettings = () => {
     setDiscussionLength(DEFAULT_RUNTIME_SETTINGS.responseLength);
     setWebSearch(DEFAULT_RUNTIME_SETTINGS.webSearch);
     setDeepThinking(DEFAULT_RUNTIME_SETTINGS.deepThinking);
     setDiscussionRounds(DEFAULT_RUNTIME_SETTINGS.discussionRounds);
+    setMcpMode(DEFAULT_RUNTIME_SETTINGS.mcpMode);
+    setSelectedMcpServerIds(DEFAULT_RUNTIME_SETTINGS.mcpServerIds);
+    setSkillMode(DEFAULT_RUNTIME_SETTINGS.skillMode);
+    setSelectedSkillIds(DEFAULT_RUNTIME_SETTINGS.skillIds);
+    setWebSearchOptions(DEFAULT_WEB_SEARCH_OPTIONS);
+    setResearchEngine('firecrawl');
+    setResearchOptions({ ...DEFAULT_RESEARCH_OPTIONS });
+    setQwenNativeSearchOptions(DEFAULT_QWEN_NATIVE_SEARCH_OPTIONS);
     setDiscussionAgentIds([]);
     localStorage.setItem(
       'runtimeSettingsDefaults',
       JSON.stringify(DEFAULT_RUNTIME_SETTINGS),
     );
   };
+
+  // Why: 千问深度调研 Step 2——用户回答反问后，携带 feedback_question + feedback_answer 发起新请求继续研究
+  const submitQwenFeedback = useCallback(async (msgIndex: number, answer: string) => {
+    if (!answer.trim() || isLoading) return;
+
+    // 找到对应的 feedback 消息
+    const feedbackMsg = messages[msgIndex];
+    if (!feedbackMsg || feedbackMsg.type !== 'qwen_feedback') return;
+
+    const question = feedbackMsg.feedbackQuestion ?? '';
+    const originalQuery = messages[msgIndex - 1]?.content ?? '';  // 用户原始问题
+
+    // 更新消息：标记已回答
+    setMessages((prev) => {
+      const updated = [...prev];
+      updated[msgIndex] = { ...updated[msgIndex], feedbackAnswer: answer };
+      return updated;
+    });
+
+    // 追加用户回答作为一条用户消息
+    setMessages((prev) => [
+      ...prev,
+      { role: 'user' as const, content: answer },
+    ]);
+
+    setIsLoading(true);
+    setError(null);
+    perRoundNodeEventsRef.current = [];
+    perRoundWebDocsRef.current = [];
+    perRoundResearchChunksRef.current = [];
+    perRoundTokenUsageRef.current = null;
+    perRoundCurrentNodeRef.current = null;
+    perRoundPanelOpenRef.current = true;
+    nodeProgressCounter.current = 0;
+    setMsgPanelOpenKeys({});
+    setReasoningSteps([]);
+    setWebDocs([]);
+    setResearchChunks([]);
+    setResearchProgress(null);
+    setAgentTalks([]);
+    setAgentStatus('');
+    setPlanProgress(null);
+
+    try {
+      await sendDeepResearch(originalQuery, {
+        onNode: handleNodeEvent,
+        onUsage: (usage) => {
+          perRoundTokenUsageRef.current = usage;
+          syncRoundStateToLastMessage();
+        },
+        onResearchProcess: (event) => {
+          setResearchProgress(event);
+        },
+        onResearchDone: (event) => {
+          setResearchProgress(null);
+          perRoundResearchChunksRef.current = (event.top_chunks as ResearchChunk[]) ?? [];
+          setResearchChunks(perRoundResearchChunksRef.current);
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: 'assistant',
+              content: event.report || '✅ 深度调研完成！',
+              nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : undefined,
+              webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : undefined,
+              researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : undefined,
+            },
+          ]);
+        },
+        onResearchReasonDone: (event) => {
+          setMessages((prev) => {
+            const updated = [...prev];
+            const last = updated[updated.length - 1];
+            if (last && last.role === 'assistant') {
+              updated[updated.length - 1] = {
+                ...last,
+                content: event.report,
+                reasoning: event.reasoning,
+                reasoning_time: event.reasoning_time,
+                nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : last.nodeProgress,
+                webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : last.webDocs,
+                researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : last.researchChunks,
+              };
+            }
+            return updated;
+          });
+        },
+        onError: (event) => {
+          setError(event.message);
+        },
+      }, activeSessionId ?? undefined, runtimeSettings, researchEngine, {
+        ...researchOptions,
+        enable_feedback: true,
+        feedback_question: question,
+        feedback_answer: answer,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '请求失败');
+    } finally {
+      setIsLoading(false);
+      sealOffProcessingNodes();
+    }
+  }, [messages, isLoading, handleNodeEvent, sealOffProcessingNodes, activeSessionId, runtimeSettings, researchEngine, researchOptions]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -506,12 +1276,17 @@ export default function ChatInterface() {
     const requestAttachments = attachments;
     setIsLoading(true);
     setError(null);
+    setMcpTrace([]);
+    setMcpActive(false);
+    // Why: 每轮发送前清空上一轮的 Skill 命中提示，避免与新一轮匹配结果混淆。
+    setMatchedSkills([]);
     let requestSessionId = activeSessionId;
 
     if (!requestSessionId) {
       try {
         const session = await createSession(mode);
         requestSessionId = session.session_id;
+        setCodeWorkbenchDraft(false);
         setActiveSessionId(session.session_id);
         localStorage.setItem('activeSessionId', session.session_id);
         setSessions((previous) => [
@@ -536,11 +1311,18 @@ export default function ChatInterface() {
     // Why: Day57 @file 提交后清空提及状态,与 input/attachments 同生命周期。
     setMentionedFiles([]);
     setCurrentNode(null);
+    // 清空本轮累积 refs，保证多轮对话/重写消息时上一轮状态不泄漏
+    perRoundNodeEventsRef.current = [];
+    perRoundWebDocsRef.current = [];
+    perRoundResearchChunksRef.current = [];
+    perRoundTokenUsageRef.current = null;
+    perRoundCurrentNodeRef.current = null;
+    perRoundPanelOpenRef.current = true;
+    nodeProgressCounter.current = 0;
+    setMsgPanelOpenKeys({});
     setReasoningSteps([]);
     setWebDocs([]);
     setResearchChunks([]);
-    setShowSidebar(false);
-    setSidebarType('web');
     setResearchProgress(null);
     setAgentTalks([]);
     setAgentStatus('');
@@ -563,10 +1345,12 @@ export default function ChatInterface() {
     if (mode === 'code') {
       const isIncrementalChange = Boolean(generatedCode.trim());
       const targetElement = selectedElement;
+      // Why: MCP 会话级注入——与 webSearch/deepThinking 同链路，随 code 请求 meta 透传后端。
+      const mcpContext = { mode: mcpMode, serverIds: selectedMcpServerIds };
       try {
         const didComplete = isIncrementalChange
-          ? await modifyCode(userMessage, targetElement, requestAttachments, mentionedFiles)
-          : await generateCode(userMessage, codeProjectKind, requestAttachments);
+          ? await modifyCode(userMessage, targetElement, requestAttachments, mentionedFiles, requestSessionId, mcpContext)
+          : await generateCode(userMessage, codeProjectKind, requestAttachments, requestSessionId, mcpContext);
         if (didComplete) {
           setSelectedElement(null);
           setMessages((previous) => [
@@ -593,25 +1377,35 @@ export default function ChatInterface() {
         setError(message);
       } finally {
         setIsLoading(false);
+        sealOffProcessingNodes();
       }
     } else if (mode === 'research') {
       // 深度调研模式
       try {
         await sendDeepResearch(userMessage, {
+          onNode: handleNodeEvent,
+          onUsage: (usage) => {
+            perRoundTokenUsageRef.current = usage;
+            syncRoundStateToLastMessage();
+          },
           onResearchProcess: (event) => {
             setResearchProgress(event);
           },
           onResearchDone: (event) => {
             setResearchProgress(null);
-            setResearchChunks(event.top_chunks as ResearchChunk[]);
-            setShowSidebar(true);
-            setSidebarType('research');
+            // 1. 写入本轮 per-round ref（会被随后的 syncRoundStateToLastMessage 覆写到消息）
+            perRoundResearchChunksRef.current = (event.top_chunks as ResearchChunk[]) ?? [];
+            setResearchChunks(perRoundResearchChunksRef.current);
+            // 2. 先追加消息占位（此时 nodeProgress / webDocs 可能已经在回调里累积到了 ref）
             setMessages((prev) => [
               ...prev,
               {
                 role: 'assistant',
                 content: event.report ||
                   `✅ 深度调研完成！\n\n已从 ${event.total_pages} 个网页中抓取内容，切分为 ${event.total_chunks} 个切片，通过 BGE-Reranker 精选出 ${event.top_chunks.length} 条高相关性片段。\n\n正在生成深度研究报告...`,
+                nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : undefined,
+                webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : undefined,
+                researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : undefined,
               },
             ]);
           },
@@ -620,9 +1414,16 @@ export default function ChatInterface() {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'assistant') {
-                last.content = event.report;
-                last.reasoning = event.reasoning;
-                last.reasoning_time = event.reasoning_time;
+                updated[updated.length - 1] = {
+                  ...last,
+                  content: event.report,
+                  reasoning: event.reasoning,
+                  reasoning_time: event.reasoning_time,
+                  // 写最终态：把 ref 中累积的所有阶段状态再挂到扩展字段
+                  nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : last.nodeProgress,
+                  webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : last.webDocs,
+                  researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : last.researchChunks,
+                };
               }
               return updated;
             });
@@ -630,26 +1431,54 @@ export default function ChatInterface() {
           onError: (event) => {
             setError(event.message);
           },
-        }, requestSessionId, runtimeSettings);
+          // Why: 千问深度调研 Step 1 反问确认——后端推送 qwen_feedback 事件后连接关闭，
+          //   前端在对话流中插入内嵌卡片，用户回答后发起 Step 2 请求继续研究。
+          onQwenFeedback: (event) => {
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: 'assistant',
+                content: '',
+                type: 'qwen_feedback',
+                feedbackQuestion: event.question,
+              },
+            ]);
+            setIsLoading(false);
+            sealOffProcessingNodes();
+          },
+        }, requestSessionId, runtimeSettings, researchEngine, {
+          ...researchOptions,
+          enable_feedback: researchEngine === 'qwen' ? enableFeedback : undefined,
+        });
       } catch (err) {
         setError(err instanceof Error ? err.message : '请求失败');
       } finally {
         setIsLoading(false);
+        sealOffProcessingNodes();
       }
     } else if (mode === 'plan' || mode === 'distributed_plan') {
       try {
         await sendChatMessage(userMessage, mode, {
+          onNode: handleNodeEvent,
           onSystemStatus: (event) => {
             setAgentStatus(event.message);
           },
           onPlanProgress: (event) => {
+            perRoundPlanProgressRef.current = event;
             setPlanProgress(event);
             setAgentStatus('');
+          },
+          onSkillMatched: (event) => {
+            setMatchedSkills((prev) => [...prev, event]);
           },
           onDone: (event) => {
             setMessages((prev) => [
               ...prev,
-              { role: 'assistant', content: event.answer },
+              {
+                role: 'assistant',
+                content: event.answer,
+                planProgress: perRoundPlanProgressRef.current ?? undefined,
+              },
             ]);
             setAgentStatus('');
           },
@@ -664,11 +1493,13 @@ export default function ChatInterface() {
         setError(err instanceof Error ? err.message : '请求失败');
       } finally {
         setIsLoading(false);
+        sealOffProcessingNodes();
       }
     } else if (mode === 'agent') {
       // 多智能体协同模式
       try {
         await sendChatMessage(userMessage, mode, {
+          onNode: handleNodeEvent,
           onSystemStatus: (event) => {
             setAgentStatus(event.message);
           },
@@ -678,8 +1509,15 @@ export default function ChatInterface() {
           onAgentFinalAnswer: (event) => {
             setMessages((prev) => [...prev, { role: 'assistant', content: event.answer }]);
           },
+          onSkillMatched: (event) => {
+            setMatchedSkills((prev) => [...prev, event]);
+          },
           onDone: () => {
             setAgentStatus('');
+          },
+          onUsage: (usage) => {
+            perRoundTokenUsageRef.current = usage;
+            syncRoundStateToLastMessage();
           },
           onError: (event) => {
             setError(event.message);
@@ -695,6 +1533,7 @@ export default function ChatInterface() {
         setError(err instanceof Error ? err.message : '请求失败');
       } finally {
         setIsLoading(false);
+        sealOffProcessingNodes();
       }
     } else {
       // 普通对话模式（standard / deep / web）
@@ -702,12 +1541,7 @@ export default function ChatInterface() {
         let streamedAnswer = '';
         let streamedReasoning = '';
         await sendChatMessage(userMessage, mode, {
-          onNode: (event) => {
-            if (event.status === 'completed') {
-              setCurrentNode(event.node_name);
-              setTimeout(() => setCurrentNode(null), 1000);
-            }
-          },
+          onNode: handleNodeEvent,
           onReasoning: (event) => {
             setReasoningSteps((prev) => [...prev, event.reasoning]);
           },
@@ -726,14 +1560,62 @@ export default function ChatInterface() {
             });
           },
           onWebDocs: (event) => {
-            setWebDocs(event.docs);
-            setShowSidebar(true);
+            // 写入 ref + 同步到最后一条 assistant 消息；右抽屉已移除
+            perRoundWebDocsRef.current = event.docs ?? [];
+            setWebDocs(perRoundWebDocsRef.current);
+            syncRoundStateToLastMessage();
+          },
+          onUsage: (usage) => {
+            perRoundTokenUsageRef.current = usage;
+            syncRoundStateToLastMessage();
+          },
+          onMcpEvent: (event: McpEvent) => {
+            if (event.phase === 'start') {
+              setMcpActive(true);
+            } else if (event.phase === 'tool_call') {
+              setMcpActive(true);
+              setMcpTrace((prev) => [...prev, { tool_name: event.tool_name, status: 'calling' }]);
+            } else if (event.phase === 'tool_result') {
+              setMcpTrace((prev) => {
+                const idx = prev.findIndex(
+                  (t) => t.tool_name === event.tool_name && t.status === 'calling',
+                );
+                if (idx === -1) {
+                  return [...prev, { tool_name: event.tool_name, status: event.ok ? 'ok' : 'error', preview: event.preview }];
+                }
+                const next = [...prev];
+                next[idx] = { ...next[idx], status: event.ok ? 'ok' : 'error', preview: event.preview };
+                return next;
+              });
+            } else if (event.phase === 'done' || event.phase === 'error') {
+              // 保留显示 5s 后清空
+              setTimeout(() => {
+                setMcpActive(false);
+              }, 5000);
+            }
+          },
+          onSkillMatched: (event) => {
+            setMatchedSkills((prev) => [...prev, event]);
           },
           onDone: (event) => {
-            if (!streamedAnswer) setMessages((prev) => [...prev, { role: 'assistant', content: event.answer }]);
+            if (!streamedAnswer) {
+              // 追加答案时同步挂入本轮累积的所有状态
+              setMessages((prev) => [...prev, {
+                role: 'assistant',
+                content: event.answer,
+                nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : undefined,
+                webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : undefined,
+                researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : undefined,
+                tokenUsage: event.usage ?? perRoundTokenUsageRef.current ?? undefined,
+              }]);
+            } else {
+              // 流式已经写入最后一条消息，再补一次最终状态作为"快照落点"
+              syncRoundStateToLastMessage();
+            }
             if (event.web_docs && event.web_docs.length > 0) {
-              setWebDocs(event.web_docs);
-              setShowSidebar(true);
+              perRoundWebDocsRef.current = event.web_docs;
+              setWebDocs(perRoundWebDocsRef.current);
+              syncRoundStateToLastMessage();
             }
           },
           onError: (event) => {
@@ -748,14 +1630,17 @@ export default function ChatInterface() {
         setError(err instanceof Error ? err.message : '请求失败');
       } finally {
         setIsLoading(false);
+        sealOffProcessingNodes();
       }
     }
   };
 
   const handleSelectSession = async (session: SessionSummary) => {
-    if (session.session_id === activeSessionId || isLoading) return;
+    if (isLoading) return;
     try {
-      await persistCurrentSession();
+      // Reopening the active writing session must read its persisted snapshot.
+      // Saving the currently broken/empty workspace first would overwrite that history.
+      if (session.session_id !== activeSessionId) await persistCurrentSession();
       await openSession(session);
     } catch (requestError) {
       setError(
@@ -770,7 +1655,10 @@ export default function ChatInterface() {
     if (isLoading) return;
     try {
       await persistCurrentSession();
-      startDraftSession(mode);
+      // New conversations always start in the standard chat surface. Code mode
+      // remains available by explicitly switching modes after the draft opens;
+      // this prevents a Code draft from rendering without its workspace shell.
+      startDraftSession('standard');
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -816,7 +1704,7 @@ export default function ChatInterface() {
         if (remaining[0]) {
           await openSession(remaining[0]);
         } else {
-          startDraftSession(mode);
+          startDraftSession('standard');
         }
       }
     } catch (requestError) {
@@ -840,7 +1728,7 @@ export default function ChatInterface() {
       titleRequestedRef.current.clear();
       setSessions([]);
       localStorage.removeItem('activeSessionId');
-      startDraftSession(mode);
+      startDraftSession('standard');
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -851,6 +1739,7 @@ export default function ChatInterface() {
   };
 
   const isPlanMode = mode === 'plan' || mode === 'distributed_plan';
+  const isNewConversation = messages.length === 0 && !generatedCode;
 
   // 复制到剪贴板（历史消息的"复制"按钮）
   const copyText = useCallback((text: string) => {
@@ -912,15 +1801,44 @@ export default function ChatInterface() {
     }
   };
 
+  const submitPublishedProject = async () => {
+    if (!publishVfs || !activeSessionId || !publishTitle.trim()) return;
+    setIsPublishing(true);
+    setError(null);
+    try {
+      await publishCodeProject({
+        source_session_id: activeSessionId,
+        title: publishTitle.trim(),
+        category: publishCategory,
+        prompt: codePrompts.at(-1) || '继续完善这个 Code 项目',
+        cover_image: publishCoverImage,
+        vfs: publishVfs,
+        project_kind: codeProjectKind,
+        published_run_id: codeRunId || activeCodeVersionId || `manual-${Date.now()}`,
+      });
+      setPublishVfs(null);
+      setView('code-showcase');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '发布作品失败');
+    } finally {
+      setIsPublishing(false);
+    }
+  };
+
+  useEffect(() => {
+    const textarea = inputRef.current;
+    if (!textarea) return;
+    textarea.style.height = '0px';
+    textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 44), 220)}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 220 ? 'auto' : 'hidden';
+  }, [input]);
+
   const visibleMessages = mode === 'code'
     ? []
-    : mode === 'agent' || isPlanMode
+    : mode === 'agent'
       ? messages.filter((message) => message.role === 'user')
       : messages;
   const agentFinalMessages = mode === 'agent'
-    ? messages.filter((message) => message.role === 'assistant')
-    : [];
-  const planFinalMessages = isPlanMode
     ? messages.filter((message) => message.role === 'assistant')
     : [];
   const codePrompts = mode === 'code'
@@ -943,9 +1861,21 @@ export default function ChatInterface() {
     }
     return nodes;
   }, []);
+  const latestResearchUserMessage = mode === 'research'
+    ? [...messages].reverse().find((message) => message.role === 'user')
+    : undefined;
+  const latestResearchReportMessage = mode === 'research'
+    ? [...messages].reverse().find((message) => message.role === 'assistant' && message.type !== 'qwen_feedback')
+    : undefined;
+  const researchPaneWidth = isHistoryCollapsed
+    ? 'calc((100vw - 3.5rem) * 0.52)'
+    : 'calc((100vw - 18rem) * 0.52)';
+  const researchWorkspaceStyle = mode === 'research' && messages.length > 0
+    ? ({ '--research-pane-width': researchPaneWidth } as CSSProperties)
+    : undefined;
 
   return (
-    <div className={`bg-gradient-to-b from-slate-50 to-slate-100 ${
+    <div style={researchWorkspaceStyle} className={`bg-gradient-to-b from-slate-50 to-slate-100 ${
       mode === 'code' ? 'h-screen overflow-hidden' : 'min-h-screen'
     }`}>
       <SessionSidebar
@@ -961,8 +1891,85 @@ export default function ChatInterface() {
         onDelete={(sessionId) => void handleDeleteSession(sessionId)}
         onClear={() => void handleClearSessions()}
         onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenDirectory={openDirectory}
+        onOpenHooks={openHooks}
       />
-      <SettingsDialog open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      <SettingsDialog
+        open={isSettingsOpen}
+        onClose={() => {
+          setIsSettingsOpen(false);
+          setSettingsInitialSection(null);
+          setSettingsInitialSubTab(null);
+        }}
+        initialSection={settingsInitialSection}
+        initialSubTab={settingsInitialSubTab}
+        onOpenDirectory={(tab) => openDirectory(tab)}
+        onOpenHooks={openHooks}
+        onInsertToChat={(text) => {
+          setInput(text);
+          setTimeout(() => inputRef.current?.focus(), 50);
+        }}
+      />
+      {view === 'marketplace' && (
+        <div
+          className={`fixed inset-y-0 right-0 z-[100] bg-white ${
+            isHistoryCollapsed
+              ? 'left-0 lg:left-14'
+              : 'left-0 lg:left-72'
+          }`}
+        >
+          <DirectoryPage
+            initialTab={directoryTab}
+            onBack={closeDirectory}
+            onOpenSettings={handleOpenSettingsFromDirectory}
+            onCreateWithAgent={(prompt) => void handleCreateWithAgent(prompt)}
+          />
+        </div>
+      )}
+      {view === 'hooks' && (
+        <div
+          className={`fixed inset-y-0 right-0 z-[100] bg-white ${
+            isHistoryCollapsed ? 'left-0 lg:left-14' : 'left-0 lg:left-72'
+          }`}
+        >
+          <HookCenter onBack={closeHooks} />
+        </div>
+      )}
+      {view === 'code-showcase' && (
+        <div className={`fixed inset-y-0 right-0 z-[100] bg-white ${isHistoryCollapsed ? 'left-0 lg:left-14' : 'left-0 lg:left-72'}`}>
+          <CodeShowcasePage
+            onBack={() => setView('chat')}
+            onOpenCode={(project) => { void enterCodeWorkbench(project); }}
+            onUsePrompt={async (prompt) => {
+              await enterCodeWorkbench();
+              setInput(prompt);
+            }}
+          />
+        </div>
+      )}
+      {view === 'writing' && (
+        <div className={`fixed inset-y-0 right-0 z-[110] bg-white ${isHistoryCollapsed ? 'left-0 lg:left-14' : 'left-0 lg:left-72'}`}>
+          <WritingWorkspace
+            key={writingSessionRestore ? `${writingSessionRestore.sessionId}:${writingSessionRestore.revision}` : 'new-writing-draft'}
+            initialResult={writingSessionRestore?.result ?? ''}
+            initialInstruction={writingSessionRestore?.instruction ?? ''}
+            restoreFromSession={Boolean(writingSessionRestore)}
+            initialDraft={writingSessionRestore?.draft}
+            initialDocument={writingSessionRestore?.document}
+            initialThesisOutline={writingSessionRestore?.thesisOutline}
+            onWorkspaceChange={setWritingWorkspaceState}
+            onBack={() => { void (async () => { await persistCurrentSession(); setView('chat'); startDraftSession('standard'); })(); }}
+            onSubmit={submitWritingDraft}
+            onEnsureWritingSession={ensureWritingSession}
+            onThesisBodyRequest={handleThesisBodyRequest}
+          />
+        </div>
+      )}
+      {isCodeWorkbenchTransitioning && (
+        <div className="fixed inset-0 z-[200] flex items-end justify-center overflow-hidden bg-slate-950/10 backdrop-blur-[2px]" aria-label="正在打开 Code 工作台" role="status">
+          <div className="h-[86vh] w-full rounded-t-[32px] border border-white/70 bg-white shadow-[0_-25px_80px_rgba(15,23,42,0.22)] animate-[code-workbench-rise_360ms_cubic-bezier(0.22,1,0.36,1)]" />
+        </div>
+      )}
       <RuntimeSettingsDrawer
         isOpen={isRuntimeSettingsOpen}
         mode={mode}
@@ -971,27 +1978,35 @@ export default function ChatInterface() {
         deepThinking={deepThinking}
         discussionRounds={discussionRounds}
         selectedAgentIds={discussionAgentIds}
+        mcpMode={mcpMode}
+        selectedMcpServerIds={selectedMcpServerIds}
+        skillMode={skillMode}
+        selectedSkillIds={selectedSkillIds}
         onClose={() => setIsRuntimeSettingsOpen(false)}
         onResponseLengthChange={changeResponseLength}
         onWebSearchChange={changeWebSearch}
         onDeepThinkingChange={changeDeepThinking}
         onDiscussionRoundsChange={changeDiscussionRounds}
         onSelectedAgentIdsChange={setDiscussionAgentIds}
+        onMcpModeChange={changeMcpMode}
+        onSelectedMcpServerIdsChange={changeSelectedMcpServerIds}
+        onSkillModeChange={changeSkillMode}
+        onSelectedSkillIdsChange={changeSelectedSkillIds}
+        onOpenDirectory={openDirectory}
         onReset={resetRuntimeSettings}
       />
-      <ChatNodeNavigator nodes={chatNodes} isSidebarOpen={showSidebar} />
-      <div className={`${isHistoryCollapsed ? 'lg:pl-14' : 'lg:pl-72'} ${
+      <HookMonitorPanel events={agentTrace.hookEvents ?? []} />
+      <ChatNodeNavigator nodes={chatNodes} isSidebarOpen={false} />
+      <div className={`${isHistoryCollapsed ? 'lg:pl-14' : 'lg:pl-72'} ${mode === 'research' && !isNewConversation ? 'xl:mr-[var(--research-pane-width)]' : ''} ${
         mode === 'code' ? 'h-screen overflow-hidden' : ''
       }`}>
-        <div className={`mx-auto p-6 transition-all duration-300 ${
+        <div className={`p-6 transition-all duration-300 ${
           mode === 'code'
             ? 'flex h-full max-w-none flex-col overflow-hidden pb-4 pt-0'
-            : 'max-w-4xl pb-80 sm:pb-72'
-        } ${showSidebar && mode !== 'code' ? 'mr-96' : ''}`}>
-        {/* Header */}
-        <header className={`sticky top-0 z-30 -mx-6 border-b border-slate-200/80 bg-slate-50/90 px-6 shadow-sm backdrop-blur-xl ${
-          mode === 'code' ? 'mb-2 py-2' : 'mb-6 py-4'
+            : 'max-w-none pb-80 sm:pb-72'
         }`}>
+        {/* Header */}
+        <header className="sticky top-0 z-30 -mx-6 mb-3 border-b border-slate-200/70 bg-slate-50/85 px-6 py-2.5 backdrop-blur-xl">
           <button
             type="button"
             aria-label="打开历史会话"
@@ -1000,56 +2015,28 @@ export default function ChatInterface() {
           >
             ☰ 历史
           </button>
-          {mode === 'code' ? (
-            <div className="flex min-h-8 items-center justify-between gap-3">
-              <div className="flex min-w-0 items-center gap-2 text-sm font-semibold text-slate-800">
-                <span aria-hidden="true">⌨️</span>
-                <span>Code 工作台</span>
-                <span className="hidden truncate text-xs font-normal text-slate-500 sm:inline">
-                  需求、预览与源码在同一工作区
-                </span>
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <button
-                  type="button"
-                  aria-label="打开运行设置"
-                  onClick={() => setIsRuntimeSettingsOpen(true)}
-                  className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
-                >
-                  ⚙ <span className="hidden sm:inline">运行设置</span>
-                </button>
-                <AgentDrawer />
-              </div>
+          <div className="flex min-h-9 items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2.5">
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-white" aria-hidden="true">
+                <Sparkles size={16} />
+              </span>
+              <h1 className="truncate text-base font-semibold tracking-tight text-slate-900 sm:text-lg">
+                {mode === 'code' && (!isNewConversation || codeWorkbenchDraft) ? 'Code 工作台' : '全能型智能助手'}
+              </h1>
             </div>
-          ) : <>
-          <div className="text-center">
-            <h1 className="mb-1 text-xl font-bold text-gray-900 sm:text-3xl">
-              全能型智能助手
-            </h1>
-            <p className="hidden text-sm text-gray-500 sm:block">
-              标准对话 / 深度思考 / 联网搜索 / 深度调研
-            </p>
-          </div>
-          <div className="mt-4 flex justify-center gap-2 lg:absolute lg:right-0 lg:top-0 lg:mt-0">
+          <div className="flex shrink-0 items-center gap-2">
             <button
               type="button"
+              aria-label="打开运行设置"
               onClick={() => setIsRuntimeSettingsOpen(true)}
-              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50"
+              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
             >
-              ⚙ 运行设置
+              <SlidersHorizontal size={15} /> <span className="hidden sm:inline">运行设置</span>
             </button>
             <AgentDrawer />
           </div>
-          </>}
-        </header>
-
-        {/* Node Status Bar (for non-research modes) */}
-        {currentNode && mode !== 'research' && (
-          <div className="bg-white/80 backdrop-blur rounded-lg p-3 mb-4 flex items-center justify-center gap-2 shadow-sm">
-            <div className="animate-spin h-4 w-4 border-2 border-blue-600 border-t-transparent rounded-full" />
-            <span className="text-blue-700 font-medium">{currentNode}</span>
           </div>
-        )}
+        </header>
 
         {/* Error Display */}
         {error && (
@@ -1059,10 +2046,11 @@ export default function ChatInterface() {
         )}
 
         {/* Chat Messages */}
-        <div className={`bg-white/60 backdrop-blur rounded-2xl shadow-sm ${
+        <div className={`${isNewConversation ? 'bg-transparent shadow-none' : 'bg-white/60 shadow-sm backdrop-blur'} mx-auto w-full rounded-2xl ${mode === 'code' ? 'max-w-none' : 'max-w-4xl'} ${
           mode === 'code' ? 'min-h-0 flex-1 overflow-hidden p-0' : 'mb-6 min-h-[450px] p-6'
         }`}>
-          {mode === 'code' && (
+          {mode === 'code' && (!isNewConversation || codeWorkbenchDraft) && (
+            <>
             <CodeWorkspace
               code={generatedCode}
               prompts={codePrompts}
@@ -1098,6 +2086,12 @@ export default function ChatInterface() {
               onRuntimeError={handleRuntimeError}
               onStopAutoRepair={stopAutoRepair}
               onCaptureSnapshot={captureCodeVersion}
+              onPublishProject={(vfs) => {
+                const title = codePrompts.at(-1)?.slice(0, 30) || '我的 Code 作品';
+                setPublishVfs(deepCopyVFS(vfs));
+                setPublishTitle(title);
+                setPublishCoverImage(buildCodeProjectCover(vfs, title));
+              }}
               onRollbackVersion={rollbackCodeVersion}
               onSaveManualVersion={saveManualCodeVersion}
               onProjectKindChange={setCodeProjectKind}
@@ -1112,24 +2106,146 @@ export default function ChatInterface() {
               onDeletePrompt={handleDeletePrompt}
               tasks={codeTasks}
             />
+            {agentTrace.tokenUsage && (
+              <div className="border-t border-slate-200 bg-white px-3 py-1 text-[11px] text-slate-400">
+                Token · 合计 {agentTrace.tokenUsage.total_tokens}
+                {(agentTrace.tokenUsage.reasoning_tokens ?? 0) > 0 ? ` · 推理 ${agentTrace.tokenUsage.reasoning_tokens}` : ''}
+              </div>
+            )}
+            </>
           )}
 
-          {mode !== 'code' && messages.length === 0 && !isLoading && (
-            <div className="flex flex-col items-center justify-center h-96 text-gray-400">
-              <div className="text-6xl mb-4">🤖</div>
-              <p className="text-lg">开始对话吧</p>
-              <p className="text-sm mt-2">选择一个模式，然后输入你的问题</p>
+          {isNewConversation && !codeWorkbenchDraft && !isLoading && (
+            <div className="flex min-h-[34vh] flex-col items-center justify-end px-4 pb-8 text-center">
+              <span className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-lg shadow-blue-600/20" aria-hidden="true">
+                <Sparkles size={24} />
+              </span>
+              <h2 className="min-h-10 text-2xl font-semibold tracking-tight text-slate-950 sm:text-3xl">
+                {typedWelcome}<span className="ml-0.5 inline-block h-7 w-0.5 animate-pulse bg-blue-600 align-middle" aria-hidden="true" />
+              </h2>
+              <p className="mt-3 text-sm text-slate-500">今天想一起完成什么？</p>
             </div>
           )}
 
           <div className={mode === 'code' ? 'hidden' : 'space-y-4'}>
-            {visibleMessages.map((msg, index) => (
+            {visibleMessages.map((msg, index) => {
+              // Why 改成「任意 assistant 消息」都可能带进度/来源：
+              //   旧逻辑只显示「最后一条 assistant 消息」的面板，导致多轮历史里
+              //   前几轮的"阅读了多少网页 + 搜索结果"按钮消失（用户报告的问题）。
+              //   只要 msg.nodeProgress（或 ref 中正在累积的本轮状态）有内容，就渲染面板。
+              const isAssistant = msg.role === 'assistant';
+              const msgPlanProgress = isAssistant ? msg.planProgress : undefined;
+              const msgNodeProgress: NodeEvent[] =
+                (msg.nodeProgress && msg.nodeProgress.length > 0)
+                  ? msg.nodeProgress
+                  : (isAssistant && isLoading && perRoundNodeEventsRef.current.length > 0
+                      ? perRoundNodeEventsRef.current
+                      : []);
+              const hasProgress = msgNodeProgress.length > 0;
+              const msgWebDocs = msg.webDocs?.length ? msg.webDocs : undefined;
+              const msgResearchChunks = msg.researchChunks?.length ? msg.researchChunks : undefined;
+              const showPanel = isAssistant && hasProgress;
+              // Why: 千问深度调研反问卡片——type='qwen_feedback' 时渲染为内嵌卡片，
+              //   显示模型反问问题 + 输入框，用户回答后触发 Step 2 继续研究。
+              const isQwenFeedback = msg.type === 'qwen_feedback';
+
+              return (
               <div
                 id={msg.role === 'user' ? `chat-message-${index}` : undefined}
                 key={index}
-                className={`scroll-mt-28 flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                className={`scroll-mt-28 flex ${
+                  msg.role === 'user'
+                    ? 'justify-end'
+                    : showPanel || msgPlanProgress
+                      // assistant 带进度面板：头像→进度→答案 纵向排列，左对齐（每轮都独立一套，不共享）
+                      ? 'justify-start flex-col items-start'
+                      // 普通 assistant：头像+气泡 横向并排
+                      : 'justify-start items-start gap-3'
+                }`}
               >
-                <div className={`max-w-[85%] rounded-2xl px-5 py-3 ${
+                {msg.role === 'assistant' && (
+                  <div className="mt-1 w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white shadow-sm flex-none">
+                    <Bot className="w-5 h-5" />
+                  </div>
+                )}
+
+                {showPanel && (
+                  <div className="mt-0.5 w-full max-w-[85%]">
+                    <NodeProgressPanel
+                      nodeProgress={msgNodeProgress}
+                      currentNode={isLoading ? (perRoundCurrentNodeRef.current ?? currentNode) : null}
+                      open={isMsgPanelOpen(msg, index)}
+                      onToggle={() => toggleMsgPanel(index)}
+                      webDocs={msgWebDocs}
+                      researchChunks={msgResearchChunks}
+                      researchReasoningFallback={msg.researchReasoning ?? msg.reasoning ?? undefined}
+                    />
+                  </div>
+                )}
+
+                {msgPlanProgress && (
+                  <div className="mt-0.5 w-full max-w-[90%]">
+                    <TaskExecutionPanel
+                      progress={msgPlanProgress}
+                      distributed={mode === 'distributed_plan'}
+                    />
+                  </div>
+                )}
+
+                {/* Why: 千问反问卡片——内嵌在对话流中，不中断对话 */}
+                {isQwenFeedback ? (
+                  <div className="mt-1 w-full max-w-[85%]">
+                    <div className="rounded-2xl bg-amber-50 border border-amber-200 px-5 py-4">
+                      <div className="flex items-start gap-2 mb-3">
+                        <span className="text-lg">🤔</span>
+                        <span className="text-sm font-semibold text-amber-800">千问深度研究 · 反问确认</span>
+                      </div>
+                      {/* 模型反问内容 */}
+                      {msg.feedbackQuestion && (
+                        <div className="mb-3 text-sm text-gray-800 leading-relaxed">
+                          <MarkdownMessage content={msg.feedbackQuestion} />
+                        </div>
+                      )}
+                      {/* 已回答：显示用户回答 + 状态 */}
+                      {msg.feedbackAnswer ? (
+                        <div className="flex items-center gap-2 text-sm text-green-700">
+                          <span>✅</span>
+                          <span>已回答，正在继续研究...</span>
+                        </div>
+                      ) : (
+                        /* 未回答：显示输入框 + 提交按钮 */
+                        <div className="flex gap-2">
+                          <input
+                            type="text"
+                            placeholder="请输入您的回答..."
+                            className="flex-1 px-3 py-2 text-sm border border-amber-300 rounded-lg bg-white text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-amber-400 focus:border-transparent"
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+                                submitQwenFeedback(index, e.currentTarget.value.trim());
+                                e.currentTarget.value = '';
+                              }
+                            }}
+                          />
+                          <button
+                            onClick={(e) => {
+                              const inputEl = (e.target as HTMLButtonElement).previousElementSibling as HTMLInputElement;
+                              if (inputEl?.value.trim()) {
+                                submitQwenFeedback(index, inputEl.value.trim());
+                                inputEl.value = '';
+                              }
+                            }}
+                            className="px-4 py-2 text-sm font-medium text-white bg-amber-600 rounded-lg hover:bg-amber-700 transition-colors shrink-0"
+                          >
+                            提交
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                <div className={`
+                  ${showPanel ? 'mt-1' : ''}
+                  max-w-[85%] rounded-2xl px-5 py-3 ${
                   msg.role === 'user'
                     ? 'bg-blue-600 text-white rounded-br-md'
                     : 'bg-gray-100 text-gray-900 rounded-bl-md'
@@ -1150,10 +2266,32 @@ export default function ChatInterface() {
                     </div>
                   )}
                   {/* 报告正文 */}
+                  {msgPlanProgress && (
+                    <p className="mb-2 text-xs font-semibold text-cyan-700">
+                      {mode === 'distributed_plan' ? '🕸️' : '🧭'} Final Summarizer · 最终报告
+                    </p>
+                  )}
+                  {msg.writingArtifact && (
+                    <div className="mb-3 flex max-w-md items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-3 shadow-sm">
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-sm font-bold text-white">W</span>
+                      <span className="min-w-0"><strong className="block truncate text-sm text-slate-900">{msg.writingArtifact.title}</strong><span className="mt-0.5 block text-xs text-slate-400">{msg.writingArtifact.status === 'generating' ? '正在生成中…' : msg.writingArtifact.status === 'complete' ? 'Word 文档已生成' : '生成失败，请重试'}</span></span>
+                    </div>
+                  )}
                   <MarkdownMessage content={msg.content} />
+                  {msg.role === 'assistant' && msg.tokenUsage && (
+                    <div className="mt-2 text-[11px] text-slate-400">
+                      Token · 输入 {msg.tokenUsage.prompt_tokens ?? (msg.tokenUsage.models ? Object.values(msg.tokenUsage.models).reduce((sum, item) => sum + (item.prompt_tokens || 0), 0) : 0)}
+                      {' '}· 输出 {msg.tokenUsage.completion_tokens ?? (msg.tokenUsage.models ? Object.values(msg.tokenUsage.models).reduce((sum, item) => sum + (item.completion_tokens || 0), 0) : 0)}
+                      {' '}· 合计 {msg.tokenUsage.total_tokens}
+                      {(msg.tokenUsage.cached_tokens ?? 0) > 0 ? ` · 缓存 ${msg.tokenUsage.cached_tokens}` : ''}
+                      {(msg.tokenUsage.reasoning_tokens ?? 0) > 0 ? ` · 推理 ${msg.tokenUsage.reasoning_tokens}` : ''}
+                    </div>
+                  )}
 
-                  {/* 可折叠的 R1 深度思考过程（调研模式完成后显示在消息内） */}
-                  {msg.reasoning && (
+                  {/* 可折叠的 R1 深度思考过程：仅非调研模式下保留在答案末尾；
+                      调研模式下 reasoning 流程已融入 NodeProgressPanel 链路面板
+                      （[Node: DeepThinker] processing→completed），不再在气泡末尾重复展示。 */}
+                  {msg.reasoning && mode !== 'research' && (
                     <details className="mt-3">
                       <summary className="cursor-pointer text-xs font-semibold text-purple-600 hover:text-purple-800 flex items-center gap-1.5 py-1 select-none">
                         <span>🧠</span>
@@ -1205,17 +2343,101 @@ export default function ChatInterface() {
                     );
                   })()}
                 </div>
+                )}
               </div>
-            ))}
+              );
+            })}
 
-            {/* Research Progress inside chat area */}
-            {mode === 'research' && researchProgress && (
+            {/* 思考中占位：用户问题已发出、assistant 答案还没返回时，
+                把执行进度显示成一个独立的 assistant 消息气泡，紧挨在问题下面。
+                用 perRoundXxxRef 读取当前累积：此时最后一条 assistant 消息可能还未创建 */}
+            {isLoading &&
+              perRoundNodeEventsRef.current.length > 0 &&
+              (visibleMessages.length === 0 ||
+                visibleMessages[visibleMessages.length - 1].role === 'user') && (
+                <div className="flex justify-start items-start gap-3">
+                  <div className="mt-1 w-8 h-8 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white shadow-sm flex-none">
+                    <Bot className="w-5 h-5" />
+                  </div>
+                  <div className="max-w-[90%]">
+                    <NodeProgressPanel
+                      nodeProgress={perRoundNodeEventsRef.current}
+                      currentNode={perRoundCurrentNodeRef.current ?? currentNode}
+                      open={true}
+                      onToggle={() => { perRoundPanelOpenRef.current = !perRoundPanelOpenRef.current; setMsgPanelOpenKeys({}); }}
+                      webDocs={perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : undefined}
+                      researchChunks={perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : undefined}
+                    />
+                  </div>
+                </div>
+              )}
+
+            {/* Skill 命中提示 —— 本轮注入了哪些 Skill 手册，与 MCP trace 同源反馈 */}
+            {matchedSkills.length > 0 && (
               <div className="flex justify-start">
-                <div className="max-w-[90%]">
-                  <ResearchProgressPanel progress={researchProgress} />
+                <div className="max-w-[90%] rounded-2xl rounded-bl-md border border-violet-200 bg-violet-50 px-4 py-2.5 text-sm">
+                  <div className="flex items-center gap-2 text-violet-700">
+                    <span className="text-base">🧠</span>
+                    <span className="font-medium">
+                      已加载 {matchedSkills.length} 个技能手册
+                    </span>
+                  </div>
+                  <ul className="mt-2 space-y-1 pl-6 text-xs text-violet-600">
+                    {matchedSkills.map((s, i) => (
+                      <li key={`${s.skill_name}-${i}`} className="flex items-start gap-1.5">
+                        <span>📖</span>
+                        <span className="font-mono">{s.skill_name}</span>
+                        {s.standard_steps.length > 0 && (
+                          <span className="text-violet-400">
+                            （{s.standard_steps.length} 步标准流程）
+                          </span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               </div>
             )}
+
+            {/* MCP 工具调用轨迹 —— 实时可见，确认"MCP 真的被调用了" */}
+            {(mcpActive || mcpTrace.length > 0) && mcpMode !== 'off' && (
+              <div className="flex justify-start">
+                <div className="max-w-[90%] rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm">
+                  <div className="flex items-center gap-2 text-slate-600">
+                    <span className="text-base">🔧</span>
+                    <span className="font-medium">
+                      {mcpActive && mcpTrace.some((t) => t.status === 'calling')
+                        ? 'MCP 工具调用中…'
+                        : `已调用 ${mcpTrace.filter((t) => t.status === 'ok').length} 个 MCP 工具`}
+                    </span>
+                  </div>
+                  {mcpTrace.length > 0 && (
+                    <ul className="mt-2 space-y-1 pl-6 text-xs text-slate-500">
+                      {mcpTrace.map((t, i) => (
+                        <li key={`${t.tool_name}-${i}`} className="flex items-start gap-1.5">
+                          <span>
+                            {t.status === 'calling' ? '⏳' : t.status === 'ok' ? '✅' : '❌'}
+                          </span>
+                          <span className="font-mono">{t.tool_name}</span>
+                          {t.preview && (
+                            <span className="truncate text-slate-400" title={t.preview}>
+                              — {t.preview.slice(0, 80)}
+                              {t.preview.length > 80 ? '…' : ''}
+                            </span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Research Progress inside chat area
+                Why 移除独立 ResearchProgressPanel 渲染：调研模式已复用 NodeProgressPanel 链路面板，
+                  research_process 事件被翻译成 NodeEvent 推入同一 nodeProgress 栈，
+                  与联网模式共用可伸缩链路面板，紧挨头像下方显示，刷新/重启后从 SessionSnapshot 恢复。
+                  researchProgress 状态仍保留（onResearchProcess 回调继续更新），用于触发 sidebar 切换等副作用。 */}
 
             {/* 多智能体协同树 (Agent Mode) */}
             {mode === 'agent' && (agentStatus || agentTalks.length > 0) && (
@@ -1250,7 +2472,7 @@ export default function ChatInterface() {
               </div>
             )}
 
-            {isPlanMode && (planProgress || agentStatus) && (
+            {isPlanMode && isLoading && (planProgress || agentStatus) && (
               <div className="mt-4">
                 {planProgress ? (
                   <TaskExecutionPanel
@@ -1278,16 +2500,6 @@ export default function ChatInterface() {
               </div>
             ))}
 
-            {planFinalMessages.map((msg, index) => (
-              <div key={`plan-final-${index}`} className="flex justify-start">
-                <div className="max-w-[90%] rounded-2xl rounded-bl-md bg-gray-100 px-5 py-3 text-gray-900">
-                  <p className="mb-2 text-xs font-semibold text-cyan-700">
-                    {mode === 'distributed_plan' ? '🕸️' : '🧭'} Final Summarizer · 最终报告
-                  </p>
-                  <MarkdownMessage content={msg.content} />
-                </div>
-              </div>
-            ))}
           </div>
 
           {/* Reasoning Display (Deep Mode) */}
@@ -1315,84 +2527,212 @@ export default function ChatInterface() {
         </div>
 
         {/* Fixed Input Area */}
-        {mode !== 'code' && <div
-          className={`fixed bottom-0 left-0 z-40 border-t border-slate-200/80 bg-slate-50/90 shadow-[0_-8px_24px_rgba(15,23,42,0.08)] backdrop-blur-xl transition-[left,right] duration-300 ${
+        {(mode !== 'code' || (isNewConversation && !codeWorkbenchDraft)) && <div
+          className={`fixed left-0 z-40 bg-gradient-to-t from-slate-100 via-slate-50/95 to-transparent pt-8 transition-[left,right,top,bottom] duration-300 ${
             isHistoryCollapsed ? 'lg:left-14' : 'lg:left-72'
-          } ${
-            showSidebar ? 'right-0 lg:right-96' : 'right-0'
-          }`}
+          } ${isNewConversation ? 'bottom-auto top-[43%]' : 'bottom-0 top-auto'} right-0 ${mode === 'research' && !isNewConversation ? 'xl:right-[var(--research-pane-width)]' : ''}`}
         >
           <div className="mx-auto max-w-4xl p-3 sm:p-4">
-            <div className="rounded-2xl bg-white p-4 shadow-lg">
-          <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+            <div className="rounded-2xl border border-slate-200/90 bg-white p-2.5 shadow-[0_12px_40px_rgba(15,23,42,0.10)]">
+          <form onSubmit={handleSubmit} className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 px-1">
             <ModeSelector
               value={mode}
               disabled={isLoading || !isSessionReady}
               onChange={(nextMode) => void handleModeChange(nextMode)}
             />
-
-            <div className="flex flex-wrap gap-1.5 text-[11px] text-slate-500">
-              <span className="rounded-full bg-slate-100 px-2.5 py-1">
-                {discussionLength === 'brief'
-                  ? '精简'
-                  : discussionLength === 'detailed'
-                    ? '详细'
-                    : '标准'}篇幅
-              </span>
-              <span className="rounded-full bg-slate-100 px-2.5 py-1">
-                🌐 联网：{webSearch === 'off' ? '关闭' : webSearch === 'on' ? '开启' : '自动'}
-              </span>
-              <span className="rounded-full bg-slate-100 px-2.5 py-1">
-                🧠 深度：{deepThinking === 'off' ? '关闭' : deepThinking === 'on' ? '开启' : '自动'}
-              </span>
-              {mode === 'agent' && (
-                <span className="rounded-full bg-slate-100 px-2.5 py-1">
-                  {discussionRounds} 轮讨论
-                </span>
+            <div className="flex min-w-0 items-center gap-2">
+              <ModelQuickSwitcher compact disabled={isLoading || !isSessionReady}/>
+              <button type="button" onClick={() => setIsRuntimeSettingsOpen(true)} className="inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-800">
+                <SlidersHorizontal size={14}/> 参数
+              </button>
+              {currentModelSettings?.provider === 'qwen' && !isPlanMode && (
+                <QwenSearchOptionsPopover
+                  options={qwenNativeSearchOptions}
+                  onChange={setQwenNativeSearchOptions}
+                  onReset={() => setQwenNativeSearchOptions(DEFAULT_QWEN_NATIVE_SEARCH_OPTIONS)}
+                  modelId={currentModelSettings?.model_id}
+                />
               )}
+              {(currentModelSettings?.provider === 'deepseek' || isPlanMode) && (
+                <FirecrawlSearchOptionsPopover
+                  options={webSearchOptions}
+                  onChange={setWebSearchOptions}
+                  onReset={() => setWebSearchOptions({ ...DEFAULT_WEB_SEARCH_OPTIONS })}
+                />
+              )}
+              {mode === 'research' && (
+                <div className="flex items-center gap-0.5 rounded-lg bg-slate-100 p-0.5">
+                  {(currentModelSettings?.provider === 'qwen') && <button type="button" onClick={() => setResearchEngine('qwen')} className={`rounded-md px-2 py-1 text-[10px] font-medium ${researchEngine === 'qwen' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>千问原生</button>}
+                  <button type="button" onClick={() => setResearchEngine('firecrawl')} className={`rounded-md px-2 py-1 text-[10px] font-medium ${researchEngine === 'firecrawl' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>Firecrawl</button>
+                  <button type="button" onClick={() => setResearchEngine('self-built')} className={`rounded-md px-2 py-1 text-[10px] font-medium ${researchEngine === 'self-built' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>自研引擎</button>
+                </div>
+              )}
+              {mode === 'research' && researchEngine === 'qwen' && <label className="flex items-center gap-1 text-[11px] text-slate-500"><input type="checkbox" checked={enableFeedback} onChange={(event) => setEnableFeedback(event.target.checked)} className="rounded border-slate-300 text-blue-600"/>反问确认</label>}
+            </div>
             </div>
 
-            <ModelQuickSwitcher disabled={isLoading || !isSessionReady}/>
-
-            {showAttachmentRow && <div className="space-y-2">
-              {attachments.length > 0 && <div className="flex flex-wrap gap-2">{attachments.map((item, index) => <span key={`${item.url.slice(0,30)}-${index}`} className="inline-flex max-w-48 items-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-xs text-sky-800"><Paperclip size={13}/><span className="truncate">{item.name || item.type}</span><button type="button" aria-label={`移除 ${item.name || '附件'}`} onClick={()=>setAttachments((current)=>current.filter((_,i)=>i!==index))}><X size={13}/></button></span>)}</div>}
-              <div className="flex flex-wrap items-center gap-2">
-                {currentModelSettings?.multimodal ? (
-                  <button type="button" onClick={()=>imageInputRef.current?.click()} className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"><ImageIcon size={14}/>本地图片</button>
-                ) : (
-                  <span className="inline-flex items-center rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700">
-                    当前模型为纯文本，不支持上传图片
-                  </span>
-                )}
-                <input ref={imageInputRef} type="file" accept="image/jpeg,image/png,image/webp,image/gif" className="hidden" onChange={(e)=>{addLocalImage(e.target.files?.[0]); e.currentTarget.value='';}}/>
-                <select aria-label="附件类型" value={attachmentType} onChange={(e)=>setAttachmentType(e.target.value as ChatAttachment['type'])} className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-600"><option value="image_url">图片 URL</option><option value="video_url">视频 URL</option><option value="file_url">文件 URL</option></select>
-                <div className="flex min-w-52 flex-1"><input aria-label="附件 HTTPS URL" value={attachmentUrl} onChange={(e)=>setAttachmentUrl(e.target.value)} placeholder="https://…" className="min-w-0 flex-1 rounded-l-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs outline-none focus:border-sky-500"/><button type="button" disabled={!attachmentUrl.trim()} onClick={addAttachmentUrl} className="inline-flex items-center gap-1 rounded-r-lg bg-slate-800 px-3 text-xs text-white disabled:opacity-40"><Link size={13}/>添加</button></div>
-                <span className="text-[11px] text-slate-400">图片、视频、文件不可混合</span>
-              </div>
-            </div>}
+            {mode === 'research' && researchEngine === 'firecrawl' && <div className="flex justify-end px-1"><ResearchOptionsPopover options={researchOptions} onChange={setResearchOptions} onReset={() => setResearchOptions({ ...DEFAULT_RESEARCH_OPTIONS })}/></div>}
+            {attachments.length > 0 && <div className="flex flex-wrap gap-2 px-1">{attachments.map((item, index) => <span key={`${item.url.slice(0,30)}-${index}`} className="inline-flex max-w-48 items-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs text-sky-800"><Paperclip size={13}/><span className="truncate">{item.name || item.type}</span><button type="button" aria-label={`移除 ${item.name || '附件'}`} onClick={()=>setAttachments((current)=>current.filter((_,i)=>i!==index))}><X size={13}/></button></span>)}</div>}
 
             {/* Input Row */}
-            <div className="flex gap-3">
-              <input
-                ref={inputRef}
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleInputCtrlEnter}
-                placeholder={
-                  mode === 'web' ? '联网搜索最新信息...' :
-                  mode === 'research' ? '输入调研主题...' :
-                  mode === 'distributed_plan' ? '输入需要多位专家协作完成的复杂目标...' :
-                  mode === 'plan' ? '输入需要拆解和持续执行的复杂任务...' :
-                  '输入你的问题...'
-                }
-                disabled={isLoading}
-                className="flex-1 px-4 py-3 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 text-gray-900 placeholder-gray-400 bg-gray-50"
-              />
+            <div className="relative flex items-center gap-2" ref={inputContainerRef}>
+              <div className="relative shrink-0">
+                <button type="button" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentMenuOpen} onClick={() => setAttachmentMenuOpen((open) => !open)} className="flex h-10 w-10 items-center justify-center rounded-full text-slate-600 hover:bg-slate-100 hover:text-slate-950">
+                  <Plus size={21}/>
+                </button>
+                {attachmentMenuOpen && <div role="menu" className="absolute bottom-full left-0 z-[70] mb-2 w-40 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
+                  <button type="button" role="menuitem" onClick={() => openAttachmentPicker('image_url')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"><ImageIcon size={16}/>上传图片</button>
+                  <button type="button" role="menuitem" onClick={() => openAttachmentPicker('video_url')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"><Video size={16}/>上传视频</button>
+                  <button type="button" role="menuitem" onClick={() => openAttachmentPicker('file_url')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"><FileText size={16}/>上传文件</button>
+                </div>}
+                <input ref={attachmentInputRef} type="file" className="hidden" onChange={(e)=>{addLocalAttachment(e.target.files?.[0]); e.currentTarget.value='';}}/>
+              </div>
+              {showSkillPicker && filteredSkills.length > 0 && (
+                <>
+                  <div className="absolute bottom-full left-0 mb-2 w-80 max-h-80 overflow-y-auto bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 py-1 z-50">
+                    {filteredSkills.map((skill, idx) => {
+                      const isActive = idx === skillPickerSelectedIndex || idx === skillPickerHoveredIndex;
+                      return (
+                        <button
+                          key={skill.skill_id}
+                          type="button"
+                          onClick={() => insertSkill(skill.skill_name)}
+                          onMouseEnter={() => setSkillPickerHoveredIndex(idx)}
+                          onMouseLeave={() => setSkillPickerHoveredIndex(null)}
+                          className={`w-full flex flex-col items-start px-4 py-2.5 text-left transition-colors ${
+                            isActive
+                              ? 'bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300' 
+                              : 'hover:bg-slate-50 dark:hover:bg-slate-700/50 text-slate-800 dark:text-slate-200'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <svg className={`w-4 h-4 ${isActive ? 'text-blue-500 dark:text-blue-400' : 'text-slate-400'}`} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                              <polyline points="14 2 14 8 20 8"></polyline>
+                            </svg>
+                            <span className="text-sm font-medium">
+                              {skill.skill_name}
+                            </span>
+                          </div>
+                          {skill.description && (
+                            <div className={`mt-0.5 text-xs line-clamp-1 ${isActive ? 'text-blue-600/70 dark:text-blue-300/70' : 'text-slate-500 dark:text-slate-400'}`}>
+                              {skill.description}
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {/* 右侧描述浮窗 */}
+                  {(() => {
+                    const idx = skillPickerHoveredIndex !== null ? skillPickerHoveredIndex : skillPickerSelectedIndex;
+                    const skill = filteredSkills[idx];
+                    if (!skill) return null;
+                    const desc = skill.description || skill.trigger_condition || `类型: ${skill.skill_type}`;
+                    return (
+                      <div 
+                        className="absolute bottom-full left-[21rem] mb-2 w-96 p-4 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-700 z-[60] text-sm leading-relaxed"
+                        style={{ maxWidth: 'calc(100vw - 22rem)' }}
+                      >
+                        <div className="font-medium text-slate-900 dark:text-white mb-1">{skill.skill_name}</div>
+                        <div className="text-slate-600 dark:text-slate-300">{desc}</div>
+                      </div>
+                    );
+                  })()}
+                </>
+              )}
+
+              <div 
+                className="relative flex-1"
+                onMouseEnter={() => matchedSkill && setShowMatchedSkillTooltip(true)}
+                onMouseLeave={() => setShowMatchedSkillTooltip(false)}
+              >
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  onChange={handleInputChange}
+                  onKeyDown={handleInputKeyDown}
+                  placeholder={
+                    mode === 'web' ? '联网搜索最新信息...（输入/唤起Skills）' :
+                    mode === 'research' ? '输入调研主题...（输入/唤起Skills）' :
+                    mode === 'distributed_plan' ? '输入需要多位专家协作完成的复杂目标...（输入/唤起Skills）' :
+                    mode === 'plan' ? '输入需要拆解和持续执行的复杂任务...（输入/唤起Skills）' :
+                    '输入你的问题...（输入/唤起Skills）'
+                  }
+                  disabled={isLoading}
+                  rows={1}
+                  className="min-h-11 max-h-[220px] w-full resize-none rounded-xl border-0 bg-slate-50 px-4 py-2.5 text-[15px] leading-6 text-slate-900 outline-none ring-1 ring-inset ring-slate-200 placeholder:text-slate-400 focus:bg-white focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100"
+                />
+                {/* 匹配Skill蓝色高亮（简单实现） */}
+                {matchedSkill && (() => {
+                  const regex = new RegExp(`/(${matchedSkill.skill_name})(?=\\s|$)`);
+                  const match = input.match(regex);
+                  if (!match || match.index === undefined) return null;
+                  return (
+                    <div className="absolute inset-0 pointer-events-none flex items-center px-4 overflow-hidden whitespace-nowrap">
+                      <span className="invisible">{input.slice(0, match.index)}</span>
+                      <span className="bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400 rounded px-0.5 -mx-0.5">
+                        /{matchedSkill.skill_name}
+                      </span>
+                    </div>
+                  );
+                })()}
+                {/* 匹配Skill描述浮窗 */}
+                {showMatchedSkillTooltip && matchedSkill && (
+                  <div className="absolute bottom-full left-0 mb-2 p-4 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-200 rounded-xl shadow-2xl border border-slate-200 dark:border-slate-700 z-[60] text-sm leading-relaxed max-w-md pointer-events-none">
+                    <div className="font-medium text-slate-900 dark:text-white mb-1">{matchedSkill.skill_name}</div>
+                    <div className="text-slate-600 dark:text-slate-300">
+                      {matchedSkill.description || matchedSkill.trigger_condition || `类型: ${matchedSkill.skill_type}`}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="relative shrink-0">
+                <button
+                  type="button"
+                  aria-label="更多工具"
+                  aria-haspopup="menu"
+                  aria-expanded={moreToolsOpen}
+                  onClick={() => setMoreToolsOpen((open) => !open)}
+                  className="inline-flex h-10 items-center gap-1.5 rounded-full px-2.5 text-sm text-slate-600 transition hover:bg-slate-100 hover:text-slate-950"
+                >
+                  <Menu size={18}/><span className="hidden sm:inline">更多</span>
+                </button>
+                {moreToolsOpen && (
+                  <div role="menu" aria-label="更多工具列表" className={`absolute right-0 z-[80] w-48 rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_18px_50px_rgba(15,23,42,0.16)] ${isNewConversation ? 'top-full mt-2' : 'bottom-full mb-2'}`}>
+                    {[
+                      { label: '代码', icon: Code2 },
+                      { label: '翻译', icon: Languages },
+                      { label: 'AI 写作', icon: WandSparkles },
+                      { label: '研究', icon: Telescope },
+                      { label: 'PPT 创作', icon: Presentation },
+                      { label: 'AI 生视频', icon: Video },
+                      { label: 'AI 生图', icon: ImageIcon },
+                    ].map(({ label, icon: ToolIcon }) => (
+                      <button
+                        key={label}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setMoreToolsOpen(false);
+                          if (label === '代码') setView('code-showcase');
+                          if (label === 'AI 写作') void openWritingWorkspace();
+                        }}
+                        className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-slate-700 transition hover:bg-slate-100 hover:text-slate-950"
+                      >
+                        <ToolIcon size={18} strokeWidth={1.8}/>
+                        <span>{label}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               <button
                 type="submit"
                 disabled={isLoading || !input.trim()}
-                className={`px-6 py-3 text-white rounded-xl font-medium transition-all disabled:bg-gray-300 disabled:cursor-not-allowed shadow-sm ${
+                aria-label="发送消息"
+                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-white transition-all disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed ${
                   mode === 'web' ? 'bg-green-600 hover:bg-green-700' :
                   mode === 'deep' ? 'bg-purple-600 hover:bg-purple-700' :
                   mode === 'research' ? 'bg-orange-600 hover:bg-orange-700' :
@@ -1413,9 +2753,7 @@ export default function ChatInterface() {
                           : '思考中'}
                     </span>
                   </div>
-                ) : (
-                  '发送'
-                )}
+                ) : <ArrowUp size={19} strokeWidth={2.4} />}
               </button>
             </div>
 
@@ -1439,131 +2777,20 @@ export default function ChatInterface() {
       </div>
       </div>
 
-      {/* Sidebar for Web Search Results / Research Chunks */}
-      <div
-        className={`fixed right-0 top-0 h-full w-96 bg-white shadow-2xl transform transition-transform duration-300 z-50 overflow-y-auto ${
-          showSidebar ? 'translate-x-0' : 'translate-x-full'
-        }`}
-      >
-        <div className="sticky top-0 bg-white border-b border-gray-100 p-4 flex items-center justify-between backdrop-blur">
-          <h3 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-            {sidebarType === 'research' ? (
-              <>
-                <span className="text-xl">🔬</span>
-                调研精选片段 ({researchChunks.length})
-              </>
-            ) : (
-              <>
-                <span className="text-xl">🌐</span>
-                搜索结果 ({webDocs.length})
-              </>
-            )}
-          </h3>
-          <button
-            onClick={() => setShowSidebar(false)}
-            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
-          >
-            <svg className="w-5 h-5 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        <div className="p-4 space-y-4">
-          {/* 调研精选片段渲染 */}
-          {sidebarType === 'research' && researchChunks.map((chunk: ResearchChunk, index: number) => (
-            <div key={index} className="bg-orange-50 rounded-xl p-4 hover:bg-orange-100 transition-colors">
-              <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-6 h-6 bg-orange-500 text-white rounded-full flex items-center justify-center text-sm font-medium">
-                  {chunk.id || index + 1}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <h4 className="font-medium text-gray-900 mb-2 line-clamp-2">
-                    {chunk.title || '无标题'}
-                  </h4>
-                  <div className="flex items-center gap-2 mb-3">
-                    <span className="text-xs bg-orange-200 text-orange-800 px-2 py-0.5 rounded-full font-medium">
-                      得分: {chunk.score.toFixed(4)}
-                    </span>
-                    <a
-                      href={chunk.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-xs text-blue-600 hover:text-blue-800 transition-colors"
-                    >
-                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                      </svg>
-                      来源页面
-                    </a>
-                  </div>
-                  <p className="text-sm text-gray-700 line-clamp-5 whitespace-pre-wrap">
-                    {chunk.text}
-                  </p>
-                </div>
-              </div>
-            </div>
-          ))}
-
-          {/* 联网搜索结果渲染 */}
-          {sidebarType === 'web' && webDocs.map((doc, index) => (
-            <div key={index} className="bg-gray-50 rounded-xl p-4 hover:bg-gray-100 transition-colors">
-              <div className="flex items-start gap-3">
-                <span className="flex-shrink-0 w-6 h-6 bg-green-500 text-white rounded-full flex items-center justify-center text-sm font-medium">
-                  {doc.id}
-                </span>
-                <div className="flex-1 min-w-0">
-                  <h4 className="font-medium text-gray-900 mb-2 line-clamp-2">
-                    {doc.title}
-                  </h4>
-                  <p className="text-sm text-gray-600 mb-3 line-clamp-3">
-                    {doc.content}
-                  </p>
-                  <a
-                    href={doc.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-1 text-sm text-blue-600 hover:text-blue-800 transition-colors"
-                  >
-                    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                    </svg>
-                    查看原文
-                  </a>
-                </div>
-              </div>
-            </div>
-          ))}
-
-          {((sidebarType === 'web' && webDocs.length === 0) || (sidebarType === 'research' && researchChunks.length === 0)) && !isLoading && (
-            <div className="text-center text-gray-400 py-8">
-              暂无内容
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Overlay */}
-      {showSidebar && (
-        <div
-          className="fixed inset-0 bg-black/10 z-40 backdrop-blur-sm"
-          onClick={() => setShowSidebar(false)}
+      {mode === 'research' && !isNewConversation && (
+        <ResearchWorkspace
+          title={latestResearchUserMessage?.content || '深度调研报告'}
+          report={latestResearchReportMessage?.content || ''}
+          sources={latestResearchReportMessage?.researchChunks ?? researchChunks}
+          loading={isLoading}
+          sidebarCollapsed={isHistoryCollapsed}
         />
       )}
 
-      {/* Toggle Sidebar Button (when closed) */}
-      {((!showSidebar && webDocs.length > 0) || (!showSidebar && researchChunks.length > 0)) && (
-        <button
-          onClick={() => setShowSidebar(true)}
-          className="fixed right-4 top-1/2 -translate-y-1/2 bg-white shadow-lg rounded-full p-3 hover:bg-gray-50 transition-colors z-30 border border-gray-200"
-          title={sidebarType === 'research' ? '查看调研精选' : '查看搜索结果'}
-        >
-          <span className="text-xl">{sidebarType === 'research' ? '🔬' : '🌐'}</span>
-          <span className="absolute -top-1 -right-1 w-5 h-5 bg-green-500 text-white text-xs rounded-full flex items-center justify-center">
-            {sidebarType === 'research' ? researchChunks.length : webDocs.length}
-          </span>
-        </button>
-      )}
+      {/* Sidebar + Overlay + Float Button 已移除：
+          搜索结果/调研精选按钮改放到每轮对话 NodeProgressPanel 标题栏（"阅读了 X 个网页"旁），
+          内联第二视图渲染，不再使用全局右抽屉，保证多轮对话历史各自保留来源且刷新不丢。 */}
+
       {lightboxUrl && (
         <div
           className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4"
@@ -1576,6 +2803,17 @@ export default function ChatInterface() {
             className="max-h-full max-w-full rounded-lg shadow-2xl"
             onClick={(event) => event.stopPropagation()}
           />
+        </div>
+      )}
+      {publishVfs && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget && !isPublishing) setPublishVfs(null); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="publish-project-title" className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-4"><div><h2 id="publish-project-title" className="text-lg font-semibold text-slate-950">发布到作品广场</h2><p className="mt-1 text-xs leading-5 text-slate-500">发布会保存当前代码的独立副本，删除会话后作品仍然保留。</p></div><button type="button" aria-label="关闭发布窗口" disabled={isPublishing} onClick={() => setPublishVfs(null)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-800"><X size={18}/></button></div>
+            <label className="mt-5 block text-sm font-medium text-slate-700">作品名称<input autoFocus value={publishTitle} onChange={(event) => setPublishTitle(event.target.value)} maxLength={80} className="mt-2 h-10 w-full rounded-xl border border-slate-200 px-3 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"/></label>
+            <label className="mt-4 block text-sm font-medium text-slate-700">作品封面<span className="mt-1 block text-xs font-normal text-slate-400">可上传预览截图；未选择时使用项目类型封面</span><input type="file" accept="image/png,image/jpeg,image/webp" className="mt-2 block w-full text-xs text-slate-500 file:mr-3 file:rounded-lg file:border-0 file:bg-slate-100 file:px-3 file:py-2 file:text-xs file:font-medium file:text-slate-700" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => { if (typeof reader.result === 'string') setPublishCoverImage(reader.result); }; reader.readAsDataURL(file); }}/></label>
+            <fieldset className="mt-4"><legend className="text-sm font-medium text-slate-700">分类</legend><div className="mt-2 grid grid-cols-2 gap-2">{([['utility','实用工具'],['web','网页设计'],['interactive','娱乐互动'],['education','教育学习']] as const).map(([id,label]) => <button key={id} type="button" aria-pressed={publishCategory === id} onClick={() => setPublishCategory(id)} className={`rounded-xl border px-3 py-2 text-sm ${publishCategory === id ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}`}>{label}</button>)}</div></fieldset>
+            <div className="mt-5 flex justify-end gap-2"><button type="button" disabled={isPublishing} onClick={() => setPublishVfs(null)} className="rounded-xl px-4 py-2 text-sm text-slate-600 hover:bg-slate-100">取消</button><button type="button" disabled={isPublishing || !publishTitle.trim()} onClick={() => void submitPublishedProject()} className="rounded-xl bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:bg-slate-300">{isPublishing ? '发布中…' : '确认发布'}</button></div>
+          </section>
         </div>
       )}
     </div>

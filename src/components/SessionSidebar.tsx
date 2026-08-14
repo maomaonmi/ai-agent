@@ -2,7 +2,7 @@
 
 import { MODE_OPTIONS } from './ModeSelector';
 import { SessionSummary } from '../lib/api';
-import { ChevronUp, LogOut, Settings, UserRound } from 'lucide-react';
+import { Activity, ChevronUp, LogOut, Puzzle, Settings, UserRound } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 interface SessionSidebarProps {
@@ -18,6 +18,8 @@ interface SessionSidebarProps {
   onDelete: (sessionId: string) => void;
   onClear: () => void;
   onOpenSettings: () => void;
+  onOpenDirectory: (tab?: 'skills' | 'connectors' | 'plugins') => void;
+  onOpenHooks: () => void;
 }
 
 function modeLabel(mode: SessionSummary['mode']) {
@@ -37,6 +39,8 @@ export default function SessionSidebar({
   onDelete,
   onClear,
   onOpenSettings,
+  onOpenDirectory,
+  onOpenHooks,
 }: SessionSidebarProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -92,6 +96,22 @@ export default function SessionSidebar({
             className="mt-3 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
           >
             ＋ 新建会话
+          </button>
+          <button
+            type="button"
+            onClick={() => onOpenDirectory()}
+            className="mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100"
+          >
+            <Puzzle size={16} className="shrink-0 text-slate-500" />
+            MCP · Skills · Plugins
+          </button>
+          <button
+            type="button"
+            onClick={onOpenHooks}
+            className="mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <Activity size={16} className="shrink-0 text-slate-500" />
+            HOOK 管理中心
           </button>
         </div>
 

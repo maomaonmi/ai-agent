@@ -2,6 +2,14 @@
 @tailwind components;
 @tailwind utilities;
 
+.scrollbar-none { scrollbar-width: none; -ms-overflow-style: none; }
+.scrollbar-none::-webkit-scrollbar { display: none; }
+
+@keyframes code-workbench-rise {
+  from { transform: translateY(100%); opacity: 0.72; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
 :root {
   --background: #ffffff;
   --foreground: #171717;
@@ -25,4 +33,183 @@ html[data-font='mono'] { --app-font: "SFMono-Regular", Consolas, "Liberation Mon
   overflow-x: auto;
   overflow-y: hidden;
   padding: 0.25rem 0;
+}
+
+.writing-editor-content {
+  min-height: 760px;
+  outline: none;
+  font-family: Georgia, "Noto Serif SC", "Songti SC", serif;
+  color: #172033;
+}
+
+.writing-editor-content h1 {
+  margin: 0 0 2.75rem;
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+}
+
+.writing-editor-content h2 {
+  margin: 2.25rem 0 0.9rem;
+  border-left: 3px solid #2563eb;
+  padding-left: 0.75rem;
+  font-size: 1.4rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.writing-editor-content h3 {
+  margin: 1.5rem 0 0.65rem;
+  font-size: 1.1rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.writing-editor-content p {
+  margin: 0.75rem 0;
+  font-size: 1rem;
+  line-height: 2;
+  text-align: justify;
+}
+
+.writing-editor-content ul,
+.writing-editor-content ol {
+  margin: 1rem 0;
+  padding-left: 1.5rem;
+  line-height: 2;
+}
+
+.writing-editor-content:focus {
+  outline: none;
+}
+
+.research-tiptap-document {
+  color: #1e293b;
+  font-size: 15px;
+  line-height: 2;
+}
+
+.research-tiptap-document:focus {
+  outline: none;
+}
+
+.research-tiptap-document h2 {
+  margin: 2.75rem 0 1.25rem;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 0.75rem;
+  color: #0f172a;
+  font-size: 1.75rem;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: -0.02em;
+}
+
+.research-tiptap-document h3 {
+  margin: 2.25rem 0 1rem;
+  color: #0f172a;
+  font-size: 1.25rem;
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.research-tiptap-document h4 {
+  margin: 1.75rem 0 0.75rem;
+  color: #0f172a;
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.research-tiptap-document p {
+  margin: 0 0 1rem;
+}
+
+.research-tiptap-document ul,
+.research-tiptap-document ol {
+  margin: 0.75rem 0 1.5rem;
+  padding-left: 1.5rem;
+}
+
+.research-tiptap-document ul { list-style: disc; }
+.research-tiptap-document ol { list-style: decimal; }
+.research-tiptap-document li { margin: 0.4rem 0; padding-left: 0.25rem; }
+
+.research-tiptap-document blockquote {
+  margin: 1.5rem 0;
+  border-left: 3px solid #2563eb;
+  background: #f8fafc;
+  padding: 0.75rem 1rem;
+  color: #475569;
+}
+
+.research-tiptap-document table {
+  margin: 1.5rem 0;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  line-height: 1.6;
+}
+
+.research-tiptap-document th,
+.research-tiptap-document td {
+  border: 1px solid #e2e8f0;
+  padding: 0.625rem 0.75rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.research-tiptap-document th { background: #f1f5f9; color: #0f172a; font-weight: 650; }
+
+/* PDF export uses the same A4 pages rendered by the layout workspace. */
+@media print {
+  @page { size: A4 portrait; margin: 0; }
+  body { background: #fff !important; }
+  body * { visibility: hidden !important; }
+  [data-writing-layout-root],
+  [data-writing-layout-root] * { visibility: visible !important; }
+  [data-writing-body-print-root],
+  [data-writing-body-print-root] * { visibility: visible !important; }
+  [data-writing-layout-root] {
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+  }
+  [data-writing-body-print-root] {
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 32px 48px !important;
+    background: #fff !important;
+  }
+  [data-writing-layout-toolbar],
+  [data-writing-layout-actions],
+  [data-writing-layout-root] [role='dialog'] { display: none !important; }
+  [data-writing-layout-pages] { display: block !important; padding: 0 !important; }
+  [data-writing-layout-page] {
+    transform: none !important;
+    margin: 0 auto !important;
+    box-shadow: none !important;
+    break-after: page;
+    page-break-after: always;
+  }
+  [data-writing-layout-page]:last-child { break-after: auto; page-break-after: auto; }
+
+  body:has([data-research-workspace]) > * { visibility: hidden !important; }
+  [data-research-workspace],
+  [data-research-workspace] * { visibility: visible !important; }
+  [data-research-workspace] aside {
+    position: absolute !important;
+    inset: 0 !important;
+    display: block !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    border: 0 !important;
+  }
+  [data-research-workspace] header,
+  [data-research-workspace] > button { display: none !important; }
+  [data-research-document] { max-width: none !important; padding: 0 !important; }
 }

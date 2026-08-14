@@ -1,0 +1,22 @@
+'use client';
+
+import { AlignCenter, AlignLeft, AlignRight, Bold, ChevronDown, Highlighter, IndentDecrease, IndentIncrease, Italic, List, ListOrdered, Redo2, Strikethrough, Underline, Undo2 } from 'lucide-react';
+
+interface WritingEditorToolbarProps { onCommand: (command: string, value?: string) => void; }
+const iconButton = 'inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-700 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500';
+
+export default function WritingEditorToolbar({ onCommand }: WritingEditorToolbarProps) {
+  return <div role="toolbar" aria-label="正文编辑工具" onMouseDown={(event) => { if ((event.target as HTMLElement).closest('button')) event.preventDefault(); }} className="scrollbar-none flex min-h-16 items-center justify-center gap-1 overflow-x-auto bg-white py-2" style={{ width: 'calc(100% - 96px)', maxWidth: 980, margin: '0 auto', paddingLeft: 0, paddingRight: 0 }}>
+    <button type="button" aria-label="撤销" onClick={() => onCommand('undo')} className={iconButton}><Undo2 size={17}/></button>
+    <button type="button" aria-label="重做" onClick={() => onCommand('redo')} className={iconButton}><Redo2 size={17}/></button>
+    <span className="mx-1 h-5 w-px bg-slate-200"/>
+    <label className="relative inline-flex h-9 items-center rounded-md px-2 text-sm text-slate-700 hover:bg-slate-100"><span className="sr-only">段落样式</span><select defaultValue="p" onChange={(event) => onCommand('formatBlock', event.target.value)} className="appearance-none bg-transparent pr-5 font-medium outline-none"><option value="p">正文</option><option value="h1">标题 1</option><option value="h2">标题 2</option><option value="h3">标题 3</option></select><ChevronDown size={13} className="pointer-events-none absolute right-1"/></label>
+    <label className="relative inline-flex h-9 items-center rounded-md px-2 text-sm text-slate-600 hover:bg-slate-100"><span className="sr-only">字号</span><select defaultValue="3" onChange={(event) => onCommand('fontSize', event.target.value)} className="appearance-none bg-transparent pr-5 outline-none"><option value="2">13px</option><option value="3">15px</option><option value="4">18px</option><option value="5">24px</option></select><ChevronDown size={13} className="pointer-events-none absolute right-1"/></label>
+    <span className="mx-1 h-5 w-px bg-slate-200"/>
+    <button type="button" aria-label="粗体" onClick={() => onCommand('bold')} className={iconButton}><Bold size={17}/></button><button type="button" aria-label="删除线" onClick={() => onCommand('strikeThrough')} className={iconButton}><Strikethrough size={17}/></button><button type="button" aria-label="下划线" onClick={() => onCommand('underline')} className={iconButton}><Underline size={17}/></button><button type="button" aria-label="斜体" onClick={() => onCommand('italic')} className={iconButton}><Italic size={17}/></button>
+    <button type="button" aria-label="项目符号" onClick={() => onCommand('insertUnorderedList')} className={iconButton}><List size={18}/></button><button type="button" aria-label="编号列表" onClick={() => onCommand('insertOrderedList')} className={iconButton}><ListOrdered size={18}/></button>
+    <button type="button" aria-label="左对齐" onClick={() => onCommand('justifyLeft')} className={iconButton}><AlignLeft size={18}/></button><button type="button" aria-label="居中" onClick={() => onCommand('justifyCenter')} className={iconButton}><AlignCenter size={18}/></button><button type="button" aria-label="右对齐" onClick={() => onCommand('justifyRight')} className={iconButton}><AlignRight size={18}/></button>
+    <label className={`${iconButton} relative cursor-pointer`} aria-label="文字颜色"><span className="font-semibold underline decoration-blue-600 decoration-2 underline-offset-4">A</span><input type="color" defaultValue="#0f172a" onChange={(event) => onCommand('foreColor', event.target.value)} className="absolute inset-0 cursor-pointer opacity-0"/></label><label className={`${iconButton} relative cursor-pointer`} aria-label="高亮颜色"><Highlighter size={17}/><input type="color" defaultValue="#fef08a" onChange={(event) => onCommand('hiliteColor', event.target.value)} className="absolute inset-0 cursor-pointer opacity-0"/></label>
+    <button type="button" aria-label="减少缩进" onClick={() => onCommand('outdent')} className={iconButton}><IndentDecrease size={18}/></button><button type="button" aria-label="增加缩进" onClick={() => onCommand('indent')} className={iconButton}><IndentIncrease size={18}/></button>
+  </div>;
+}

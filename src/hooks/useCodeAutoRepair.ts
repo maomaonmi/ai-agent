@@ -14,6 +14,9 @@ import {
   type CodeAgentTrace,
   type CodeFileChange,
   type CodeGenerationEvent,
+  type HookEvent,
+  type TokenUsageEvent,
+  type McpMode,
   type TaskItem,
 } from '../lib/api';
 import { parseProjectCode } from '../Code/fullstackBundler';
@@ -26,6 +29,13 @@ import {
 
 const ERROR_CHECK_WINDOW_MS = 1200;
 
+// Why: MCP 会话级注入配置。generate/modify 调用时传入并缓存到 ref，
+//   handleRuntimeError 自动修复复用，与 sessionIdRef 同一生命周期模式。
+export interface McpRequestContext {
+  mode: McpMode;
+  serverIds: string[];
+}
+
 const EMPTY_AGENT_TRACE: CodeAgentTrace = {
   steps: [],
   output: '',
@@ -34,6 +44,7 @@ const EMPTY_AGENT_TRACE: CodeAgentTrace = {
   summary: '',
   summaryIntent: 'patch',
   terminalProposals: [],
+  hookEvents: [],
 };
 
 const ENVELOPE_TOP_KEYS: ReadonlySet<string> = new Set([
@@ -207,6 +218,12 @@ export default function useCodeAutoRepair() {
   const currentAgentRunIdRef = useRef('');
   const repairRetryTimerRef = useRef<number | null>(null);
   const repairHandlerRef = useRef<(error: RuntimeErrorReport) => void>(() => undefined);
+  // Why: Phase3 记忆系统 session_id 引用——generate/modify 调用时传入并存储，
+  // handleRuntimeError 自动复用，无需每次调用都显式传参。
+  const sessionIdRef = useRef<string | null>(null);
+  // Why: MCP 配置引用——与 sessionIdRef 同模式，自动修复链路（fixWebCode/fixFullstackCode）
+  //   也需要携带 mcp_mode/mcp_server_ids，否则修复请求的 MCP 上下文与用户设定不一致。
+  const mcpRef = useRef<McpRequestContext | null>(null);
 
   const commitAgentTrace = useCallback((update: (previous: CodeAgentTrace) => CodeAgentTrace) => {
     const next = update(agentTraceRef.current);
@@ -253,6 +270,19 @@ export default function useCodeAutoRepair() {
   }, [commitAgentTrace]);
 
   const consumeAgentEvent = useCallback((event: CodeGenerationEvent) => {
+    if (event.type === 'token_usage') {
+      const usageEvent = event as TokenUsageEvent;
+      commitAgentTrace((previous) => ({ ...previous, tokenUsage: usageEvent.usage }));
+      return true;
+    }
+    if (event.type === 'hook_event') {
+      const hookEvent = event as HookEvent;
+      commitAgentTrace((previous) => ({
+        ...previous,
+        hookEvents: [...(previous.hookEvents ?? []), hookEvent].slice(-100),
+      }));
+      return true;
+    }
     if (event.type === 'runtime_summary') {
       const eventIntentRaw = event.intent;
       const eventIntent =
@@ -312,6 +342,43 @@ export default function useCodeAutoRepair() {
       setTasks((previous) => previous.map((t) =>
         t.id === event.task_id ? { ...t, status: event.status } : t
       ));
+      // Why: 子任务完成时携带 delta，追加到执行记录的 fileChanges 里。
+      if (event.status === 'completed' && event.delta) {
+        const changes: CodeFileChange[] = Object.entries(event.delta).map(([path, d]) => ({
+          path,
+          additions: d.add,
+          deletions: d.del,
+        }));
+        commitAgentTrace((previous) => ({
+          ...previous,
+          fileChanges: [
+            ...(previous.fileChanges ?? []),
+            ...changes,
+          ],
+        }));
+      }
+      return true;
+    }
+    // Why: Agent Loop 工具循环每落盘一个文件即推送 file_written，通知文件树高亮该文件。
+    if (event.type === 'file_written') {
+      window.dispatchEvent(new CustomEvent('code-file-written', { detail: { path: event.path } }));
+      return true;
+    }
+    // Why: Phase3 记忆系统更新通知——档案卡/摘要/VFS/Skill 任一变更时推送。
+    // 前端派发 window 事件，MemoryPanel 监听后自动刷新，让记忆面板实时反映后端状态。
+    if (event.type === 'memory_update') {
+      console.log('[memory][sse] memory_update layer=%s action=%s', event.layer, event.action);
+      window.dispatchEvent(new CustomEvent('memory-updated', {
+        detail: { layer: event.layer, action: event.action },
+      }));
+      return true;
+    }
+    // Why: Phase3 Skill 匹配命中通知——展示"已命中 Skill"的实时反馈。
+    if (event.type === 'skill_matched') {
+      console.log('[memory][sse] skill_matched=%s confidence=%s', event.skill_name, event.confidence);
+      window.dispatchEvent(new CustomEvent('skill-matched', {
+        detail: { skill_name: event.skill_name },
+      }));
       return true;
     }
     if (event.type !== 'agent_activity') return false;
@@ -470,7 +537,11 @@ export default function useCodeAutoRepair() {
     prompt: string,
     projectKind: 'frontend' | 'fullstack' = 'frontend',
     attachments: ChatAttachment[] = [],
+    sessionId: string | null = null,
+    mcp: McpRequestContext | null = null,
   ) => {
+    sessionIdRef.current = sessionId;
+    mcpRef.current = mcp;
     reset();
     beginAgentTrace(projectKind === 'fullstack' ? '正在启动全栈代码智能体。' : '正在启动前端代码智能体。', prompt, projectKind);
     // 注意：beginAgentTrace 内部设置了 currentAgentRunIdRef，所以必须在它之后取 meta.run_id。
@@ -481,7 +552,7 @@ export default function useCodeAutoRepair() {
     let didComplete = false;
 
     const handleEvent = (event: CodeGenerationEvent) => {
-      if (event.type === 'agent_activity' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update') {
+      if (event.type === 'agent_activity' || event.type === 'hook_event' || event.type === 'token_usage' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update' || event.type === 'file_written' || event.type === 'memory_update' || event.type === 'skill_matched') {
         consumeAgentEvent(event);
         return;
       }
@@ -510,12 +581,12 @@ export default function useCodeAutoRepair() {
       if (projectKind === 'fullstack') {
         await generateFullstackCode(
           prompt, handleEvent, controller.signal, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest },
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds },
         );
       } else {
         await generateWebCode(
           prompt, handleEvent, controller.signal, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest },
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds },
         );
       }
     } catch (error) {
@@ -531,7 +602,11 @@ export default function useCodeAutoRepair() {
     attachments: ChatAttachment[] = [],
     // Why: Day57 @file 剪枝——把用户在前端 @ 的文件清单透传给后端 fullstack 修改接口。
     mentionedFiles: string[] = [],
+    sessionId: string | null = null,
+    mcp: McpRequestContext | null = null,
   ) => {
+    sessionIdRef.current = sessionId;
+    mcpRef.current = mcp;
     const currentCode = codeRef.current;
     if (!currentCode || !instruction.trim()) return false;
     const pendingDiagnostics = recentErrorsRef.current.join('\n');
@@ -568,7 +643,7 @@ export default function useCodeAutoRepair() {
           }
         : null;
     const handleEvent = (event: CodeGenerationEvent) => {
-      if (event.type === 'agent_activity' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update') {
+      if (event.type === 'agent_activity' || event.type === 'hook_event' || event.type === 'token_usage' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update' || event.type === 'file_written' || event.type === 'memory_update' || event.type === 'skill_matched') {
         consumeAgentEvent(event);
         return;
       }
@@ -590,13 +665,13 @@ export default function useCodeAutoRepair() {
       if (hasVfs) {
         await modifyFullstackCode(
           currentVfs, instruction, targetElement, handleEvent, controller.signal, pendingDiagnostics, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest },
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds },
           mentionedFiles,
         );
       } else {
         await modifyWebCode(
           currentCode, instruction, targetElement, handleEvent, controller.signal, pendingDiagnostics, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest },
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds },
         );
       }
     } catch (error) {
@@ -696,7 +771,7 @@ export default function useCodeAutoRepair() {
       const currentVfs = parseProjectCode(codeRef.current);
       const hasVfs = currentVfs && Object.keys(currentVfs).length > 0;
       const handleEvent = (event: CodeGenerationEvent) => {
-          if (event.type === 'agent_activity' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update') {
+        if (event.type === 'agent_activity' || event.type === 'hook_event' || event.type === 'token_usage' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update' || event.type === 'file_written' || event.type === 'memory_update' || event.type === 'skill_matched') {
             consumeAgentEvent(event);
             if (event.type === 'agent_activity' && event.channel === 'output') {
               repairModelOutput += event.content;
@@ -730,12 +805,12 @@ export default function useCodeAutoRepair() {
       if (hasVfs) {
         await fixFullstackCode(
           currentVfs, diagnostic, handleEvent, controller.signal,
-          { workspace_id: terminalWorkspaceId, run_id: currentAgentRunIdRef.current },
+          { workspace_id: terminalWorkspaceId, run_id: currentAgentRunIdRef.current, session_id: sessionIdRef.current ?? undefined, mcp_mode: mcpRef.current?.mode, mcp_server_ids: mcpRef.current?.serverIds },
         );
       } else {
         await fixWebCode(
           codeRef.current, diagnostic, handleEvent, controller.signal,
-          { workspace_id: terminalWorkspaceId, run_id: currentAgentRunIdRef.current },
+          { workspace_id: terminalWorkspaceId, run_id: currentAgentRunIdRef.current, session_id: sessionIdRef.current ?? undefined, mcp_mode: mcpRef.current?.mode, mcp_server_ids: mcpRef.current?.serverIds },
         );
       }
 

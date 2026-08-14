@@ -34,6 +34,8 @@ interface FileTreeExplorerProps {
   onSelectFile: (path: string) => void;
   /** Why: 用户在 UI 上完成 4 种文件系统操作后，把意图抛给上层修改 VFS。 */
   onAction?: (action: FileTreeAction) => void;
+  /** Why: Agent Loop 刚写入的文件路径，用于实时高亮该文件行。 */
+  highlightPath?: string;
 }
 
 export const FileTreeExplorer: React.FC<FileTreeExplorerProps> = ({
@@ -41,6 +43,7 @@ export const FileTreeExplorer: React.FC<FileTreeExplorerProps> = ({
   activeFile,
   onSelectFile,
   onAction,
+  highlightPath,
 }) => {
   const [menu, setMenu] = useState<ContextMenuState | null>(null);
   /** Why: 当前处于"等待用户输入新名称"的操作——新建文件/文件夹或重命名。 */
@@ -176,6 +179,7 @@ export const FileTreeExplorer: React.FC<FileTreeExplorerProps> = ({
             key={node.path}
             node={node}
             activeFile={activeFile}
+            highlightPath={highlightPath}
             onSelectFile={onSelectFile}
             pending={pending}
             setPending={setPending}
@@ -267,8 +271,9 @@ const TreeItem: React.FC<{
   node: TreeNode;
   activeFile: string;
   onSelectFile: (path: string) => void;
+  highlightPath?: string;
 } & TreeItemActionProps> = ({
-  node, activeFile, onSelectFile, pending, setPending, submitPending,
+  node, activeFile, onSelectFile, pending, setPending, submitPending, highlightPath,
 }) => {
   const [isOpen, setIsOpen] = useState(true);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -335,6 +340,7 @@ const TreeItem: React.FC<{
                 key={child.path}
                 node={child}
                 activeFile={activeFile}
+                highlightPath={highlightPath}
                 onSelectFile={onSelectFile}
                 pending={pending}
                 setPending={setPending}
@@ -365,6 +371,7 @@ const TreeItem: React.FC<{
 
   // 文件节点
   const isActive = activeFile === node.path;
+  const isJustWritten = highlightPath === node.path;
   return (
     <div
       data-node-path={node.path}
@@ -375,7 +382,9 @@ const TreeItem: React.FC<{
       className={`flex items-center justify-between px-2 py-1.5 rounded-md cursor-grab transition ${
         isActive
           ? 'bg-blue-100 text-blue-800 font-semibold'
-          : 'hover:bg-slate-100 text-slate-600'
+          : isJustWritten
+            ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-300'
+            : 'hover:bg-slate-100 text-slate-600'
       }`}
     >
       <div className="flex items-center gap-2 truncate min-w-0">

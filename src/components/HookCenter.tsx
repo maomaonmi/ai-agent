@@ -6,7 +6,7 @@ import { createHookDraft, getHookSource, getHooks, HookDraftResult, HookLifecycl
 
 interface HookCenterProps { onBack: () => void; }
 const LIFECYCLE_LABELS: Record<HookLifecycle, string> = {
-  on_session_start: '会话开始', before_llm_call: 'LLM 调用前', after_llm_call: 'LLM 调用后',
+  on_session_start: '会话开始', on_conversation_start: '对话开始', on_conversation_end: '对话结束', before_llm_call: 'LLM 调用前', after_llm_call: 'LLM 调用后',
   before_tool_call: '工具调用前', after_tool_call: '工具调用后', on_error: '错误处理',
 };
 const POLICY_LABELS: Record<string, string> = { allow: '放行', transform: '变更', block: '阻断', observe: '观察' };

@@ -39,7 +39,43 @@ const STAGE_CONFIG = {
   },
 } as const;
 
+// Why: 千问深度调研四阶段（planning→searching→analyzing→writing），
+//   与自研链路五阶段互不冲突，按 stage 前缀自动路由。
+const QWEN_STAGE_CONFIG = {
+  planning: {
+    icon: '🤔',
+    label: '反问确认',
+    desc: '模型提出澄清问题帮助聚焦方向',
+    color: 'blue',
+  },
+  searching: {
+    icon: '🔍',
+    label: '深度搜索',
+    desc: '多轮联网搜索收集资料',
+    color: 'green',
+  },
+  analyzing: {
+    icon: '📊',
+    label: '分析整合',
+    desc: '分析搜索结果并提取关键信息',
+    color: 'orange',
+  },
+  writing: {
+    icon: '️',
+    label: '撰写报告',
+    desc: '生成结构化深度研究报告',
+    color: 'purple',
+  },
+  complete: {
+    icon: '✅',
+    label: '研究完成',
+    desc: '深度研究报告已生成',
+    color: 'green',
+  },
+} as const;
+
 const STAGE_ORDER = ['fanout', 'fetch', 'chunk', 'rerank', 'reason'] as const;
+const QWEN_STAGE_ORDER = ['planning', 'searching', 'analyzing', 'writing', 'complete'] as const;
 
 const COLOR_CLASSES = {
   blue: {
@@ -80,9 +116,20 @@ const COLOR_CLASSES = {
 };
 
 export default function ResearchProgressPanel({ progress }: ResearchProgressPanelProps) {
-  const currentIndex = STAGE_ORDER.indexOf(progress.stage);
-  const config = STAGE_CONFIG[progress.stage];
-  const colors = COLOR_CLASSES[config.color];
+  // Why: 根据 stage 自动路由到对应的阶段配置（自研链路五阶段 vs 千问四阶段）。
+  //   Agent Loop 模式下 stage 为 `iteration_N_think/search/observe/final`，走 fallback 渲染。
+  const isQwenStage = QWEN_STAGE_ORDER.includes(progress.stage as (typeof QWEN_STAGE_ORDER)[number]);
+  const isLegacyStage = STAGE_ORDER.includes(progress.stage as (typeof STAGE_ORDER)[number]);
+
+  const stageConfig = isQwenStage
+    ? QWEN_STAGE_CONFIG[progress.stage as keyof typeof QWEN_STAGE_CONFIG]
+    : isLegacyStage
+    ? STAGE_CONFIG[progress.stage as (typeof STAGE_ORDER)[number]]
+    : STAGE_CONFIG.fanout; // fallback
+
+  const stageOrder: readonly string[] = isQwenStage ? QWEN_STAGE_ORDER : STAGE_ORDER;
+  const currentIndex = stageOrder.indexOf(stageConfig === STAGE_CONFIG.fanout ? 'fanout' : progress.stage);
+  const colors = COLOR_CLASSES[stageConfig.color];
   const isRunning = progress.status === 'running';
   const isDone = progress.status === 'done';
 
@@ -91,9 +138,9 @@ export default function ResearchProgressPanel({ progress }: ResearchProgressPane
       {/* 阶段标题 */}
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
-          <span className="text-xl">{config.icon}</span>
-          <span className="font-semibold text-gray-900">{config.label}</span>
-          <span className="text-sm text-gray-500">— {config.desc}</span>
+          <span className="text-xl">{stageConfig.icon}</span>
+          <span className="font-semibold text-gray-900">{stageConfig.label}</span>
+          <span className="text-sm text-gray-500">— {stageConfig.desc}</span>
         </div>
         {isRunning && (
           <div className="flex items-center gap-2">
@@ -106,11 +153,13 @@ export default function ResearchProgressPanel({ progress }: ResearchProgressPane
         )}
       </div>
 
-      {/* 四阶段流水线指示器 */}
+      {/* 阶段流水线指示器 */}
       <div className="flex items-center gap-0 mb-4">
-        {STAGE_ORDER.map((stage, idx) => {
-          const stageConfig = STAGE_CONFIG[stage];
-          const stageColors = COLOR_CLASSES[stageConfig.color];
+        {stageOrder.map((stage, idx) => {
+          const cfg = isQwenStage
+            ? QWEN_STAGE_CONFIG[stage as keyof typeof QWEN_STAGE_CONFIG]
+            : STAGE_CONFIG[stage as (typeof STAGE_ORDER)[number]];
+          const stageColors = COLOR_CLASSES[cfg.color];
           const isPast = currentIndex > idx || (currentIndex === idx && isDone);
 
           return (
@@ -121,13 +170,13 @@ export default function ResearchProgressPanel({ progress }: ResearchProgressPane
                     isPast ? `${stageColors.bar} text-white` : 'bg-gray-200 text-gray-400'
                   }`}
                 >
-                  {isPast ? '✓' : stageConfig.icon}
+                  {isPast ? '✓' : cfg.icon}
                 </div>
                 <span className={`text-xs mt-1 ${isPast ? 'text-gray-700 font-medium' : 'text-gray-400'}`}>
-                  {stageConfig.label}
+                  {cfg.label}
                 </span>
               </div>
-              {idx < STAGE_ORDER.length - 1 && (
+              {idx < stageOrder.length - 1 && (
                 <div className={`w-12 h-0.5 mx-1 ${currentIndex > idx ? stageColors.bar : 'bg-gray-200'}`} />
               )}
             </div>

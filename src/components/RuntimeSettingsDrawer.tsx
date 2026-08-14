@@ -5,7 +5,13 @@ import {
   AgentConfig,
   CapabilityMode,
   DiscussionLength,
+  McpMode,
+  McpPluginItem,
+  SkillCapsule,
+  getMcpMarketplace,
+  getSkills,
   listAgents,
+  toggleMcp,
 } from '../lib/api';
 import { ModeType } from './ModeSelector';
 
@@ -17,12 +23,21 @@ interface RuntimeSettingsDrawerProps {
   deepThinking: CapabilityMode;
   discussionRounds: number;
   selectedAgentIds: string[];
+  mcpMode: McpMode;
+  selectedMcpServerIds: string[];
+  skillMode: McpMode;
+  selectedSkillIds: number[];
   onClose: () => void;
   onResponseLengthChange: (value: DiscussionLength) => void;
   onWebSearchChange: (value: CapabilityMode) => void;
   onDeepThinkingChange: (value: CapabilityMode) => void;
   onDiscussionRoundsChange: (value: number) => void;
   onSelectedAgentIdsChange: (value: string[]) => void;
+  onMcpModeChange: (value: McpMode) => void;
+  onSelectedMcpServerIdsChange: (value: string[]) => void;
+  onSkillModeChange: (value: McpMode) => void;
+  onSelectedSkillIdsChange: (value: number[]) => void;
+  onOpenDirectory: (tab?: 'skills' | 'connectors' | 'plugins') => void;
   onReset: () => void;
 }
 
@@ -30,6 +45,12 @@ const CAPABILITY_OPTIONS: Array<{ id: CapabilityMode; label: string }> = [
   { id: 'off', label: '关闭' },
   { id: 'auto', label: '自动' },
   { id: 'on', label: '开启' },
+];
+
+const MCP_MODE_OPTIONS: Array<{ id: McpMode; label: string }> = [
+  { id: 'off', label: '关闭' },
+  { id: 'auto', label: '自动' },
+  { id: 'custom', label: '自定义' },
 ];
 
 function SegmentedControl<T extends string>({
@@ -78,16 +99,39 @@ export default function RuntimeSettingsDrawer({
   deepThinking,
   discussionRounds,
   selectedAgentIds,
+  mcpMode,
+  selectedMcpServerIds,
+  skillMode,
+  selectedSkillIds,
   onClose,
   onResponseLengthChange,
   onWebSearchChange,
   onDeepThinkingChange,
   onDiscussionRoundsChange,
   onSelectedAgentIdsChange,
+  onMcpModeChange,
+  onSelectedMcpServerIdsChange,
+  onSkillModeChange,
+  onSelectedSkillIdsChange,
+  onOpenDirectory,
   onReset,
 }: RuntimeSettingsDrawerProps) {
+  void onOpenDirectory;
   const closeRef = useRef<HTMLButtonElement>(null);
   const [agents, setAgents] = useState<AgentConfig[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpPluginItem[]>([]);
+  const [mcpTogglingId, setMcpTogglingId] = useState<string | null>(null);
+  // Why: 运行设置 Skill 区块只展示已上架（published）的胶囊供会话勾选；
+  //   pending 待确认的在记忆面板 SkillInspector 里管理，不进挂载列表。
+  const [publishedSkills, setPublishedSkills] = useState<SkillCapsule[]>([]);
+
+  const refreshMcpServers = () => {
+    return getMcpMarketplace()
+      .then((items) => {
+        setMcpServers(items.filter((item) => item.is_installed));
+      })
+      .catch(() => setMcpServers([]));
+  };
 
   useEffect(() => {
     if (isOpen) {
@@ -97,6 +141,12 @@ export default function RuntimeSettingsDrawer({
           setAgents(response.agents.filter((agent) => agent.is_callable));
         })
         .catch(() => setAgents([]));
+      // Why: 运行设置中要能看到【所有已安装】MCP（含已停用），
+      // 会话模式 off/auto/custom 下能统一管理启停；custom 模式下再勾选本会话要使用的启用项。
+      void refreshMcpServers();
+      void getSkills(undefined, 'published')
+        .then((res) => setPublishedSkills(res.skills))
+        .catch(() => setPublishedSkills([]));
     }
   }, [isOpen]);
 
@@ -113,6 +163,34 @@ export default function RuntimeSettingsDrawer({
       selectedAgentIds.includes(agentId)
         ? selectedAgentIds.filter((id) => id !== agentId)
         : [...selectedAgentIds, agentId].slice(0, 5),
+    );
+  };
+
+  const toggleMcpServer = async (serverId: string) => {
+    setMcpTogglingId(serverId);
+    try {
+      await toggleMcp(serverId);
+      await refreshMcpServers();
+    } catch {
+      // 错误静默：列表保持原值，用户可见运行态失败由后端 stderr 提供
+    } finally {
+      setMcpTogglingId(null);
+    }
+  };
+
+  const toggleSelectedMcp = (serverId: string) => {
+    onSelectedMcpServerIdsChange(
+      selectedMcpServerIds.includes(serverId)
+        ? selectedMcpServerIds.filter((id) => id !== serverId)
+        : [...selectedMcpServerIds, serverId],
+    );
+  };
+
+  const toggleSelectedSkill = (skillId: number) => {
+    onSelectedSkillIdsChange(
+      selectedSkillIds.includes(skillId)
+        ? selectedSkillIds.filter((id) => id !== skillId)
+        : [...selectedSkillIds, skillId],
     );
   };
 
@@ -189,6 +267,183 @@ export default function RuntimeSettingsDrawer({
               options={CAPABILITY_OPTIONS}
               onChange={onDeepThinkingChange}
             />
+          </section>
+
+          <section className="border-b border-slate-200 py-5">
+            <h3 className="text-sm font-semibold text-slate-800">MCP 服务</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              管理已安装的 MCP 插件，控制本会话工具注入范围
+            </p>
+            <SegmentedControl
+              label="MCP 调用模式"
+              value={mcpMode}
+              options={MCP_MODE_OPTIONS}
+              onChange={onMcpModeChange}
+            />
+
+            <div className="mt-3 space-y-1.5">
+              {mcpServers.length === 0 ? (
+                <div className="rounded-md border border-dashed border-slate-200 py-4 text-center text-xs text-slate-400">
+                  暂无已安装的 MCP 服务
+                </div>
+              ) : (
+                mcpServers.map((server) => {
+                  const enabled = server.is_enabled;
+                  const toggling = mcpTogglingId === server.id;
+                  const status = server.runtime?.status ?? (enabled ? 'pending' : 'stopped');
+                  const statusColor =
+                    status === 'ready'
+                      ? 'bg-emerald-500'
+                      : status === 'error'
+                        ? 'bg-rose-500'
+                        : status === 'pending'
+                          ? 'bg-amber-400'
+                          : 'bg-slate-300';
+                  const statusText =
+                    status === 'ready'
+                      ? '就绪'
+                      : status === 'error'
+                        ? '异常'
+                        : status === 'pending'
+                          ? '启动中'
+                          : '已停用';
+                  const canSelect = enabled && mcpMode === 'custom';
+                  const selected = selectedMcpServerIds.includes(server.id);
+                  return (
+                    <div
+                      key={server.id}
+                      className={`flex items-center gap-3 rounded-lg border px-3 py-2.5 transition-colors ${
+                        selected && canSelect
+                          ? 'border-slate-800 bg-slate-50'
+                          : 'border-slate-200 bg-white'
+                      }`}
+                    >
+                      <span className="text-lg leading-none">{server.icon}</span>
+                      <button
+                        type="button"
+                        disabled={!canSelect}
+                        onClick={() => canSelect && toggleSelectedMcp(server.id)}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span className="truncate text-sm font-medium text-slate-800">
+                            {server.name}
+                          </span>
+                          <span
+                            className={`inline-block h-1.5 w-1.5 flex-shrink-0 rounded-full ${statusColor}`}
+                            title={statusText}
+                          />
+                          {server.runtime?.tool_count ? (
+                            <span className="flex-shrink-0 text-[10px] text-slate-400">
+                              {server.runtime.tool_count} 工具
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="truncate text-[11px] text-slate-500">
+                          {server.runtime?.last_error ? (
+                            <span className="text-rose-500">{server.runtime.last_error}</span>
+                          ) : (
+                            server.description
+                          )}
+                        </div>
+                      </button>
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={enabled}
+                        aria-label={`${enabled ? '停用' : '启用'} ${server.name}`}
+                        disabled={toggling}
+                        onClick={() => toggleMcpServer(server.id)}
+                        className={`relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors ${
+                          enabled ? 'bg-slate-800' : 'bg-slate-200'
+                        } ${toggling ? 'opacity-60' : ''}`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${
+                            enabled ? 'translate-x-4' : 'translate-x-0.5'
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {mcpMode === 'custom' && mcpServers.some((s) => s.is_enabled) && (
+              <p className="mt-2 text-[11px] text-slate-500">
+                自定义模式：点击列表项勾选本会话使用的服务；未勾选则本会话不调用该工具。
+              </p>
+            )}
+          </section>
+
+          <section className="border-b border-slate-200 py-5">
+            <h3 className="text-sm font-semibold text-slate-800">Skill 技能</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              挂载已上架的 Skill 手册，命中意图时把标准步骤注入对话
+            </p>
+            <SegmentedControl
+              label="Skill 挂载模式"
+              value={skillMode}
+              options={MCP_MODE_OPTIONS}
+              onChange={onSkillModeChange}
+            />
+
+            <div className="mt-3 space-y-1.5">
+              {publishedSkills.length === 0 ? (
+                <div className="rounded-md border border-dashed border-slate-200 py-4 text-center text-xs text-slate-400">
+                  暂无已上架的 Skill（在记忆面板 Skill 页签上架后出现）
+                </div>
+              ) : (
+                publishedSkills.map((skill) => {
+                  const canSelect = skillMode === 'custom';
+                  const selected = selectedSkillIds.includes(skill.skill_id);
+                  const typeLabel =
+                    skill.skill_type === 'code_pattern'
+                      ? '代码模式'
+                      : skill.skill_type === 'task_flow'
+                        ? '任务流程'
+                        : '修复模板';
+                  return (
+                    <button
+                      key={skill.skill_id}
+                      type="button"
+                      disabled={!canSelect}
+                      onClick={() => canSelect && toggleSelectedSkill(skill.skill_id)}
+                      className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors ${
+                        selected && canSelect
+                          ? 'border-slate-800 bg-slate-50'
+                          : 'border-slate-200 bg-white'
+                      } ${canSelect ? 'cursor-pointer' : 'cursor-default'}`}
+                    >
+                      <span className="text-lg leading-none">🧠</span>
+                      <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-1.5">
+                          <span className="truncate text-sm font-medium text-slate-800">
+                            {skill.skill_name}
+                          </span>
+                          <span className="flex-shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-500">
+                            {typeLabel}
+                          </span>
+                          {selected && canSelect ? (
+                            <span className="flex-shrink-0 text-[10px] text-slate-800">✓ 已挂载</span>
+                          ) : null}
+                        </span>
+                        <span className="block truncate text-[11px] text-slate-500">
+                          {skill.trigger_condition}
+                        </span>
+                      </span>
+                    </button>
+                  );
+                })
+              )}
+            </div>
+
+            {skillMode === 'custom' && publishedSkills.length > 0 && (
+              <p className="mt-2 text-[11px] text-slate-500">
+                自定义模式：点击勾选本会话挂载的 Skill；未勾选则本会话不注入该手册。
+              </p>
+            )}
           </section>
 
           {mode === 'agent' && (

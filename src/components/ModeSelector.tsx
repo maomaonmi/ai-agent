@@ -23,6 +23,14 @@ export const MODE_OPTIONS = [
     desc: '生成并实时预览完整网页',
     group: 'code',
   },
+  {
+    id: 'writing',
+    label: 'AI 写作',
+    icon: '✍️',
+    desc: '轻文档写作工作台',
+    group: 'chat',
+    hidden: true,
+  },
 ] as const;
 
 export type ModeType = typeof MODE_OPTIONS[number]['id'];
@@ -103,7 +111,7 @@ export default function ModeSelector({
       {visibleGroups.map((group) => {
         const isSelectedGroup = selectedMode.group === group.id;
         const isOpen = openGroup === group.id;
-        const groupModes = MODE_OPTIONS.filter((mode) => mode.group === group.id);
+        const groupModes = MODE_OPTIONS.filter((mode) => mode.group === group.id && !('hidden' in mode && mode.hidden));
 
         return (
           <div key={group.id} className="relative">
