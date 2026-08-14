@@ -11,6 +11,7 @@ import json
 import sqlite3
 import logging
 import os
+import re
 import shutil
 import sys
 import time
@@ -46,6 +47,16 @@ from agent_factory import (
 )
 from session_memory import SessionNotFoundError, SessionStore
 from model_settings import MODEL_CATALOG, ModelSettings, ModelSettingsStore, ServiceSettings, ServiceSettingsStore, capabilities_for_model, ensure_direct_connection
+from thesis_writing import (
+    ThesisBodyRequest,
+    ThesisOutlineRequest,
+    ThesisReferenceRequest,
+    build_thesis_outline_prompt,
+    build_thesis_chapter_prompt,
+    build_citation_verification_prompt,
+    choose_chapter_for_source,
+    normalize_search_results,
+)
 from glm_adapter import ChatAttachment, build_user_content, choose_glm_model, reasoning_from_delta, validate_attachment_mix
 from App import create_code_router
 from App import _build_memory_prompt_suffix, _skill_matched_events
@@ -1486,7 +1497,7 @@ class ChatRequest(BaseModel):
     message: str
     mode: Literal[
         "standard", "deep", "web", "research", "agent", "plan",
-        "distributed_plan", "code",
+        "distributed_plan", "code", "writing",
     ] = "standard"
     # 多智能体模式：前端可动态传入自定义 Agent
     custom_agents: Optional[List["CustomAgentConfig"]] = None
@@ -1510,7 +1521,7 @@ class ChatRequest(BaseModel):
 class CreateSessionRequest(BaseModel):
     mode: Literal[
         "standard", "deep", "web", "research", "agent", "plan",
-        "distributed_plan", "code",
+        "distributed_plan", "code", "writing",
     ] = "standard"
     title: str = Field(default="新会话", max_length=40)
 
@@ -5199,6 +5210,458 @@ async def delete_code_project(project_id: str):
     return {"status": "success", "deleted": project_id}
 
 
+def generate_thesis_outline_events(request: ThesisOutlineRequest, settings: ModelSettings):
+    """调用千问并把 NDJSON 模型输出转换为可逐节点消费的 SSE 事件。"""
+    def event(name: str, data: dict) -> str:
+        return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    event_names = {
+        "title": "thesis_title",
+        "preface": "thesis_preface",
+        "chapter": "thesis_chapter",
+        "section": "thesis_section",
+        "done": "thesis_outline_completed",
+    }
+    prompt = build_thesis_outline_prompt(request)
+    yield event("thesis_outline_started", {
+        "type": "thesis_outline_started",
+        "target_words": request.target_words,
+    })
+
+    try:
+        ensure_direct_connection(settings.base_url)
+        stream = OpenAI(
+            api_key=settings.api_key,
+            base_url=settings.base_url,
+            timeout=120,
+        ).chat.completions.create(
+            model=settings.model_id,
+            messages=[{"role": "user", "content": prompt}],
+            stream=True,
+            max_tokens=min(settings.max_tokens, 8_000),
+            temperature=0.35,
+            extra_body={"enable_thinking": False},
+        )
+        buffer = ""
+        semantic_events = 0
+        completion_emitted = False
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            token = str(getattr(chunk.choices[0].delta, "content", None) or "")
+            if not token:
+                continue
+            # 原始模型 token 也实时下发，前端可显示真实生成光标；结构节点则按完整 NDJSON 行落库。
+            yield event("thesis_outline_token", {"type": "token", "token": token})
+            buffer += token.replace("```json", "").replace("```", "")
+            lines = buffer.split("\n")
+            buffer = lines.pop()
+            for raw_line in lines:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload_type = payload.get("type") if isinstance(payload, dict) else None
+                event_name = event_names.get(payload_type)
+                if not event_name:
+                    continue
+                semantic_events += int(payload_type != "done")
+                completion_emitted = completion_emitted or payload_type == "done"
+                yield event(event_name, payload)
+
+        trailing = buffer.strip()
+        if trailing:
+            try:
+                payload = json.loads(trailing)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict) and payload.get("type") in event_names:
+                payload_type = payload["type"]
+                semantic_events += int(payload_type != "done")
+                completion_emitted = completion_emitted or payload_type == "done"
+                yield event(event_names[payload_type], payload)
+        if semantic_events == 0:
+            raise ValueError("模型未返回有效的大纲结构")
+        if not completion_emitted:
+            yield event("thesis_outline_completed", {"type": "done"})
+    except Exception as exc:
+        logger.exception("[writing] 论文大纲生成失败")
+        yield event("thesis_outline_failed", {
+            "type": "error",
+            "message": str(exc) or "论文大纲生成失败",
+        })
+
+
+@app.post("/api/writing/thesis/outline/stream")
+async def stream_thesis_outline(request: ThesisOutlineRequest):
+    qwen_settings = model_settings_store.load("qwen")
+    if not qwen_settings.api_key:
+        raise HTTPException(status_code=422, detail="请先在运行设置中配置千问 API Key")
+    return StreamingResponse(
+        generate_thesis_outline_events(request, qwen_settings),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _find_dashscope_search_results(payload: object) -> list[dict]:
+    if isinstance(payload, dict):
+        value = payload.get("search_results")
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+        for child in payload.values():
+            found = _find_dashscope_search_results(child)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for child in payload:
+            found = _find_dashscope_search_results(child)
+            if found:
+                return found
+    return []
+
+
+def _find_deep_research_sources(payload: object) -> list[dict]:
+    if isinstance(payload, dict):
+        for key in ("webSites", "references"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        for child in payload.values():
+            found = _find_deep_research_sources(child)
+            if found:
+                return found
+    elif isinstance(payload, list):
+        for child in payload:
+            found = _find_deep_research_sources(child)
+            if found:
+                return found
+    return []
+
+
+def generate_thesis_reference_events(request: ThesisReferenceRequest, settings: ModelSettings):
+    """逐章调用 DashScope 原生联网搜索，并只转发服务端返回的真实来源。"""
+    def event(name: str, data: dict) -> str:
+        return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    native_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+    ensure_direct_connection(native_url)
+    headers = {
+        "Authorization": f"Bearer {settings.api_key}",
+        "Content-Type": "application/json",
+        "X-DashScope-SSE": "enable",
+    }
+    with httpx.Client(timeout=httpx.Timeout(120.0, connect=20.0)) as client:
+        for chapter in request.chapters:
+            yield event("thesis_chapter_search_started", {
+                "type": "chapter_search_started", "chapter_id": chapter.id,
+            })
+            query = (
+                f"围绕论文《{request.instruction}》的章节“{chapter.title}”检索权威、可引用的中文或英文资料。"
+                f"章节重点：{chapter.summary or '结合论文主题判断'}。优先近五年论文、政府或高校资料，返回 6 个来源。"
+            )
+            body = {
+                "model": settings.model_id,
+                "input": {"messages": [{"role": "user", "content": query}]},
+                "parameters": {
+                    "result_format": "message",
+                    "incremental_output": True,
+                    "enable_search": True,
+                    "search_options": {
+                        "search_strategy": "max",
+                        "forced_search": True,
+                        "enable_source": True,
+                        "prepend_search_result": True,
+                    },
+                },
+            }
+            try:
+                raw_results: list[dict] = []
+                with client.stream("POST", native_url, headers=headers, json=body) as response:
+                    response.raise_for_status()
+                    for line in response.iter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        if not raw or raw == "[DONE]":
+                            continue
+                        try:
+                            frame = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        found = _find_dashscope_search_results(frame)
+                        if found:
+                            raw_results = found
+                references = normalize_search_results(chapter.id, raw_results, limit=6)
+                for reference in references:
+                    yield event("thesis_reference_found", {"type": "reference_found", **reference})
+                if references:
+                    try:
+                        extraction_client = OpenAI(api_key=settings.api_key, base_url=settings.base_url, timeout=180)
+                        urls = [reference["url"] for reference in references]
+                        extraction = extraction_client.responses.create(
+                            model=settings.model_id,
+                            input=(
+                                f"请逐一访问以下网页，为论文《{request.instruction}》的章节“{chapter.title}”提取可核验的关键证据。"
+                                "只概括网页实际内容，不要补充网页中不存在的事实。\n" + "\n".join(urls)
+                            ),
+                            tools=[{"type": "web_search"}, {"type": "web_extractor"}],
+                        )
+                        reference_by_url = {reference["url"]: reference for reference in references}
+                        for output_item in getattr(extraction, "output", []) or []:
+                            if getattr(output_item, "type", "") != "web_extractor_call":
+                                continue
+                            evidence = str(getattr(output_item, "output", "") or "").strip()[:8_000]
+                            for extracted_url in getattr(output_item, "urls", []) or []:
+                                reference = reference_by_url.get(str(extracted_url))
+                                if reference and evidence:
+                                    yield event("thesis_reference_scraped", {
+                                        "type": "reference_scraped", "chapter_id": chapter.id,
+                                        "id": reference["id"], "url": reference["url"],
+                                        "evidence": evidence, "status": "scraped",
+                                    })
+                    except Exception:
+                        # 搜索来源仍然有效；网页抓取失败只降级为摘要，不把整章标记失败。
+                        logger.warning("[writing] 参考网页抓取降级为搜索摘要: %s", chapter.id, exc_info=True)
+                yield event("thesis_chapter_search_completed", {
+                    "type": "chapter_search_completed", "chapter_id": chapter.id, "count": len(references),
+                })
+            except Exception as exc:
+                logger.exception("[writing] 论文章节参考资料搜索失败: %s", chapter.id)
+                yield event("thesis_chapter_search_failed", {
+                    "type": "chapter_search_failed", "chapter_id": chapter.id,
+                    "message": str(exc) or "参考资料搜索失败",
+                })
+
+
+def _build_thesis_deep_research_payload(research_prompt: str) -> dict:
+    """直接构造 Deep Research 第二步消息，避免接口停在澄清问题阶段。"""
+    return {
+        "model": "qwen-deep-research",
+        "input": {
+            "messages": [
+                {"role": "user", "content": research_prompt},
+                {
+                    "role": "assistant",
+                    "content": "请确认研究范围、来源要求和期望深度。",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        "按上述论文主题和章节范围直接开展研究。优先使用近期、权威、可访问的真实网页来源，"
+                        "每章提供 4 至 6 条即可；无需继续反问。"
+                    ),
+                },
+            ],
+        },
+        "output_format": "model_summary_report",
+        "parameters": {
+            "enable_feedback": False,
+            "incremental_output": True,
+        },
+    }
+
+
+def _normalize_deep_research_reference(chapter_id: str, source: dict, sequence: int) -> dict | None:
+    """归一化单条 Deep Research 来源，并保证章节内 ID 唯一。"""
+    normalized = normalize_search_results(chapter_id, [source], limit=1)
+    if not normalized:
+        return None
+    normalized[0]["id"] = f"{chapter_id}-ref-{sequence}"
+    return normalized[0]
+
+
+async def generate_thesis_deep_reference_events(request: ThesisReferenceRequest, settings: ModelSettings):
+    """单次 Qwen-Deep-Research 覆盖整篇大纲；每章达到 4 条后提前关闭研究流。"""
+    def event(name: str, data: dict) -> str:
+        return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    chapters = [chapter.model_dump() for chapter in request.chapters]
+    counts = {chapter.id: 0 for chapter in request.chapters}
+    seen_urls: set[str] = set()
+    for chapter in request.chapters:
+        yield event("thesis_chapter_search_started", {"type": "chapter_search_started", "chapter_id": chapter.id})
+
+    chapter_list = "\n".join(f"- [{chapter.id}] {chapter.title}：{chapter.summary}" for chapter in request.chapters)
+    research_prompt = f"""围绕论文《{request.instruction}》执行一次高效率的资料研究。
+需要覆盖以下章节：
+{chapter_list}
+
+请优先检索权威论文、政府、高校及研究机构网页。每章只需要 4 至 6 个不同来源，不要为增加数量重复搜索同一网页；完成基本来源覆盖后即可结束研究。"""
+    payload = _build_thesis_deep_research_payload(research_prompt)
+    headers = {
+        "Authorization": f"Bearer {settings.api_key}",
+        "Content-Type": "application/json",
+        "X-DashScope-SSE": "enable",
+    }
+    current_phase = ""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=20.0)) as client:
+            async with client.stream("POST", DASHSCOPE_DEEP_RESEARCH_URL, headers=headers, json=payload) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    chunk = _parse_dashscope_sse_line(line)
+                    if not chunk:
+                        continue
+                    phase = str(chunk.get("phase") or "")
+                    if phase and phase != current_phase:
+                        current_phase = phase
+                        yield event("thesis_research_phase", {
+                            "type": "research_phase", "phase": phase, "status": str(chunk.get("status") or ""),
+                        })
+                    deep_research = (chunk.get("extra") or {}).get("deep_research") or {}
+                    sources = _find_deep_research_sources(deep_research)
+                    if not sources:
+                        continue
+                    context = json.dumps(deep_research, ensure_ascii=False)
+                    for source in sources:
+                        url = str(source.get("url") or "").strip()
+                        if not url or url in seen_urls:
+                            continue
+                        available_chapters = [chapter for chapter in chapters if counts[str(chapter["id"])] < 6]
+                        if not available_chapters:
+                            break
+                        chapter_id = choose_chapter_for_source(available_chapters, source, current_query=context, counts=counts)
+                        if counts[chapter_id] >= 6:
+                            continue
+                        normalized = _normalize_deep_research_reference(chapter_id, source, counts[chapter_id] + 1)
+                        if not normalized:
+                            continue
+                        seen_urls.add(url)
+                        counts[chapter_id] += 1
+                        yield event("thesis_reference_found", {"type": "reference_found", **normalized})
+                    if counts and all(count >= 4 for count in counts.values()):
+                        break
+        for chapter in request.chapters:
+            yield event("thesis_chapter_search_completed", {
+                "type": "chapter_search_completed", "chapter_id": chapter.id, "count": counts[chapter.id],
+            })
+    except Exception as exc:
+        logger.exception("[writing] Qwen Deep Research 论文资料检索失败")
+        for chapter in request.chapters:
+            if counts[chapter.id] < 4:
+                yield event("thesis_chapter_search_failed", {
+                    "type": "chapter_search_failed", "chapter_id": chapter.id,
+                    "message": str(exc) or "Deep Research 资料检索失败",
+                })
+
+
+@app.post("/api/writing/thesis/references/stream")
+async def stream_thesis_references(request: ThesisReferenceRequest):
+    qwen_settings = model_settings_store.load("qwen")
+    if not qwen_settings.api_key:
+        raise HTTPException(status_code=422, detail="请先在运行设置中配置千问 API Key")
+    return StreamingResponse(
+        generate_thesis_deep_reference_events(request, qwen_settings),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
+def generate_thesis_body_events(request: ThesisBodyRequest, settings: ModelSettings):
+    """按大章节顺序生成正文；每个 token 都带 chapter_id，客户端可安全暂停并续写。"""
+    def event(name: str, data: dict) -> str:
+        return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    completed = set(request.completed_chapter_ids)
+    yield event("thesis_body_started", {"type": "body_started"})
+    try:
+        ensure_direct_connection(settings.base_url)
+        client = OpenAI(api_key=settings.api_key, base_url=settings.base_url, timeout=180)
+        generated_any = False
+        for chapter in request.chapters:
+            if chapter.id in completed:
+                continue
+            generated_any = True
+            yield event("thesis_body_chapter_started", {
+                "type": "body_chapter_started", "chapter_id": chapter.id,
+            })
+            stream = client.chat.completions.create(
+                model=settings.model_id,
+                messages=[{"role": "user", "content": build_thesis_chapter_prompt(request, chapter)}],
+                stream=True,
+                temperature=0.45,
+                max_tokens=min(settings.max_tokens, max(1_500, min(8_000, chapter.target_words * 2 or 3_000))),
+                extra_body={"enable_thinking": False},
+            )
+            chapter_text = ""
+            emitted_reference_ids: set[str] = set()
+            allowed_reference_ids = {reference.id for reference in chapter.references}
+            for chunk in stream:
+                if not chunk.choices:
+                    continue
+                token = str(getattr(chunk.choices[0].delta, "content", None) or "")
+                if not token:
+                    continue
+                chapter_text += token
+                yield event("thesis_body_token", {
+                    "type": "body_token", "chapter_id": chapter.id, "token": token,
+                })
+                for reference_id in re.findall(r"\[ref:([^\]]+)\]", chapter_text[-500:]):
+                    if reference_id in allowed_reference_ids and reference_id not in emitted_reference_ids:
+                        emitted_reference_ids.add(reference_id)
+                        yield event("thesis_body_citation", {
+                            "type": "body_citation", "chapter_id": chapter.id,
+                            "reference_id": reference_id,
+                        })
+            if emitted_reference_ids:
+                yield event("thesis_body_verification_started", {
+                    "type": "body_verification_started", "chapter_id": chapter.id,
+                })
+                verification = client.chat.completions.create(
+                    model=settings.model_id,
+                    messages=[{"role": "user", "content": build_citation_verification_prompt(chapter, chapter_text, emitted_reference_ids)}],
+                    temperature=0,
+                    max_tokens=1_500,
+                    extra_body={"enable_thinking": False},
+                )
+                verification_text = str(verification.choices[0].message.content or "").strip().replace("```json", "").replace("```", "")
+                try:
+                    verification_payload = json.loads(verification_text)
+                except json.JSONDecodeError:
+                    verification_payload = {}
+                for decision in verification_payload.get("citations", []) if isinstance(verification_payload, dict) else []:
+                    reference_id = str(decision.get("reference_id") or "")
+                    status = str(decision.get("status") or "")
+                    if reference_id not in emitted_reference_ids or status not in {"verified", "partial", "unsupported"}:
+                        continue
+                    yield event("thesis_body_citation_verified", {
+                        "type": "body_citation_verified", "chapter_id": chapter.id,
+                        "reference_id": reference_id, "status": status,
+                        "reason": str(decision.get("reason") or "")[:500],
+                    })
+            yield event("thesis_body_chapter_completed", {
+                "type": "body_chapter_completed", "chapter_id": chapter.id,
+                "character_count": len(re.sub(r"\s", "", chapter_text)),
+            })
+        if not generated_any and completed:
+            yield event("thesis_body_completed", {"type": "body_completed"})
+            return
+        yield event("thesis_body_completed", {"type": "body_completed"})
+    except Exception as exc:
+        logger.exception("[writing] 论文正文生成失败")
+        yield event("thesis_body_failed", {"type": "body_error", "message": str(exc) or "论文正文生成失败"})
+
+
+@app.post("/api/writing/thesis/body/stream")
+async def stream_thesis_body(request: ThesisBodyRequest):
+    qwen_settings = model_settings_store.load("qwen")
+    if not qwen_settings.api_key:
+        raise HTTPException(status_code=422, detail="请先在运行设置中配置千问 API Key")
+    return StreamingResponse(
+        generate_thesis_body_events(request, qwen_settings),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/chat")
 async def chat_stream(request: ChatRequest):
     if not request.message.strip():
@@ -5574,8 +6037,9 @@ def _parse_dashscope_sse_line(raw_line: str) -> dict | None:
         status = message.get("status", "")
         extra = message.get("extra", {})
         
-        # Why: 即使 content 为空，phase 和 status 也有价值（如阶段切换信号）
-        if not phase and not content:
+        # Deep Research 会发送仅携带 extra.deep_research.webSites/references 的来源帧。
+        # 这类帧没有 phase/content，仍必须交给调用方提取真实联网来源。
+        if not phase and not content and not status and not extra:
             return None
             
         return {

@@ -77,6 +77,22 @@ class SessionApiTests(unittest.TestCase):
             "code",
         )
 
+    def test_writing_mode_session_can_be_created_on_first_submission(self):
+        created_response = self.client.post(
+            "/api/sessions",
+            json={"mode": "writing", "title": "AI 写作草稿"},
+        )
+
+        self.assertEqual(created_response.status_code, 201)
+        created = created_response.json()
+        self.assertEqual(created["mode"], "writing")
+
+        history_response = self.client.get(
+            f"/api/sessions/{created['session_id']}/history"
+        )
+        self.assertEqual(history_response.status_code, 200)
+        self.assertEqual(history_response.json()["session"]["mode"], "writing")
+
     def test_chat_request_accepts_optional_session_id(self):
         request = main.ChatRequest(
             message="hello",

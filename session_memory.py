@@ -21,6 +21,7 @@ SESSION_MODES = {
     "plan",
     "distributed_plan",
     "code",
+    "writing",
 }
 
 
