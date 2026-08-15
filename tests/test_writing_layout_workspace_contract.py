@@ -30,5 +30,5 @@ def test_header_has_file_manifest_and_contextual_download_menu():
 
 def test_layout_workspace_does_not_receive_body_editor_mutation_callback():
     workspace = (ROOT / 'WritingWorkspace.tsx').read_text(encoding='utf-8')
-    assert '<WritingLayoutWorkspace document={writingDoc} onTemplate={applyLayoutTemplate} onMetadata={updateLayoutMetadata}/>' in workspace
+    assert '<WritingLayoutWorkspace document={writingDoc} tocSections={layoutTocSections} onTemplate={applyLayoutTemplate} onMetadata={updateLayoutMetadata}/>' in workspace
     assert 'onSectionsChange={updateLayoutSections}' not in workspace

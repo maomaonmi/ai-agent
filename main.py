@@ -6054,6 +6054,34 @@ def _parse_dashscope_sse_line(raw_line: str) -> dict | None:
         return None
 
 
+def normalize_qwen_research_sources(items: list | None) -> list[dict]:
+    """Convert DashScope web sites/references to the persisted research chunk contract."""
+    normalized: list[dict] = []
+    seen: set[str] = set()
+    for raw in items or []:
+        if not isinstance(raw, dict):
+            continue
+        url = str(raw.get("url") or raw.get("link") or "").strip()
+        title = str(raw.get("title") or raw.get("name") or "未命名来源").strip()
+        text = str(raw.get("text") or raw.get("description") or raw.get("snippet") or raw.get("content") or "").strip()
+        identity = url or f"{title}\n{text}"
+        if not identity.strip() or identity in seen:
+            continue
+        seen.add(identity)
+        try:
+            score = float(raw.get("score", 1.0))
+        except (TypeError, ValueError):
+            score = 1.0
+        normalized.append({
+            "id": len(normalized) + 1,
+            "title": title,
+            "url": url,
+            "score": max(0.0, min(score, 1.0)),
+            "text": text,
+        })
+    return normalized
+
+
 async def generate_qwen_deep_research_events(
     query: str,
     session_id: str | None,
@@ -6184,6 +6212,7 @@ async def generate_qwen_deep_research_events(
     full_report = ""
     last_phase = ""
     references = []  # Why: 收集搜索结果引用
+    persisted_web_docs: list[dict] = []
 
     async for chunk in _call_dashscope(messages, enable_fb=False):
         if chunk.get("usage"):
@@ -6226,16 +6255,14 @@ async def generate_qwen_deep_research_events(
             # Why: WebResearch 阶段包含 query 和 webSites
             web_sites = deep_research.get("webSites", [])
             if web_sites:
+                web_docs = normalize_qwen_research_sources(web_sites)
+                persisted_web_docs = normalize_qwen_research_sources([*persisted_web_docs, *web_docs])
                 yield sse_format("web_docs", {
                     "docs": [
-                        {
-                            "title": site.get("title", ""),
-                            "url": site.get("url", ""),
-                            "description": site.get("description", ""),
-                            "icon": site.get("icon", ""),
-                        }
-                        for site in web_sites
+                        {**source, "content": source["text"]}
+                        for source in web_docs
                     ],
+                    "count": len(web_docs),
                 })
             
             # Why: answer 阶段包含 references（最终引用列表）
@@ -6271,10 +6298,11 @@ async def generate_qwen_deep_research_events(
         except Exception:
             logger.exception("[memory] qwen research 后置落账失败 sid=%s", session_id)
 
+    persisted_sources = normalize_qwen_research_sources([*references, *persisted_web_docs])
     yield sse_format("done", {
         "total_pages": 0,  # 千问 API 不返回具体页面数
         "total_chunks": 0,
-        "top_chunks": [],
+        "top_chunks": persisted_sources,
     })
     yield sse_format("research_reason_done", {
         "reasoning": "",
