@@ -9,6 +9,7 @@ import pytest
 
 from video_engine import (
     QwenVideoProvider,
+    ZhipuVideoProvider,
     VideoGenerationRequest,
     VideoJobRepository,
     VideoTaskStatus,
@@ -136,6 +137,66 @@ def test_qwen_provider_maps_success_and_failure_snapshots():
     assert failure.status is VideoTaskStatus.FAILED
     assert failure.error_code == "BadPrompt"
     assert failure.error_message == "bad prompt"
+
+
+def test_zhipu_provider_uses_async_result_endpoint_and_reads_video_result():
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.setdefault("urls", []).append(str(request.url))
+        if request.method == "POST":
+            captured["body"] = json.loads(request.content)
+            return httpx.Response(200, json={"id": "zhipu-task-1", "task_status": "PROCESSING"})
+        return httpx.Response(
+            200,
+            json={
+                "id": "zhipu-task-1",
+                "task_status": "SUCCESS",
+                "video_result": [{"url": "https://cdn.test/cogvideo.mp4", "cover_image_url": "https://cdn.test/cover.jpg"}],
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = ZhipuVideoProvider(api_key="test-key", client=client, base_url="https://open.bigmodel.test/api/paas/v4")
+    request = VideoGenerationRequest(
+        prompt="电影级 hip-hop 舞蹈",
+        model="cogvideox-3",
+        ratio="16:9",
+        duration=5,
+        resolution="720P",
+    )
+
+    async def run():
+        submission = await provider.submit(request)
+        snapshot = await provider.retrieve(submission.provider_task_id)
+        return submission, snapshot
+
+    submission, snapshot = asyncio.run(run())
+    asyncio.run(client.aclose())
+
+    assert submission.provider_task_id == "zhipu-task-1"
+    assert submission.provider_status is VideoTaskStatus.RUNNING
+    assert captured["body"]["duration"] == 5
+    assert captured["urls"] == [
+        "https://open.bigmodel.test/api/paas/v4/videos/generations",
+        "https://open.bigmodel.test/api/paas/v4/async-result/zhipu-task-1",
+    ]
+    assert snapshot.status is VideoTaskStatus.SUCCEEDED
+    assert snapshot.video_url == "https://cdn.test/cogvideo.mp4"
+
+
+def test_zhipu_provider_maps_fail_status_from_async_result():
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"task_status": "FAIL", "error": {"code": "ContentFilter", "message": "内容不合规"}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = ZhipuVideoProvider(api_key="test-key", client=client, base_url="https://open.bigmodel.test/api/paas/v4")
+    snapshot = asyncio.run(provider.retrieve("zhipu-task-failed"))
+    asyncio.run(client.aclose())
+
+    assert snapshot.status is VideoTaskStatus.FAILED
+    assert snapshot.error_code == "ContentFilter"
+    assert snapshot.error_message == "内容不合规"
 
 
 def test_video_job_repository_is_idempotent_and_protects_terminal_state(tmp_path):

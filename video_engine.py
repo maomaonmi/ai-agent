@@ -267,7 +267,7 @@ def _map_provider_status(value: Any) -> VideoTaskStatus:
         return VideoTaskStatus.RUNNING
     if normalized in {"SUCCEEDED", "SUCCESS", "COMPLETED"}:
         return VideoTaskStatus.SUCCEEDED
-    if normalized in {"FAILED", "ERROR"}:
+    if normalized in {"FAILED", "FAIL", "ERROR"}:
         return VideoTaskStatus.FAILED
     if normalized in {"CANCELED", "CANCELLED"}:
         return VideoTaskStatus.CANCELLED
@@ -373,6 +373,7 @@ class ZhipuVideoProvider:
             "quality": request.quality,
             "with_audio": request.audio if request.audio is not None else True,
             "size": self._size(request),
+            "duration": request.duration,
             "fps": request.fps,
         }
         response = await self.client.post(f"{self.base_url}/videos/generations", headers=self._headers(), json=body)
@@ -386,22 +387,33 @@ class ZhipuVideoProvider:
         return ProviderSubmission(task_id, _map_provider_status(payload.get("task_status")), payload.get("request_id"))
 
     async def retrieve(self, provider_task_id: str) -> ProviderTaskSnapshot:
-        response = await self.client.get(f"{self.base_url}/videos/{provider_task_id}", headers=self._headers())
+        response = await self.client.get(f"{self.base_url}/async-result/{provider_task_id}", headers=self._headers())
         payload = _json_or_none(response)
         if response.is_error:
             raise _error_from_response(response, payload)
-        raw_status = str(payload.get("task_status") or payload.get("status") or "UNKNOWN") if isinstance(payload, dict) else "UNKNOWN"
-        output = payload.get("video_result") or payload.get("video") or payload.get("output") or {} if isinstance(payload, dict) else {}
-        if not isinstance(output, dict):
-            output = {}
+        data = payload if isinstance(payload, dict) else {}
+        raw_status = str(data.get("task_status") or data.get("status") or "UNKNOWN")
+        video_result = data.get("video_result")
+        if isinstance(video_result, list):
+            video_result = next((item for item in video_result if isinstance(item, dict)), {})
+        elif not isinstance(video_result, dict):
+            video_result = data.get("video") or data.get("output") or {}
+        if not isinstance(video_result, dict):
+            video_result = {}
+        if raw_status == "UNKNOWN":
+            if video_result.get("url") or video_result.get("video_url"):
+                raw_status = "SUCCESS"
+            elif data.get("error"):
+                raw_status = "FAIL"
+        error_payload = data.get("error") if isinstance(data.get("error"), dict) else {}
         return ProviderTaskSnapshot(
             provider_task_id=provider_task_id,
             status=_map_provider_status(raw_status),
             provider_status=raw_status,
-            video_url=output.get("video_url") or output.get("url") or (payload.get("video_url") if isinstance(payload, dict) else None),
-            error_code=payload.get("error_code") if isinstance(payload, dict) else None,
-            error_message=payload.get("message") if isinstance(payload, dict) else None,
-            raw=payload if isinstance(payload, dict) else None,
+            video_url=video_result.get("video_url") or video_result.get("url") or data.get("video_url"),
+            error_code=data.get("error_code") or error_payload.get("code"),
+            error_message=data.get("message") or error_payload.get("message"),
+            raw=data,
         )
 
 
