@@ -86,6 +86,31 @@ def create_video_router(repository: VideoJobRepository, monitor: VideoTaskMonito
         rows = repository.list_tasks(status=task_status, page=page, page_size=page_size)
         return {"tasks": [_task_payload(row) for row in rows], "page": page, "pageSize": page_size}
 
+    @router.delete("/api/video/tasks/{task_id}")
+    async def delete_video_task(task_id: str) -> Any:
+        try:
+            deleted = repository.delete_task(task_id)
+        except ValueError as exc:
+            return _error_response("TASK_NOT_TERMINAL", str(exc), status_code=409)
+        if deleted is None:
+            return _error_response("TASK_NOT_FOUND", "视频任务不存在", status_code=404)
+
+        # Only remove files below the configured asset root.  The database row
+        # is already gone, while an unlink failure merely leaves a recoverable
+        # orphan for later storage cleanup.
+        if asset_root:
+            from pathlib import Path
+
+            root = Path(asset_root).resolve()
+            for asset in deleted["assets"]:
+                path = Path(asset["storage_path"]).resolve()
+                if root in path.parents and path.is_file():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+        return {"deleted": True, "task_id": task_id}
+
     @router.get("/api/video/assets/{asset_id}")
     async def get_video_asset(asset_id: str) -> Any:
         asset = repository.get_asset(asset_id)

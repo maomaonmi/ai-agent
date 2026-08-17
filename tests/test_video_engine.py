@@ -162,3 +162,46 @@ def test_video_job_repository_is_idempotent_and_protects_terminal_state(tmp_path
 
     with sqlite3.connect(tmp_path / "video.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM video_generation_tasks").fetchone()[0] == 1
+
+
+def test_video_job_repository_deletes_terminal_task_and_cascades_assets(tmp_path):
+    repository = VideoJobRepository(tmp_path / "video.sqlite3")
+    request = VideoGenerationRequest(
+        prompt="云海之上的日出",
+        model="wan2.6-t2v",
+        ratio="16:9",
+        duration=5,
+        resolution="720P",
+    )
+    task = repository.create_task(request)
+    asset = repository.create_asset(
+        task["id"],
+        storage_path=str(tmp_path / "assets" / "video.mp4"),
+        mime_type="video/mp4",
+        size_bytes=12,
+        sha256="hash",
+    )
+    repository.update_task(task["id"], status=VideoTaskStatus.SUCCEEDED, progress=100, video_url="https://cdn.test/video.mp4")
+
+    deleted = repository.delete_task(task["id"])
+
+    assert deleted is not None
+    assert deleted["assets"][0]["id"] == asset["id"]
+    assert repository.get_task(task["id"]) is None
+    assert repository.get_asset(asset["id"]) is None
+    assert repository.list_events(task["id"]) == []
+
+
+def test_video_job_repository_rejects_delete_for_active_task(tmp_path):
+    repository = VideoJobRepository(tmp_path / "video.sqlite3")
+    task = repository.create_task(VideoGenerationRequest(
+        prompt="正在生成的镜头",
+        model="wan2.6-t2v",
+        ratio="16:9",
+        duration=5,
+        resolution="720P",
+    ))
+
+    with pytest.raises(ValueError, match="不能删除"):
+        repository.delete_task(task["id"])
+    assert repository.get_task(task["id"]) is not None

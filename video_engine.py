@@ -539,6 +539,28 @@ class VideoJobRepository:
             ).fetchone()
             return dict(row) if row else None
 
+    def delete_task(self, task_id: str) -> dict[str, Any] | None:
+        """Delete a terminal task and its replayable events/assets.
+
+        Active provider jobs are intentionally protected: removing their local
+        record would make the background monitor unable to reconcile them.
+        SQLite foreign keys cascade the event and asset metadata rows.
+        """
+
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM video_generation_tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                return None
+            status = VideoTaskStatus(row["status"])
+            if status not in TERMINAL_VIDEO_STATUSES:
+                raise ValueError("视频任务仍在生成中，不能删除")
+            assets = connection.execute(
+                "SELECT * FROM video_generation_assets WHERE task_id = ? ORDER BY created_at ASC",
+                (task_id,),
+            ).fetchall()
+            connection.execute("DELETE FROM video_generation_tasks WHERE id = ?", (task_id,))
+            return {"task": dict(row), "assets": [dict(asset) for asset in assets]}
+
     def list_tasks(self, *, status: str | None = None, page: int = 1, page_size: int = 20) -> list[dict[str, Any]]:
         safe_page = max(1, page)
         safe_size = min(100, max(1, page_size))

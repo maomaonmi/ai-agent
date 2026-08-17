@@ -18,6 +18,16 @@ def test_video_workspace_has_sidebar_entry_and_independent_view():
     assert "下载视频" in workspace
 
 
+def test_video_workspace_uses_full_width_responsive_theme_contract():
+    workspace = (FRONTEND / "features" / "video" / "VideoStudioWorkspace.tsx").read_text(encoding="utf-8")
+
+    assert "max-w-none" in workspace
+    assert "lg:grid-cols-[clamp(280px,24vw,420px)_minmax(0,1fr)]" in workspace
+    assert "bg-slate-50" in workspace
+    assert "dark:bg-[#0f1013]" in workspace
+    assert "dark:border-white/[0.08]" in workspace
+
+
 def test_video_api_client_exposes_polling_and_sse_contract():
     api = (FRONTEND / "lib" / "api.ts").read_text(encoding="utf-8")
 
@@ -26,3 +36,13 @@ def test_video_api_client_exposes_polling_and_sse_contract():
     assert "openVideoTaskStream" in api
     assert "/api/video/create_task" in api
     assert "/api/video/stream/" in api
+    assert "deleteVideoTask" in api
+
+
+def test_video_history_clears_preview_state_and_exposes_delete_action():
+    workspace = (FRONTEND / "features" / "video" / "VideoStudioWorkspace.tsx").read_text(encoding="utf-8")
+
+    assert "const openHistory" in workspace
+    assert "setCreatedTask(null)" in workspace
+    assert "onDelete" in workspace
+    assert "删除" in workspace
