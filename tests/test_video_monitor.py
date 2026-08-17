@@ -97,3 +97,40 @@ def test_monitor_marks_orphaned_pending_task_as_failed(tmp_path):
 
     assert failed["status"] == "FAILED"
     assert failed["error_code"] == "SUBMISSION_INCOMPLETE"
+
+
+def test_monitor_does_not_poll_while_provider_submission_is_in_flight(tmp_path):
+    repository = VideoJobRepository(tmp_path / "video.sqlite3")
+
+    async def exercise() -> dict:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class DelayedProvider:
+            async def submit(self, request: VideoGenerationRequest) -> ProviderSubmission:
+                started.set()
+                await release.wait()
+                return ProviderSubmission("remote-delayed", VideoTaskStatus.PENDING, "request-delayed")
+
+            async def retrieve(self, provider_task_id: str) -> ProviderTaskSnapshot:
+                return ProviderTaskSnapshot(provider_task_id, VideoTaskStatus.PENDING, "PENDING")
+
+        monitor = VideoTaskMonitor(repository, {"qianwen": DelayedProvider()}, poll_interval_seconds=1)
+        await monitor.start()
+        task = repository.create_task(_request())
+        submission = asyncio.create_task(monitor.submit_task(task["id"], _request()))
+
+        await started.wait()
+        await asyncio.sleep(1.2)
+        during_submission = repository.get_task(task["id"])
+        release.set()
+        await submission
+        await monitor.stop()
+        return during_submission
+
+    during_submission = asyncio.run(exercise())
+
+    assert during_submission["status"] == "PENDING"
+    assert during_submission["error_code"] is None
+    stored = repository.get_task(during_submission["id"])
+    assert stored["provider_task_id"] == "remote-delayed"

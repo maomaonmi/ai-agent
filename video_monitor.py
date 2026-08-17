@@ -41,6 +41,7 @@ class VideoTaskMonitor:
         self.max_task_age_seconds = max(60.0, max_task_age_seconds)
         self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
         self.active_task_ids: set[str] = set()
+        self.submitting_task_ids: set[str] = set()
         self._runner: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
 
@@ -69,32 +70,36 @@ class VideoTaskMonitor:
                 error_code="PROVIDER_NOT_CONFIGURED",
                 error_message=f"未配置{capability['provider']}视频服务",
             ) or {}
+        self.submitting_task_ids.add(task_id)
         try:
-            submission = await provider.submit(request)
-        except VideoProviderError as exc:
-            return self.repository.update_task(
-                task_id,
-                status=VideoTaskStatus.FAILED,
-                error_code=exc.code,
-                error_message=str(exc),
-            ) or {}
-        except Exception as exc:  # provider boundary: never crash the scheduler
-            return self.repository.update_task(
-                task_id,
-                status=VideoTaskStatus.FAILED,
-                error_code="PROVIDER_REQUEST_FAILED",
-                error_message="视频供应商请求失败，请稍后重试",
-            ) or {}
+            try:
+                submission = await provider.submit(request)
+            except VideoProviderError as exc:
+                return self.repository.update_task(
+                    task_id,
+                    status=VideoTaskStatus.FAILED,
+                    error_code=exc.code,
+                    error_message=str(exc),
+                ) or {}
+            except Exception:  # provider boundary: never crash the scheduler
+                return self.repository.update_task(
+                    task_id,
+                    status=VideoTaskStatus.FAILED,
+                    error_code="PROVIDER_REQUEST_FAILED",
+                    error_message="视频供应商请求失败，请稍后重试",
+                ) or {}
 
-        self.active_task_ids.add(task_id)
-        return self.repository.update_task(
-            task_id,
-            status=submission.provider_status if submission.provider_status not in TERMINAL_VIDEO_STATUSES else VideoTaskStatus.PENDING,
-            progress=5,
-            provider_task_id=submission.provider_task_id,
-            provider_status=submission.provider_status.value,
-            next_poll_at=time.time(),
-        ) or {}
+            self.active_task_ids.add(task_id)
+            return self.repository.update_task(
+                task_id,
+                status=submission.provider_status if submission.provider_status not in TERMINAL_VIDEO_STATUSES else VideoTaskStatus.PENDING,
+                progress=5,
+                provider_task_id=submission.provider_task_id,
+                provider_status=submission.provider_status.value,
+                next_poll_at=time.time(),
+            ) or {}
+        finally:
+            self.submitting_task_ids.discard(task_id)
 
     async def poll_once(self, task_id: str) -> dict | None:
         task = self.repository.get_task(task_id)
@@ -103,6 +108,8 @@ class VideoTaskMonitor:
             return None
         if task["status"] in {status.value for status in TERMINAL_VIDEO_STATUSES}:
             self.active_task_ids.discard(task_id)
+            return task
+        if task_id in self.submitting_task_ids:
             return task
         if time.time() - float(task.get("created_at") or time.time()) > self.max_task_age_seconds:
             updated = self.repository.update_task(
@@ -212,6 +219,8 @@ class VideoTaskMonitor:
                     self.active_task_ids.discard(task_id)
                 elif task["status"] in {status.value for status in TERMINAL_VIDEO_STATUSES}:
                     self.active_task_ids.discard(task_id)
+                elif task_id in self.submitting_task_ids:
+                    continue
                 elif float(task.get("next_poll_at") or 0) <= now:
                     due.append(task_id)
             if due:
