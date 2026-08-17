@@ -41,8 +41,11 @@ def test_video_api_client_exposes_polling_and_sse_contract():
 
 def test_video_history_clears_preview_state_and_exposes_delete_action():
     workspace = (FRONTEND / "features" / "video" / "VideoStudioWorkspace.tsx").read_text(encoding="utf-8")
+    hook = (FRONTEND / "features" / "video" / "useVideoTask.ts").read_text(encoding="utf-8")
 
     assert "const openHistory" in workspace
     assert "setCreatedTask(null)" in workspace
     assert "onDelete" in workspace
     assert "删除" in workspace
+    assert "taskRef.current = initialTask" in hook
+    assert "[applyTask, initialTask, taskId]" in hook
