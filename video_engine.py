@@ -513,6 +513,16 @@ class VideoJobRepository:
             row = connection.execute("SELECT * FROM video_generation_tasks WHERE id = ?", (task_id,)).fetchone()
             return dict(row) if row else None
 
+    def get_by_client_request_id(self, client_request_id: str | None) -> dict[str, Any] | None:
+        if not client_request_id:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM video_generation_tasks WHERE client_request_id = ?",
+                (client_request_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def list_tasks(self, *, status: str | None = None, page: int = 1, page_size: int = 20) -> list[dict[str, Any]]:
         safe_page = max(1, page)
         safe_size = min(100, max(1, page_size))
@@ -597,4 +607,3 @@ class VideoJobRepository:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (task_id, last + 1, event_type, status.value, progress, message, json.dumps(payload, ensure_ascii=False), time.time()),
         )
-
