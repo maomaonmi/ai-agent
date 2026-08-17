@@ -39,6 +39,7 @@ def test_video_api_lists_models_and_creates_async_task(tmp_path):
                 "ratio": "16:9",
                 "duration": 5,
                 "resolution": "720P",
+                "audio_url": "https://cdn.example.com/voice.mp3",
                 "client_request_id": "client-api-1",
             },
         )
@@ -47,6 +48,7 @@ def test_video_api_lists_models_and_creates_async_task(tmp_path):
     assert any(item["id"] == "wan3.0-video" for item in models.json()["models"])
     assert created.status_code == 202
     assert created.json()["status"] == "PENDING"
+    assert created.json()["parameters"]["audio_url"] == "https://cdn.example.com/voice.mp3"
     assert repository.list_tasks()[0]["provider_task_id"] == "remote-api-1"
 
 

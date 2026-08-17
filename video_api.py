@@ -14,6 +14,10 @@ from video_monitor import VideoTaskMonitor
 
 
 def _task_payload(row: dict[str, Any]) -> dict[str, Any]:
+    try:
+        request_snapshot = json.loads(row.get("request_snapshot") or "{}")
+    except (TypeError, ValueError):
+        request_snapshot = {}
     return {
         "id": row["id"],
         "status": row["status"],
@@ -25,6 +29,7 @@ def _task_payload(row: dict[str, Any]) -> dict[str, Any]:
             "ratio": row["ratio"],
             "duration": row["duration"],
             "resolution": row["resolution"],
+            "audio_url": request_snapshot.get("audio_url"),
         },
         "provider_status": row.get("provider_status"),
         "created_at": row["created_at"],
