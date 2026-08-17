@@ -85,3 +85,15 @@ def test_monitor_recovers_active_tasks_after_restart(tmp_path):
     asyncio.run(restarted.recover())
 
     assert task["id"] in restarted.active_task_ids
+
+
+def test_monitor_marks_orphaned_pending_task_as_failed(tmp_path):
+    repository = VideoJobRepository(tmp_path / "video.sqlite3")
+    task = repository.create_task(_request())
+    monitor = VideoTaskMonitor(repository, {"qianwen": FakeProvider([])})
+
+    asyncio.run(monitor.poll_once(task["id"]))
+    failed = repository.get_task(task["id"])
+
+    assert failed["status"] == "FAILED"
+    assert failed["error_code"] == "SUBMISSION_INCOMPLETE"

@@ -32,11 +32,13 @@ class VideoTaskMonitor:
         asset_store: object | None = None,
         poll_interval_seconds: float = 15.0,
         max_concurrency: int = 4,
+        max_task_age_seconds: float = 15 * 60,
     ):
         self.repository = repository
         self.providers = dict(providers)
         self.asset_store = asset_store
         self.poll_interval_seconds = max(1.0, poll_interval_seconds)
+        self.max_task_age_seconds = max(60.0, max_task_age_seconds)
         self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
         self.active_task_ids: set[str] = set()
         self._runner: asyncio.Task[None] | None = None
@@ -102,9 +104,25 @@ class VideoTaskMonitor:
         if task["status"] in {status.value for status in TERMINAL_VIDEO_STATUSES}:
             self.active_task_ids.discard(task_id)
             return task
+        if time.time() - float(task.get("created_at") or time.time()) > self.max_task_age_seconds:
+            updated = self.repository.update_task(
+                task_id,
+                status=VideoTaskStatus.FAILED,
+                error_code="PROVIDER_TIMEOUT",
+                error_message="视频任务超过最大等待时间",
+            )
+            self.active_task_ids.discard(task_id)
+            return updated
         provider_task_id = task.get("provider_task_id")
         if not provider_task_id:
-            return task
+            updated = self.repository.update_task(
+                task_id,
+                status=VideoTaskStatus.FAILED,
+                error_code="SUBMISSION_INCOMPLETE",
+                error_message="视频任务缺少供应商 task_id",
+            )
+            self.active_task_ids.discard(task_id)
+            return updated
         provider = self.providers.get(task["provider"])
         if provider is None:
             updated = self.repository.update_task(
@@ -149,22 +167,13 @@ class VideoTaskMonitor:
             progress = 100
         else:
             progress = current_progress
-        terminal = snapshot.status in TERMINAL_VIDEO_STATUSES
-        updated = self.repository.update_task(
-            task_id,
-            status=snapshot.status,
-            progress=progress,
-            provider_status=snapshot.provider_status,
-            video_url=snapshot.video_url,
-            error_code=snapshot.error_code,
-            error_message=snapshot.error_message,
-            next_poll_at=None if terminal else time.time() + self.poll_interval_seconds,
-            last_polled_at=time.time(),
-        )
-        if snapshot.status is VideoTaskStatus.SUCCEEDED and snapshot.video_url and self.asset_store is not None and updated is not None:
+        effective_status = VideoTaskStatus.FAILED if snapshot.status is VideoTaskStatus.UNKNOWN else snapshot.status
+        terminal = effective_status in TERMINAL_VIDEO_STATUSES
+        local_asset_id: str | None = None
+        if snapshot.status is VideoTaskStatus.SUCCEEDED and snapshot.video_url and self.asset_store is not None:
             try:
                 asset = await self.asset_store.download(task_id, snapshot.video_url)  # type: ignore[attr-defined]
-                updated = self.repository.update_task(task_id, local_asset_id=asset["id"])
+                local_asset_id = asset["id"]
             except Exception:
                 updated = self.repository.update_task(
                     task_id,
@@ -173,6 +182,20 @@ class VideoTaskMonitor:
                     error_message="视频已生成，但转存到本地失败，请重试",
                 )
                 self.active_task_ids.discard(task_id)
+                return updated
+
+        updated = self.repository.update_task(
+            task_id,
+            status=effective_status,
+            progress=progress,
+            provider_status=snapshot.provider_status,
+            video_url=snapshot.video_url,
+            local_asset_id=local_asset_id,
+            error_code=snapshot.error_code or ("PROVIDER_TASK_UNKNOWN" if snapshot.status is VideoTaskStatus.UNKNOWN else ""),
+            error_message=snapshot.error_message or ("供应商任务不存在或已过期" if snapshot.status is VideoTaskStatus.UNKNOWN else ""),
+            next_poll_at=None if terminal else time.time() + self.poll_interval_seconds,
+            last_polled_at=time.time(),
+        )
         if terminal:
             self.active_task_ids.discard(task_id)
         return updated

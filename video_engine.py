@@ -194,6 +194,8 @@ class VideoGenerationRequest(BaseModel):
         capability = video_capability(self.model)
         if self.ratio not in capability["ratios"]:
             raise ValueError(f"{self.model} 不支持画幅 {self.ratio}")
+        if self.model == "cogvideox-3" and len(self.prompt) > 512:
+            raise ValueError("CogVideoX-3 的 prompt 不能超过 512 个字符")
         if self.resolution not in capability["resolutions"]:
             raise ValueError(f"{self.model} 不支持分辨率 {self.resolution}")
         if self.duration < capability["duration_min"] or self.duration > capability["duration_max"]:
@@ -335,16 +337,13 @@ class ZhipuVideoProvider:
 
     @staticmethod
     def _size(request: VideoGenerationRequest) -> str:
-        sizes = {
-            ("16:9", "720P"): "1280x720",
-            ("16:9", "1080P"): "1920x1080",
-            ("9:16", "720P"): "720x1280",
-            ("9:16", "1080P"): "1080x1920",
-            ("1:1", "720P"): "720x720",
-            ("1:1", "1080P"): "1080x1080",
-        }
-        if (request.ratio, request.resolution) in sizes:
-            return sizes[(request.ratio, request.resolution)]
+        base = {"720P": 720, "1080P": 1080, "2K": 2048, "4K": 3840}[request.resolution]
+        if request.ratio == "16:9":
+            return f"{round(base * 16 / 9)}x{base}"
+        if request.ratio == "9:16":
+            return f"{base}x{round(base * 16 / 9)}"
+        if request.ratio == "1:1":
+            return f"{base}x{base}"
         raise ValueError("CogVideoX-3 的 ratio/resolution 组合无法映射为官方 size")
 
     def _headers(self) -> dict[str, str]:
