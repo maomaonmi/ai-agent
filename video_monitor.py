@@ -29,11 +29,13 @@ class VideoTaskMonitor:
         repository: VideoJobRepository,
         providers: Mapping[str, VideoProvider],
         *,
+        asset_store: object | None = None,
         poll_interval_seconds: float = 15.0,
         max_concurrency: int = 4,
     ):
         self.repository = repository
         self.providers = dict(providers)
+        self.asset_store = asset_store
         self.poll_interval_seconds = max(1.0, poll_interval_seconds)
         self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
         self.active_task_ids: set[str] = set()
@@ -159,6 +161,18 @@ class VideoTaskMonitor:
             next_poll_at=None if terminal else time.time() + self.poll_interval_seconds,
             last_polled_at=time.time(),
         )
+        if snapshot.status is VideoTaskStatus.SUCCEEDED and snapshot.video_url and self.asset_store is not None and updated is not None:
+            try:
+                asset = await self.asset_store.download(task_id, snapshot.video_url)  # type: ignore[attr-defined]
+                updated = self.repository.update_task(task_id, local_asset_id=asset["id"])
+            except Exception:
+                updated = self.repository.update_task(
+                    task_id,
+                    status=VideoTaskStatus.FAILED,
+                    error_code="ASSET_DOWNLOAD_FAILED",
+                    error_message="视频已生成，但转存到本地失败，请重试",
+                )
+                self.active_task_ids.discard(task_id)
         if terminal:
             self.active_task_ids.discard(task_id)
         return updated
@@ -183,4 +197,3 @@ class VideoTaskMonitor:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
-

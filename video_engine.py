@@ -599,6 +599,27 @@ class VideoJobRepository:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def create_asset(self, task_id: str, *, storage_path: str, mime_type: str, size_bytes: int, sha256: str, asset_id: str | None = None) -> dict[str, Any]:
+        asset_id = asset_id or str(uuid.uuid4())
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO video_generation_assets
+                (id, task_id, storage_path, mime_type, size_bytes, sha256, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (asset_id, task_id, storage_path, mime_type, size_bytes, sha256, time.time()),
+            )
+            connection.execute(
+                "UPDATE video_generation_tasks SET local_asset_id = ?, updated_at = ? WHERE id = ?",
+                (asset_id, time.time(), task_id),
+            )
+            row = connection.execute("SELECT * FROM video_generation_assets WHERE id = ?", (asset_id,)).fetchone()
+            return dict(row)
+
+    def get_asset(self, asset_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM video_generation_assets WHERE id = ?", (asset_id,)).fetchone()
+            return dict(row) if row else None
+
     def _append_event(self, connection: sqlite3.Connection, task_id: str, event_type: str, status: VideoTaskStatus, progress: int, message: str, payload: dict[str, Any]) -> None:
         last = connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM video_generation_events WHERE task_id = ?", (task_id,)).fetchone()[0]
         connection.execute(

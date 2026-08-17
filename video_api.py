@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from video_engine import TERMINAL_VIDEO_STATUSES, VideoGenerationRequest, VideoJobRepository, VideoTaskStatus, get_video_capabilities
 from video_monitor import VideoTaskMonitor
@@ -33,7 +33,7 @@ def _task_payload(row: dict[str, Any]) -> dict[str, Any]:
         "started_at": row.get("started_at"),
         "completed_at": row.get("completed_at"),
         "result": {
-            "video_url": row.get("video_url"),
+            "video_url": f"/api/video/assets/{row['local_asset_id']}" if row.get("local_asset_id") else row.get("video_url"),
             "asset_id": row.get("local_asset_id"),
         } if row.get("video_url") or row.get("local_asset_id") else None,
         "error": {
@@ -54,7 +54,7 @@ def _sse_event(event: str, sequence: int, payload: dict[str, Any]) -> str:
     return f"id: {sequence}\nevent: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def create_video_router(repository: VideoJobRepository, monitor: VideoTaskMonitor) -> APIRouter:
+def create_video_router(repository: VideoJobRepository, monitor: VideoTaskMonitor, *, asset_root: str | None = None) -> APIRouter:
     router = APIRouter(tags=["video"])
 
     @router.get("/api/video/models")
@@ -85,6 +85,21 @@ def create_video_router(repository: VideoJobRepository, monitor: VideoTaskMonito
     ) -> dict[str, Any]:
         rows = repository.list_tasks(status=task_status, page=page, page_size=page_size)
         return {"tasks": [_task_payload(row) for row in rows], "page": page, "pageSize": page_size}
+
+    @router.get("/api/video/assets/{asset_id}")
+    async def get_video_asset(asset_id: str) -> Any:
+        asset = repository.get_asset(asset_id)
+        if asset is None:
+            return _error_response("ASSET_NOT_FOUND", "视频资产不存在", status_code=404)
+        if not asset_root:
+            return _error_response("ASSET_STORAGE_NOT_CONFIGURED", "视频资产存储未配置", status_code=503)
+        from pathlib import Path
+
+        root = Path(asset_root).resolve()
+        path = Path(asset["storage_path"]).resolve()
+        if root not in path.parents or not path.is_file():
+            return _error_response("ASSET_NOT_FOUND", "视频资产不存在", status_code=404)
+        return FileResponse(path, media_type=asset["mime_type"], filename=f"video-{asset_id}.mp4")
 
     @router.get("/api/video/stream/{task_id}", response_model=None)
     async def stream_video_task(task_id: str, request: Request) -> Any:
