@@ -24,6 +24,7 @@ def test_video_capabilities_expose_official_models_and_limits():
         "happyhorse-1.0-t2v",
         "wan3.0-video",
         "wan2.7-t2v",
+        "wan2.7-t2v-2026-06-12",
         "wan2.6-t2v",
         "cogvideox-3",
     }
@@ -34,6 +35,9 @@ def test_video_capabilities_expose_official_models_and_limits():
     ]
     assert models["happyhorse-1.1-t2v"]["duration_min"] == 3
     assert models["happyhorse-1.1-t2v"]["duration_max"] == 15
+    assert models["wan2.7-t2v-2026-06-12"]["duration_min"] == 2
+    assert models["wan2.7-t2v-2026-06-12"]["duration_max"] == 15
+    assert models["wan2.7-t2v-2026-06-12"]["provider"] == "qianwen"
     assert models["cogvideox-3"]["durations"] == [5, 10]
 
 
