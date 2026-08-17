@@ -66,6 +66,38 @@ def test_video_request_accepts_wan3_auto_ratio_and_30_seconds():
     assert request.ratio == "auto"
 
 
+def test_video_request_accepts_public_audio_url_only_for_supported_wan_models():
+    request = VideoGenerationRequest(
+        prompt="人物对着镜头唱歌",
+        model="wan2.7-t2v",
+        ratio="16:9",
+        duration=5,
+        resolution="720P",
+        audio_url="https://cdn.example.com/voice.mp3",
+    )
+    assert request.audio_url == "https://cdn.example.com/voice.mp3"
+
+    with pytest.raises(ValueError, match="HTTP/HTTPS"):
+        VideoGenerationRequest(
+            prompt="人物对着镜头唱歌",
+            model="wan2.7-t2v",
+            ratio="16:9",
+            duration=5,
+            resolution="720P",
+            audio_url="file:///C:/voice.mp3",
+        )
+
+    with pytest.raises(ValueError, match="不支持参考音频"):
+        VideoGenerationRequest(
+            prompt="人物对着镜头唱歌",
+            model="cogvideox-3",
+            ratio="16:9",
+            duration=5,
+            resolution="720P",
+            audio_url="https://cdn.example.com/voice.mp3",
+        )
+
+
 def test_qwen_provider_submits_official_async_payload_and_reads_task_id():
     captured: dict[str, object] = {}
 
@@ -99,6 +131,31 @@ def test_qwen_provider_submits_official_async_payload_and_reads_task_id():
     assert body["input"]["prompt"] == "雨夜东京街头"
     assert body["parameters"]["duration"] == 5
     assert body["parameters"]["resolution"] == "720P"
+
+
+def test_qwen_provider_passes_audio_url_in_input_payload():
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"request_id": "req-audio", "output": {"task_id": "qwen-audio-task", "task_status": "PENDING"}},
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = QwenVideoProvider(api_key="test-key", client=client, base_url="https://dashscope.test/api/v1")
+    asyncio.run(provider.submit(VideoGenerationRequest(
+        prompt="人物对着镜头唱歌",
+        model="wan2.7-t2v",
+        ratio="16:9",
+        duration=5,
+        resolution="720P",
+        audio_url="https://cdn.example.com/voice.mp3",
+    )))
+    asyncio.run(client.aclose())
+
+    assert captured["json"]["input"]["audio_url"] == "https://cdn.example.com/voice.mp3"
 
 
 def test_qwen_provider_maps_success_and_failure_snapshots():

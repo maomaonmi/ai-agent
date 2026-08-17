@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Protocol
+from urllib.parse import urlparse
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -54,6 +55,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "duration_max": 15,
         "durations": [],
         "supports_audio": True,
+        "supports_audio_input": False,
         "enabled": True,
         "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/happyhorse-text-to-video/create-task",
     },
@@ -70,6 +72,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "duration_max": 15,
         "durations": [],
         "supports_audio": True,
+        "supports_audio_input": False,
         "enabled": True,
         "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/happyhorse-text-to-video/create-task",
     },
@@ -86,6 +89,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "duration_max": 30,
         "durations": [],
         "supports_audio": True,
+        "supports_audio_input": True,
         "enabled": True,
         "docs_url": "https://platform.qianwenai.com/docs/developer-guides/getting-started/video-models",
     },
@@ -102,6 +106,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "duration_max": 15,
         "durations": [],
         "supports_audio": True,
+        "supports_audio_input": True,
         "enabled": True,
         "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan27-text-to-video/create-task",
     },
@@ -118,6 +123,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "duration_max": 15,
         "durations": [],
         "supports_audio": True,
+        "supports_audio_input": True,
         "enabled": True,
         "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan27-text-to-video/create-task",
     },
@@ -134,6 +140,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "duration_max": 15,
         "durations": [],
         "supports_audio": True,
+        "supports_audio_input": True,
         "enabled": True,
         "docs_url": "https://platform.qianwenai.com/docs/developer-guides/video-generation/text-to-video",
     },
@@ -150,6 +157,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "duration_max": 10,
         "durations": [5, 10],
         "supports_audio": True,
+        "supports_audio_input": False,
         "enabled": True,
         "docs_url": "https://docs.bigmodel.cn/cn/guide/models/video-generation/cogvideox-3",
     },
@@ -180,6 +188,7 @@ class VideoGenerationRequest(BaseModel):
     prompt_extend: bool = True
     watermark: bool = False
     audio: bool | None = None
+    audio_url: str | None = Field(default=None, max_length=2048)
     quality: str = "quality"
     fps: int = Field(default=30, ge=1, le=60)
     client_request_id: str | None = Field(default=None, max_length=128)
@@ -206,6 +215,19 @@ class VideoGenerationRequest(BaseModel):
             raise ValueError("resolution 必须是 480P、720P、1080P、2K 或 4K")
         return normalized
 
+    @field_validator("audio_url")
+    @classmethod
+    def validate_audio_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        if not normalized:
+            return None
+        parsed = urlparse(normalized)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("audio_url 必须是可公开访问的 HTTP/HTTPS URL")
+        return normalized
+
     @model_validator(mode="after")
     def validate_model_limits(self) -> "VideoGenerationRequest":
         capability = video_capability(self.model)
@@ -223,6 +245,8 @@ class VideoGenerationRequest(BaseModel):
             raise ValueError(f"{self.model} 的 duration 只能是 {capability['durations']}")
         if self.audio is not None and not capability["supports_audio"]:
             raise ValueError(f"{self.model} 不支持音频")
+        if self.audio_url and not capability["supports_audio_input"]:
+            raise ValueError(f"{self.model} 不支持参考音频")
         if self.model == "cogvideox-3" and self.quality not in {"quality", "speed"}:
             raise ValueError("CogVideoX-3 的 quality 必须是 quality 或 speed")
         return self
@@ -309,10 +333,13 @@ class QwenVideoProvider:
             parameters["ratio"] = request.ratio
         if request.audio is not None:
             parameters["audio"] = request.audio
+        input_payload: dict[str, Any] = {"prompt": request.prompt}
+        if request.audio_url:
+            input_payload["audio_url"] = request.audio_url
         response = await self.client.post(
             f"{self.base_url}/services/aigc/video-generation/video-synthesis",
             headers={**self._headers(), "X-DashScope-Async": "enable"},
-            json={"model": request.model, "input": {"prompt": request.prompt}, "parameters": parameters},
+            json={"model": request.model, "input": input_payload, "parameters": parameters},
         )
         payload = _json_or_none(response)
         if response.is_error:

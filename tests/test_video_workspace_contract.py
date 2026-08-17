@@ -36,6 +36,16 @@ def test_video_api_client_exposes_polling_and_sse_contract():
     assert "openVideoTaskStream" in api
     assert "/api/video/create_task" in api
     assert "/api/video/stream/" in api
+
+
+def test_video_workspace_exposes_optional_public_audio_input_for_supported_models():
+    api = (FRONTEND / "lib" / "api.ts").read_text(encoding="utf-8")
+    workspace = (FRONTEND / "features" / "video" / "VideoStudioWorkspace.tsx").read_text(encoding="utf-8")
+
+    assert "supports_audio_input" in api
+    assert "audio_url" in api
+    assert "参考音频 URL" in workspace
+    assert "仅支持公开 HTTP/HTTPS" in workspace
     assert "deleteVideoTask" in api
 
 
