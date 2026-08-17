@@ -8,6 +8,7 @@ large chat application just to validate a video request.
 from __future__ import annotations
 
 import json
+import ipaddress
 import sqlite3
 import time
 import uuid
@@ -226,6 +227,15 @@ class VideoGenerationRequest(BaseModel):
         parsed = urlparse(normalized)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ValueError("audio_url 必须是可公开访问的 HTTP/HTTPS URL")
+        hostname = (parsed.hostname or "").lower().rstrip(".")
+        if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith((".local", ".internal")):
+            raise ValueError("audio_url 必须是可公开访问的 URL，不能使用本地地址")
+        try:
+            address = ipaddress.ip_address(hostname)
+        except ValueError:
+            address = None
+        if address is not None and not address.is_global:
+            raise ValueError("audio_url 必须是可公开访问的 URL，不能使用本地地址")
         return normalized
 
     @model_validator(mode="after")

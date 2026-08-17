@@ -87,6 +87,16 @@ def test_video_request_accepts_public_audio_url_only_for_supported_wan_models():
             audio_url="file:///C:/voice.mp3",
         )
 
+    with pytest.raises(ValueError, match="公开"):
+        VideoGenerationRequest(
+            prompt="人物对着镜头唱歌",
+            model="wan2.7-t2v",
+            ratio="16:9",
+            duration=5,
+            resolution="720P",
+            audio_url="http://127.0.0.1/voice.mp3",
+        )
+
     with pytest.raises(ValueError, match="不支持参考音频"):
         VideoGenerationRequest(
             prompt="人物对着镜头唱歌",
