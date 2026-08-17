@@ -11,6 +11,7 @@ import json
 import sqlite3
 import time
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -142,13 +143,13 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
 def get_video_capabilities() -> list[dict[str, Any]]:
     """Return defensive copies so callers cannot mutate the registry."""
 
-    return [dict(item) for item in _VIDEO_CAPABILITIES]
+    return [deepcopy(item) for item in _VIDEO_CAPABILITIES]
 
 
 def video_capability(model_id: str) -> dict[str, Any]:
     for capability in _VIDEO_CAPABILITIES:
         if capability["id"] == model_id:
-            return dict(capability)
+            return deepcopy(capability)
     raise ValueError(f"不支持的视频模型：{model_id}")
 
 
