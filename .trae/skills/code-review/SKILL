@@ -1,0 +1,35 @@
+{
+  "name": "code-review,
+  "version": "2.5.0",
+  "description": "基于code-review.md完整规则的代码审查技能包，严格执行WORKFLOW-002/006/007多文件独立报告输出规范",
+  "author": "AI Coding Assistant",
+  "tags": ["code-review", "quality", "compliance", "workflow", "java"],
+  "enabled": true,
+  "rules": [
+    "../shared/code-review/workflow-rules.md",
+    "../shared/code-review/architecture-rules.md",
+    "../shared/code-review/core-java-rules.md",
+    "../shared/code-review/security-exception-rules.md",
+    "../shared/code-review/java-method-risk-check.md",
+    "../shared/code-review/testing-rules.md",
+    "../shared/code-review/utility-doc-rules.md",
+    "../shared/code-review/sonarqube-rules.md"
+  ],
+  "constraints": {
+    "multi_file_mode": "individual_report_only",
+    "forbid_summary_report": true,
+    "forbid_cross_file_reference": true,
+    "min_files_for_auto_trigger": 2,
+    "output_format": "markdown",
+    "output_directory": "./codeReview/",
+    "naming_pattern": "review-{filename}-{timestamp}.md",
+    "timestamp_format": "yyyyMMddHHmmsss",
+    "enforce_validation": true
+  },
+  "execution": {
+    "phase1": "initialization_and_validation",
+    "phase2": "per_file_review_loop",
+    "phase3": "compliance_verification",
+    "phase4": "output_confirmation"
+  }
+}

@@ -1,0 +1,139 @@
+# 增量代码获取白名单配置
+# 
+# 使用说明：
+# 1. 在此文件中添加需要排除的文件和目录
+# 2. 每行一个模式，支持通配符（* 和 **）
+# 3. 以 # 开头的行为注释
+# 4. 获取变更时自动读取此文件并排除匹配的文件
+#
+
+# ==================== 测试代码 ====================
+# 测试代码无需获取
+src/test/**
+tests/**
+__tests__/**
+*Test.java
+*Test.py
+*_test.go
+*.spec.js
+*.spec.ts
+*.test.js
+*.test.ts
+*.test.tsx
+*.spec.vue
+
+# ==================== 前端测试和故事书 ====================
+# 前端测试和组件展示无需获取
+**/*.stories.tsx
+**/*.stories.ts
+**/*.stories.js
+**/*.story.tsx
+storybook-static/**
+.npm/**
+.cypress/**
+cypress/**
+
+# ==================== 自动生成代码 ====================
+# 自动生成的代码无需获取
+**/target/**
+**/build/**
+**/dist/**
+**/.next/**
+**/.nuxt/**
+**/generated/**
+**/*Generated.java
+**/elm-stuff/**
+**/jspm_packages/**
+
+# ==================== 第三方 SDK ====================
+# 第三方库无需获取
+node_modules/**
+bower_components/**
+vendor/**
+.git/**
+.idea/**
+.vscode/**
+*.min.js
+*.min.css
+*.bundle.js
+*.bundle.css
+
+# ==================== 示例代码 ====================
+# 示例代码无需获取
+example/**
+examples/**
+demo/**
+demos/**
+samples/**
+sample/**
+
+# ==================== 文档 ====================
+# 文档文件无需获取
+docs/**
+README.md
+README*.md
+CHANGELOG.md
+LICENSE
+*.md
+
+# ==================== 配置文件 ====================
+# 部分配置文件无需获取
+.gitignore
+.gitattributes
+*.iml
+*.idea/**
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ==================== 资源文件 ====================
+# 二进制资源无需获取
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.ico
+*.svg
+*.webp
+*.bmp
+*.woff
+*.woff2
+*.ttf
+*.eot
+*.otf
+*.mp3
+*.mp4
+*.avi
+*.mov
+*.wmv
+*.flv
+*.zip
+*.tar
+*.gz
+*.rar
+*.7z
+*.jar
+*.war
+*.class
+*.exe
+*.so
+*.dll
+*.dylib
+
+# ==================== 前端缓存和临时文件 ====================
+# 前端构建缓存无需获取
+.cache/**
+.parcel-cache/**
+.tsbuildinfo
+*.tsbuildinfo
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# ==================== 自定义排除 ====================
+# 在此添加项目特定的排除规则
+# 示例：
+# src/main/java/com/ai/im/web/legacy/**  # 遗留代码暂不获取
+# **/mock/**                              # Mock 代码无需获取
+# frontend/src/assets/**                  # 前端静态资源无需获取

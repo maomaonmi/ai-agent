@@ -1,0 +1,64 @@
+# 分身技能注册表 — 唯一真相源
+# 每个分身定义：name（中文名）、entry_skill（入口技能，无则 null）、skills（所需技能ID列表）
+# 新增分身只需在此追加一条记录，分身 prompt 中引用 SKILL.md 即可
+
+agents:
+  agent-e2e-test:
+    name: E2E测试分身
+    entry_skill: null
+    skills:
+      - test-case-generator
+      - test-case-runner
+      - test-api-runner
+      - test-unit-runner
+
+  agent-project-analysis:
+    name: 代码分析分身
+    entry_skill: null
+    skills:
+      - ca-pending-code-reviewer
+      - ca-custom-rules-manager
+      - ca-state-manager
+      - ca-code-quality
+      - ca-architecture-review
+      - ca-performance-analyzer
+      - ca-security-scanner
+      - ca-report-aggregator
+      - ca-log-analyzer
+
+  agent-backend-architect:
+    name: 后端开发分身
+    entry_skill: null
+    skills:
+      - activiti-workflow-generator
+      - appframe
+      - code-review
+      - create_api_doc
+      - create-appframe-bo
+      - csf-boot-create
+      - csf-production
+      - csf-service-registration
+      - ddl_to_java_generator
+      - generate-soa-service
+      - group-test-db-query
+      - java-local-search
+      - task_plus_dev
+      - task_rule_dev
+
+  agent-prototype-designer:
+    name: 原型设计分身
+    entry_skill: null
+    skills:
+      - prototype-designer
+
+  agent-frontend-architect:
+    name: 前端开发分身
+    entry_skill: null
+    skills:
+      - agent-frontend-architect
+
+  agent-technical-designer:
+    name: 技术设计分身
+    entry_skill: null
+    skills:
+      - technical-designer

@@ -1,5 +1,5 @@
 {
-  "active_provider": "qwen",
+  "active_provider": "deepseek",
   "profiles": {
     "glm": {
       "provider": "glm",

@@ -1,0 +1,8 @@
+#!/bin/bash
+if [ -z "$1" ]; then
+  echo "Usage: $0 <keyword>"
+  echo "Example: $0 GW_QRY_CUST"
+  exit 1
+fi
+echo "Searching GWInterFaceCode for: $1"
+grep -i "$1" src/main/java/com/asiainfo/esopBusi/server/common/constants/GWInterFaceCode.java

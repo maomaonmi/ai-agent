@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from pathlib import Path
 from typing import Annotated, TypedDict, List, Dict, Literal, Optional, Any, NotRequired, TypeVar, Callable, Awaitable, AsyncGenerator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 
 # Why: Windows 下必须用 ProactorEventLoop 才能创建子进程（Selector 环的
 # _make_subprocess_transport 会抛 NotImplementedError，导致 MCP 进程拉起必崩）。
@@ -90,6 +91,8 @@ from video_reference import AliyunOssSignedUrlProvider, ReferenceAssetService
 from video_probe import FFprobeService
 from video_runtime import load_video_runtime_config
 from video_transcode import FFmpegService
+from visual_workflow_api import create_visual_workflow_router
+from visual_workflow_repository import VisualWorkflowRepository
 
 from 全知全能.day32_deep_research_retrieval import (
     generate_sub_queries,
@@ -280,6 +283,7 @@ def _initialize_image_store() -> None:
 _initialize_image_store()
 session_store = SessionStore(SESSION_DB_PATH)
 video_job_repository = VideoJobRepository(SESSION_DB_PATH)
+visual_workflow_repository = VisualWorkflowRepository(SESSION_DB_PATH)
 video_asset_store = VideoAssetStore(VIDEO_ASSET_DIR, video_job_repository)
 video_runtime_config = load_video_runtime_config()
 video_reference_assets = None
@@ -2706,13 +2710,25 @@ def _response_token_usage(response: Any) -> Dict[str, Any]:
     return usage
 
 
-def chat_node(state: GroundedState):
-    """直接让 LLM 回答，支持 GLM/Qwen 原生联网搜索参数。
+# Why: chat_node 流式 token 汇聚点——外层队列泵（_generate_chat_events_impl）
+# 在 astream 前通过 ContextVar 注入 emit(kind, text) 回调，节点内逐 chunk 推送
+# token / reasoning_delta SSE；未注入时（如单测直接跑图）静默降级为整块返回。
+_CHAT_TOKEN_SINK: ContextVar[Optional[Callable[[str, str], Awaitable[None]]]] = ContextVar(
+    "_chat_token_sink", default=None
+)
+
+
+async def chat_node(state: GroundedState):
+    """直接让 LLM 回答（异步流式），支持 GLM/Qwen 原生联网搜索参数。
 
     设计原则：无论是否深度思考，统一走 OpenAI 裸 SDK（.chat.completions.create）。
     之前非 deep 分支用 LangChain get_llm()，但 LangChain 包装层无法注入
     GLM 的 tools 数组（web_search 工具）和千问的 enable_search extra_body，
-    因此统一收口到裸 SDK，参数显式可控。"""
+    因此统一收口到裸 SDK，参数显式可控。
+
+    Why 流式化：此前整块等待导致标准对话模式前端只能靠伪打字机撑场面；
+    改为 stream=True 后逐 chunk 经 _CHAT_TOKEN_SINK 推 SSE，前端 pacing 层
+    拿到真实增量，打字机节奏与模型吐字同步。"""
     pc = ProgressCollector("chat")
     mode = state.get("mode", "standard")
     wants_web = bool(state.get("wants_web", False))
@@ -2736,7 +2752,7 @@ def chat_node(state: GroundedState):
         elif isinstance(m, AIMessage):
             msgs.append({"role": "assistant", "content": m.content})
 
-    llm_client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+    llm_client = AsyncOpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
     thinking_caps = capabilities_for_model(ACTIVE_MODEL_ID)
     extra_body: dict | None = None
     create_kwargs: dict = {
@@ -2805,12 +2821,49 @@ def chat_node(state: GroundedState):
 
     if extra_body is not None:
         create_kwargs["extra_body"] = extra_body
-    resp = llm_client.chat.completions.create(**create_kwargs)
-    reasoning = ""
-    if use_deep:
-        reasoning = getattr(resp.choices[0].message, "reasoning_content", "") or ""
-    final_text = resp.choices[0].message.content or ""
+
+    # ---------- 流式消费：逐 chunk 推 token / reasoning_delta ----------
+    # Why stream_options.include_usage：流式模式下 usage 只出现在最后一个
+    # choices 为空的 chunk 里，必须显式开启才能保住 token 账本（observe_response）。
+    create_kwargs["stream"] = True
+    create_kwargs["stream_options"] = {"include_usage": True}
+
+    sink = _CHAT_TOKEN_SINK.get()
+    reasoning_parts: list[str] = []
+    answer_parts: list[str] = []
+    stream_usage = None
+    stream_model = ACTIVE_MODEL_ID
+
+    stream = await llm_client.chat.completions.create(**create_kwargs)
+    async for chunk in stream:
+        if getattr(chunk, "usage", None) is not None:
+            stream_usage = chunk.usage
+        if getattr(chunk, "model", None):
+            stream_model = chunk.model
+        if not chunk.choices:
+            # usage-only chunk（或空 keep-alive chunk），无正文可推
+            continue
+        delta = chunk.choices[0].delta
+        # 推理流：DeepSeek / GLM 走 delta.reasoning_content（glm_adapter 统一提取）
+        reasoning_piece = reasoning_from_delta(delta) if use_deep else ""
+        if reasoning_piece:
+            reasoning_parts.append(reasoning_piece)
+            if sink is not None:
+                await sink("reasoning_delta", reasoning_piece)
+        piece = delta.content or ""
+        if piece:
+            answer_parts.append(piece)
+            if sink is not None:
+                await sink("token", piece)
+
+    final_text = "".join(answer_parts)
+    reasoning = "".join(reasoning_parts)
     response_ai = AIMessage(content=final_text)
+    # Why：流式模式没有完整 response 对象，用 SimpleNamespace 复用
+    #   observe_response 的 usage 提取 + tracker 记账路径（与 qwen research 链路同款）。
+    token_usage = observe_response(
+        SimpleNamespace(model=stream_model, usage=stream_usage)
+    )
     if use_deep:
         pc.log(
             f"**深度思考** 推理过程 {len(reasoning)} 字 (provider={thinking_caps.thinking_control})",
@@ -2825,10 +2878,12 @@ def chat_node(state: GroundedState):
             answer_len=len(final_text),
         )
     return {
-        "messages": state["messages"] + [response_ai],
+        # Why 只返回增量 [response_ai]：messages channel 的 reducer 是 x + y，
+        #   此前返回 state["messages"] + [response_ai] 会让历史消息在图内翻倍。
+        "messages": [response_ai],
         "final_answer": final_text,
         "reasoning": reasoning,
-        "token_usage": _response_token_usage(resp),
+        "token_usage": token_usage,
         "progress_events": pc.finalize(),
     }
 
@@ -4454,6 +4509,11 @@ async def _generate_chat_events_impl(
         web_docs_result = []
         last_token_usage: Dict[str, Any] | None = None
         start_time = time.time()
+        # Why: 流式标记——chat_node 已经 sink 逐 chunk 推过答案/推理增量时，
+        #   节点返回的整块 reasoning 不再重复推全文事件（前端会把它当第二个
+        #   reasoning step 追加，造成思考内容翻倍）。
+        streamed_answer = False
+        streamed_reasoning = False
 
         # Why：start 节点只负责"初始化/路由"，一旦准备进 LangGraph 图执行即算完成。
         # 之前只发 processing 导致前端进度条永远卡在 2/3，顶部持续转圈。
@@ -4463,65 +4523,125 @@ async def _generate_chat_events_impl(
             "message": "任务已启动" if wants_web else "思考开始",
         })
 
-        for event in get_langgraph_app().stream(inputs):
-            for node_name, output in event.items():
-                if output is None:
+        # ---------- 队列泵：图事件 + 节点内流式 token 汇入同一 SSE 通道 ----------
+        # Why: chat_node 异步流式化后，token 必须在节点执行"过程中"实时推出；
+        #   同步 for event in graph.stream() 只能拿到节点返回后的输出，
+        #   改为 astream 后台任务 + asyncio.Queue，sink 回调与图事件竞争入队，
+        #   外层统一出队 yield，打字机增量与节点进度互不阻塞。
+        pump_queue: asyncio.Queue[tuple[str, Any] | None] = asyncio.Queue()
+
+        async def _sink_emit(kind: str, text: str) -> None:
+            await pump_queue.put(("token_stream", (kind, text)))
+
+        async def _run_graph() -> None:
+            try:
+                async for event in get_langgraph_app().astream(inputs):
+                    await pump_queue.put(("graph_event", event))
+            except Exception as exc:
+                # 节点异常不在任务内吞掉，转交泵层统一 yield error
+                await pump_queue.put(("graph_error", exc))
+            finally:
+                await pump_queue.put(None)
+
+        # Why 顺序关键：create_task 在创建瞬间复制当前协程的 ContextVar 快照，
+        #   必须先 set sink 再建任务，chat_node 才能在图任务上下文里读到 sink；
+        #   反过来先建任务会导致节点看到 default=None，流式静默失效。
+        token_sink_handle = _CHAT_TOKEN_SINK.set(_sink_emit)
+        graph_task = asyncio.create_task(_run_graph())
+        try:
+            while True:
+                if time.time() - start_time > 120:
+                    yield sse_format("error", {"message": "运行超过 120 秒超时"})
+                    graph_task.cancel()
+                    break
+                try:
+                    item = await asyncio.wait_for(pump_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
+                if item is None:
+                    break
+                kind, payload = item
+
+                if kind == "token_stream":
+                    token_kind, text = payload
+                    if token_kind == "reasoning_delta":
+                        streamed_reasoning = True
+                        yield sse_format("reasoning_delta", {"reasoning_delta": text})
+                    else:
+                        streamed_answer = True
+                        yield sse_format("token", {"token": text})
+                    await asyncio.sleep(0)
                     continue
 
-                # Why progress_events 优先：chat_node / web_search_node / web_analyst_node
-                # 返回的进度是有序的（start → mid → done），每一条都要实时推给前端；
-                # 其它旧节点（MCP 预检、未来扩展 node）没有进度列表，保持原 completed 概括事件。
-                progress_list = output.get("progress_events") if isinstance(output, dict) else None
-                node_had_completed = False
-                if isinstance(progress_list, list) and progress_list:
-                    for ev in progress_list:
-                        # 防御性填充 node_name，避免 ProgressCollector 名字写错
-                        if "node_name" not in ev or not ev["node_name"]:
-                            ev["node_name"] = node_name
-                        # timestamp_ms 缺失则补当前
-                        if "timestamp_ms" not in ev:
-                            ev["timestamp_ms"] = int(time.time() * 1000)
-                        if ev.get("status") == "completed":
-                            node_had_completed = True
-                        yield sse_format("node", ev)
-                        # Why：节点执行过程中积累的 progress_events 会在节点返回时一次性
-                        # yield 出来。如果不让出事件循环，uvicorn/ASGI 会把它们打包进同一个
-                        # TCP chunk，前端看起来就是"全蹦出来"。sleep(0) 让 ASGI 有机会分批发送。
+                if kind == "graph_error":
+                    raise payload
+
+                event = payload
+                for node_name, output in event.items():
+                    if output is None:
+                        continue
+
+                    # Why progress_events 优先：chat_node / web_search_node / web_analyst_node
+                    # 返回的进度是有序的（start → mid → done），每一条都要实时推给前端；
+                    # 其它旧节点（MCP 预检、未来扩展 node）没有进度列表，保持原 completed 概括事件。
+                    progress_list = output.get("progress_events") if isinstance(output, dict) else None
+                    node_had_completed = False
+                    if isinstance(progress_list, list) and progress_list:
+                        for ev in progress_list:
+                            # 防御性填充 node_name，避免 ProgressCollector 名字写错
+                            if "node_name" not in ev or not ev["node_name"]:
+                                ev["node_name"] = node_name
+                            # timestamp_ms 缺失则补当前
+                            if "timestamp_ms" not in ev:
+                                ev["timestamp_ms"] = int(time.time() * 1000)
+                            if ev.get("status") == "completed":
+                                node_had_completed = True
+                            yield sse_format("node", ev)
+                            # Why：节点执行过程中积累的 progress_events 会在节点返回时一次性
+                            # yield 出来。如果不让出事件循环，uvicorn/ASGI 会把它们打包进同一个
+                            # TCP chunk，前端看起来就是"全蹦出来"。sleep(0) 让 ASGI 有机会分批发送。
+                            await asyncio.sleep(0)
+                    # 如果该节点自己没有显式 completed 事件，再补一个兜底完成标记，
+                    # 保证前端每个被触达的节点都有闭环；但 progress_events 已含 completed 时
+                    # 不再重复发送，避免把 rich message 覆盖成一行光秃秃的 completed。
+                    if not node_had_completed:
+                        yield sse_format("node", {
+                            "node_name": node_name,
+                            "status": "completed",
+                            "message": f"{node_name} 执行完成",
+                        })
                         await asyncio.sleep(0)
-                # 如果该节点自己没有显式 completed 事件，再补一个兜底完成标记，
-                # 保证前端每个被触达的节点都有闭环；但 progress_events 已含 completed 时
-                # 不再重复发送，避免把 rich message 覆盖成一行光秃秃的 completed。
-                if not node_had_completed:
-                    yield sse_format("node", {
-                        "node_name": node_name,
-                        "status": "completed",
-                        "message": f"{node_name} 执行完成",
-                    })
-                    await asyncio.sleep(0)
 
-                if "web_docs" in output and output["web_docs"]:
-                    web_docs_result = output["web_docs"]
-                    yield sse_format("web_docs", {
-                        "docs": web_docs_result,
-                        "count": len(web_docs_result)
-                    })
+                    if "web_docs" in output and output["web_docs"]:
+                        web_docs_result = output["web_docs"]
+                        yield sse_format("web_docs", {
+                            "docs": web_docs_result,
+                            "count": len(web_docs_result)
+                        })
 
-                if "final_answer" in output and output["final_answer"]:
-                    final_response = output["final_answer"]
+                    if "final_answer" in output and output["final_answer"]:
+                        final_response = output["final_answer"]
 
-                if isinstance(output, dict) and output.get("token_usage"):
-                    last_token_usage = output["token_usage"]
-                    yield sse_format("usage", {"usage": last_token_usage})
+                    if isinstance(output, dict) and output.get("token_usage"):
+                        last_token_usage = output["token_usage"]
+                        yield sse_format("usage", {"usage": last_token_usage})
 
-                if "reasoning" in output and output["reasoning"]:
-                    all_reasoning.append(output["reasoning"])
-                    yield sse_format("reasoning", {
-                        "reasoning": output["reasoning"],
-                    })
-
-            if time.time() - start_time > 120:
-                yield sse_format("error", {"message": "运行超过 120 秒超时"})
-                break
+                    if "reasoning" in output and output["reasoning"]:
+                        all_reasoning.append(output["reasoning"])
+                        # Why: 推理已经 reasoning_delta 逐 chunk 推过，全文事件跳过，
+                        #   避免前端 reasoningSteps 追加第二份全文导致内容翻倍。
+                        if not streamed_reasoning:
+                            yield sse_format("reasoning", {
+                                "reasoning": output["reasoning"],
+                            })
+        finally:
+            _CHAT_TOKEN_SINK.reset(token_sink_handle)
+            if not graph_task.done():
+                graph_task.cancel()
+                try:
+                    await graph_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         # 兜底：wants_web 但 web_search_node 未产出任何 docs（例如 Firecrawl Key 缺失），
         # 仍推送占位 web_docs SSE，前端联网面板就一定会出现，不会"没任何面板"。
@@ -4645,6 +4765,7 @@ app.include_router(create_video_router(
     asset_root=str(VIDEO_ASSET_DIR),
     reference_assets=video_reference_assets,
 ))
+app.include_router(create_visual_workflow_router(visual_workflow_repository))
 
 
 # Image Studio foundation: keep model capability metadata and director routing

@@ -1,0 +1,9 @@
+#!/bin/bash
+if [ -z "$1" ]; then
+  echo "Usage: $0 <keyword>"
+  echo "Example: $0 Order"
+  exit 1
+fi
+echo "Searching for CSF services with keyword: $1"
+# Search for CSV interfaces and implementations
+find src/main/java -name "*CSV.java" -o -name "*CSVImpl.java" | grep -i "$1"

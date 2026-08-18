@@ -1,0 +1,1773 @@
+#!/usr/bin/env python3
+"""
+AI Skill: 生成 BO 配套文件
+根据表名和字段描述生成完整的 BO 配套文件
+"""
+
+import os
+import sys
+import json
+import subprocess
+import shutil
+import re
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+# 支持的数据库类型
+SUPPORTED_DB_TYPES = ['ORACLE', 'MYSQL', 'DB2', 'SYBASE', 'ANTDB', 'PANWEI', 'GOLDENDB']
+DEFAULT_DB_TYPE = 'ORACLE'
+
+def normalize_db_type(db_type):
+    """
+    规范化数据库类型名称
+
+    Args:
+        db_type: 数据库类型字符串（可能是不规范的写法）
+
+    Returns:
+        规范化的数据库类型，如果无效则返回默认值 ORACLE
+    """
+    if not db_type:
+        return DEFAULT_DB_TYPE
+
+    # 转换为大写并去除空格
+    normalized = db_type.upper().strip()
+
+    # 常见的别名映射
+    alias_map = {
+        'MYSQL': 'MYSQL',
+        'ORACLE': 'ORACLE',
+        'DB2': 'DB2',
+        'SYBASE': 'SYBASE',
+        'ANTDB': 'ANTDB',
+        'ANT_DB': 'ANTDB',
+        'PANWEI': 'PANWEI',
+        'PANWEIDB': 'PANWEI',
+        'GOLDEN': 'GOLDENDB',
+        'GOLDENDB': 'GOLDENDB',
+        'GOLDEN_DB': 'GOLDENDB'
+    }
+
+    return alias_map.get(normalized, DEFAULT_DB_TYPE)
+
+def get_sql_dialect(db_type):
+    """
+    获取数据库类型对应的 SQL 方言
+
+    将具体的数据库类型映射到语法类型：
+    - DB2, SYBASE -> STANDARD (标准SQL语法)
+    - PANWEI, ANTDB -> POSTGRESQL (PostgreSQL语法)
+    - GOLDENDB -> MYSQL (MySQL语法)
+    - ORACLE -> ORACLE (Oracle语法)
+    - MYSQL -> MYSQL (MySQL语法)
+
+    Args:
+        db_type: 规范化的数据库类型
+
+    Returns:
+        SQL方言类型：STANDARD, POSTGRESQL, MYSQL, ORACLE
+    """
+    dialect_map = {
+        'DB2': 'STANDARD',
+        'SYBASE': 'STANDARD',
+        'PANWEI': 'POSTGRESQL',
+        'ANTDB': 'POSTGRESQL',
+        'GOLDENDB': 'MYSQL',
+        'ORACLE': 'ORACLE',
+        'MYSQL': 'MYSQL'
+    }
+    return dialect_map.get(db_type, 'STANDARD')
+
+def genBo(tabName, nameSpace, attributesJson, outputDir):
+    """
+    Generate BO and IValue files from table and attribute information
+
+    Args:
+        tabName: Table name (e.g., "user_info")
+        nameSpace: Package name (e.g., "com.ai.appframe2.test.bo")
+        attributesJson: JSON string containing attribute information
+        outputDir: Output directory for generated files
+
+    Returns:
+        Generated BO name
+    """
+    # Parse JSON
+    attributes = json.loads(attributesJson)
+
+    # Generate BO name (convert table_name to TableName)
+    strBoName = generate_bo_name(tabName)
+
+    # Build XML structure
+    rootElement = ET.Element("sysbolist")
+
+    ele = ET.SubElement(rootElement, "sysbo")
+    ele.set("datasource", "UserDataSource")  # Default datasource
+    ele.set("name", strBoName)
+    ele.set("mainattr", "")
+
+    # Add mapping entity
+    ele1 = ET.SubElement(ele, "mapingenty")
+    ele1.set("type", "table")
+    ele1.text = tabName
+
+    # Add data filter
+    ET.SubElement(ele, "datafilter")
+
+    # Add attribute list
+    ele2 = ET.SubElement(ele, "attrlist")
+
+    # Add each attribute
+    for attr_data in attributes:
+        # Extract attribute data
+        floatlength = attr_data.get('floatlength', '')
+        name = attr_data.get('name', '')
+        maxlength = attr_data.get('maxlength', '')
+        datatype = attr_data.get('datatype', 'String')
+        type_attr = attr_data.get('type', 'COL')
+        remark = attr_data.get('remark', '')
+        db_datatype = attr_data.get('db_datatype', 'VARCHAR')
+
+        # Create attr element
+        ele3 = ET.SubElement(ele2, "attr")
+        ele3.set("floatlength", floatlength)
+        ele3.set("name", name)
+        ele3.set("maxlength", maxlength)
+        ele3.set("datatype", datatype)
+        ele3.set("type", type_attr)
+        ele3.set("remark", remark)
+
+        # Create mapingcol element
+        ele4 = ET.SubElement(ele3, "mapingcol")
+        ele4.set("datatype", db_datatype)
+        ele4.text = name
+
+    # Build document
+    myDocument = ET.ElementTree(rootElement)
+
+    # First, generate and save .bo file (needed by genBoFile and genBoIValue)
+    # Fixed: Correctly join path components instead of passing a list to os.path.join
+    namespace_path = nameSpace.replace(".", os.sep)
+    strResDirFile = os.path.join(outputDir, namespace_path)
+
+    # Create directory if not exists
+    if not os.path.exists(strResDirFile):
+        os.makedirs(strResDirFile)
+
+    # Format and save .bo file
+    format_xml_element(myDocument.getroot(), indent="  ", level=0)
+    boDirPath = os.path.join(strResDirFile, "bo")
+    if not os.path.exists(boDirPath):
+        os.makedirs(boDirPath)
+    boFilePath = os.path.join(boDirPath, strBoName + ".bo")
+    myDocument.write(boFilePath, encoding='UTF-8', xml_declaration=True)
+
+    # Now generate other files
+    genBoFile(strBoName, nameSpace, outputDir)
+
+    # Generate IValue file
+    genBoIValue(myDocument, nameSpace, outputDir)
+
+    return strBoName
+
+
+def generate_bo_name(tabName):
+    """
+    Convert table name to BO name (camel case)
+    e.g., "user_info" -> "UserInfo", "user" -> "User"
+    """
+    strTabNames = tabName.split("_")
+    strBoName = ""
+    for part in strTabNames:
+        if part == "":
+            continue
+        strBoName = strBoName + part[0].upper() + part[1:].lower()
+    return strBoName
+
+
+def genBoFile(boName, nameSpace, outputDir):
+    """
+    Generate BO Java files (Bean, Engine) consistent with Java genBoFile logic
+
+    Args:
+        boName: BO name
+        nameSpace: Package name
+        outputDir: Output directory (equivalent to strResSrcDir in Java)
+    """
+
+    # Build resource directory path (replaces UserEnvManager.getProperty)
+    # Fixed: Correctly join path components
+    namespace_path = nameSpace.replace(".", os.sep)
+    strResDirFile = os.path.join(outputDir, namespace_path)
+
+    # Read .bo file and extract properties (simulates BORootNode parsing)
+    # Check both possible locations for .bo file
+    boFilePath = os.path.join(strResDirFile, "bo", boName + ".bo")
+
+    # Parse .bo file to get properties
+    try:
+        boTree = ET.parse(boFilePath)
+        boRoot = boTree.getroot()
+        sysbo = boRoot.find("sysbo")
+        attrlist = sysbo.find("attrlist")
+        attrs = attrlist.findall("attr")
+
+        # Build properties list
+        properties = []
+        for attr in attrs:
+            name = attr.get("name")
+            datatype = attr.get("datatype")
+            properties.append({
+                'name': name,
+                'javaDataType': datatype
+            })
+    except Exception as e:
+        raise Exception(f"Failed to parse BO file: {boFilePath}, error: {e}")
+
+    # Build output Java source directory
+    # Fixed: Correctly join path components
+    dstSrcDirFile = os.path.join(outputDir, namespace_path, "bo")
+    # Create directory if not exists
+    if not os.path.exists(dstSrcDirFile):
+        os.makedirs(dstSrcDirFile)
+
+    # Generate Bean file
+    generatorAllToFile(properties, dstSrcDirFile, nameSpace, boName, outputDir)
+
+
+def genBoIValue(xmlDocument, nameSpace, outputDir):
+    """
+    Generate IValue interface file (consistent with Java genBoIValue logic)
+
+    Args:
+        xmlDocument: XML ElementTree document
+        nameSpace: Package name
+        outputDir: Output directory
+    """
+    # Get BO name from XML
+    sysbo = xmlDocument.find("sysbo")
+    strBoName = sysbo.get("name")
+
+    # Get attribute list
+    attrlist = sysbo.find("attrlist")
+    attrs = attrlist.findall("attr")
+
+    # Build property vectors (both get and set)
+    getPropVec = []
+    setPropVec = []
+
+    # For each attr, create Property object
+    for attr in attrs:
+        name = attr.get("name")
+        datatype = attr.get("datatype")
+
+        # Create Property-like object
+        prop = {
+            'name': name,
+            'javaDataType': datatype
+        }
+        getPropVec.append(prop)
+        setPropVec.append(prop)
+
+    # Generate interface code
+    interfaceCode = generatorInterface(getPropVec, setPropVec, nameSpace, "I" + strBoName + "Value")
+
+    # Build output directory
+    # Fixed: Correctly join path components
+    namespace_path = nameSpace.replace(".", os.sep)
+    strSrcDirFile = os.path.join(outputDir, namespace_path)
+
+    # Create directory if not exists
+    if not os.path.exists(strSrcDirFile):
+        os.makedirs(strSrcDirFile)
+
+    # Write Java file
+    ivaluesDir = os.path.join(strSrcDirFile, "ivalues")
+    if not os.path.exists(ivaluesDir):
+        os.makedirs(ivaluesDir)
+    dstFilePath = os.path.join(ivaluesDir, "I" + strBoName + "Value.java")
+    with open(dstFilePath, 'w', encoding='UTF-8') as fileWriter:
+        fileWriter.write(interfaceCode)
+
+
+def generatorInterface(getProps, setProps, packageName, beanName):
+    """
+    Generate interface code (consistent with Java GeneratorSource.generatorInterface logic)
+
+    Args:
+        getProps: List of properties for getter methods
+        setProps: List of properties for setter methods
+        packageName: Package name
+        beanName: Interface name
+
+    Returns:
+        Generated interface code as string
+    """
+    # Generate package declaration
+    if packageName:
+        packageLine = "package " + packageName + ".ivalues;"
+    else:
+        packageLine = ""
+
+    # Generate property constants
+    propertyConstants = []
+    for prop in getProps:
+        name = prop.get('name')
+        nameUpper = name.upper()
+        propertyConstants.append(f'  public final static String S_{nameUpper} = "{name}";')
+
+    # Generate getter methods
+    getterMethods = []
+    for prop in getProps:
+        name = prop.get('name')
+        dataType = prop.get('javaDataType')
+
+        # Convert to method name (camel case with first letter uppercase)
+        methodName = to_camel_case(name, capitalize_first=True)
+
+        # Get single data type (remove array indicator if present)
+        singleDataType = getSingleDataType(dataType)
+
+        getterMethods.append(f'  public {singleDataType} get{methodName}();')
+
+    # Generate setter methods
+    setterMethods = []
+    for prop in setProps:
+        name = prop.get('name')
+        dataType = prop.get('javaDataType')
+
+        # Convert to method name (camel case with first letter uppercase)
+        methodName = to_camel_case(name, capitalize_first=True)
+
+        # Get single data type (remove array indicator if present)
+        singleDataType = getSingleDataType(dataType)
+
+        setterMethods.append(f'  public void set{methodName}({singleDataType} value);')
+
+    # Build interface code
+    interfaceCode = f"""{packageLine}
+import com.ai.appframe2.common.DataStructInterface;
+import java.sql.Timestamp;
+
+public interface {beanName} extends DataStructInterface{{
+{chr(10).join(propertyConstants)}
+
+{chr(10).join(getterMethods)}
+
+{chr(10).join(setterMethods)}
+}}
+"""
+    return interfaceCode
+
+
+def generatorAllToFile(properties, dstSrcDirFile, nameSpace, boName, outputDir):
+    """
+    Generate all Java files (Bean, Engine) consistent with Java GeneratorSource.generatorAllToFile logic
+
+    Args:
+        properties: List of property dictionaries
+        dstSrcDirFile: Output directory
+        nameSpace: Package name
+        boName: BO name
+        outputDir: Output directory (used for template lookup)
+    """
+    # Define file types to generate (skip BOBean, BOMap, BOEngine as per Java logic)
+    fileTypes = [
+        {'type': 'Bean', 'template': 'Bean.vm'},
+        {'type': 'Engine', 'template': 'Engine.vm'}
+    ]
+
+    for fileType in fileTypes:
+        # Generate class name
+        className = getClassName(boName, fileType['type'])
+
+        # Build output file path
+        objNewFile = os.path.join(dstSrcDirFile, className + ".java")
+
+        # Skip if file already exists (as per Java logic)
+        if os.path.exists(objNewFile):
+            continue
+
+        # Generate file content
+        try:
+            content = generator(fileType['type'], properties, nameSpace, boName, None, outputDir)
+
+            # Create parent directory if needed
+            parentDir = os.path.dirname(objNewFile)
+            if parentDir and not os.path.exists(parentDir):
+                os.makedirs(parentDir)
+
+            # Write file
+            with open(objNewFile, 'w', encoding='UTF-8') as fileWriter:
+                fileWriter.write(content)
+
+            print(f"Generated: {objNewFile}")
+        except Exception as e:
+            print(f"Failed to generate {fileType['type']} file: {e}")
+
+
+def generator(fileType, properties, nameSpace, boName, javaType, outputDir):
+    """
+    Generate Java code for a specific file type
+
+    Args:
+        fileType: File type ('Bean' or 'Engine')
+        properties: List of property dictionaries
+        nameSpace: Package name
+        boName: BO name
+        javaType: Type mapping (not used in basic implementation)
+        outputDir: Output directory
+
+    Returns:
+        Generated Java code
+    """
+    # Clean BO name (remove extension if present)
+    if '.' in boName:
+        boName = boName[:boName.index('.')]
+
+    className = getClassName(boName, fileType)
+    beanName = boName + "Bean"  # Business bean name
+    iValueName = "I" + boName + "Value"  # Interface name
+
+    # Build package declaration
+    if nameSpace:
+        packageLine = f"package {nameSpace}.bo;"
+    else:
+        packageLine = ""
+
+    # Build business value import
+    # Transform namespace: replace ".bo" with ".ivalues"
+    businessValueImport = f"import {nameSpace}.ivalues.{iValueName};"
+
+    if fileType == 'Bean':
+        return generateBeanCode(packageLine, businessValueImport, className, beanName, iValueName, boName, properties, nameSpace)
+    elif fileType == 'Engine':
+        return generateEngineCode(packageLine, businessValueImport, className, beanName, iValueName, boName, properties, nameSpace)
+    else:
+        return ""
+
+
+def generateBeanCode(packageLine, businessValueImport, className, beanName, iValueName, boName, properties, nameSpace):
+    """
+    Generate Bean class code using string concatenation
+    """
+    # Generate property constants and methods
+    propertyConstants = []
+    propertyMethods = []
+
+    for prop in properties:
+        name = prop['name']
+        dataType = prop['javaDataType']
+
+        # Convert to method name
+        methodName = to_camel_case(name, capitalize_first=True)
+        methodNameUpper = name.upper()
+
+        # Get type information
+        javaObjType = getJavaObjectType(dataType)
+        singleDataType = getSingleDataType(dataType)
+        transFunc = getTransFunc(dataType)
+        isSingle = isSingleDataType(singleDataType)
+        nullValue = getNullValue(singleDataType)
+
+        # Add constant
+        propertyConstants.append(f'  public final static String S_{methodNameUpper} = "{name}";')
+
+        # Generate methods using string concatenation
+        if isSingle:
+            initMethod = f'  public void init{methodName}({singleDataType} value){{\n    try{{\n     this.initProperty(S_{methodNameUpper},new {javaObjType}(value));\n    }}catch(Exception e){{\n      e.printStackTrace();\n    }}\n  }}'
+        else:
+            initMethod = f'  public void init{methodName}({singleDataType} value){{\n    try{{\n     this.initProperty(S_{methodNameUpper},value);\n    }}catch(Exception e){{\n      e.printStackTrace();\n    }}\n  }}'
+
+        if isSingle:
+            setMethod = f'  public void set{methodName}({singleDataType} value){{\n   try{{\n     this.set(S_{methodNameUpper},new {javaObjType}(value));\n   }}catch(Exception e){{\n      e.printStackTrace();\n    }}\n  }}'
+        else:
+            setMethod = f'  public void set{methodName}({singleDataType} value){{\n   try{{\n     this.set(S_{methodNameUpper},value);\n   }}catch(Exception e){{\n      e.printStackTrace();\n    }}\n  }}'
+
+        setNullMethod = f'  public void set{methodName}Null(){{\n   try{{\n     this.set(S_{methodNameUpper},null);\n   }}catch(Exception e){{\n      e.printStackTrace();\n    }}\n  }}'
+
+        if singleDataType != "String":
+            getMethod = f'  public {singleDataType} get{methodName}(){{\n   return DataType.{transFunc}(this.get(S_{methodNameUpper}));\n  }}'
+        else:
+            getMethod = f'  public {singleDataType} get{methodName}(){{\n    return DataType.{transFunc}(this.get(S_{methodNameUpper}));\n  }}'
+
+        if singleDataType != "String":
+            getInitMethod = f'  public {singleDataType} get{methodName}InitialValue(){{\n    return DataType.{transFunc}(this.getOldObj(S_{methodNameUpper}));\n  }}'
+        else:
+            getInitMethod = f'  public {singleDataType} get{methodName}InitialValue(){{\n    return DataType.{transFunc}(this.getOldObj(S_{methodNameUpper}));\n  }}'
+
+        propertyMethods.extend([initMethod, setMethod, setNullMethod, getMethod, getInitMethod])
+
+    # Join properties
+    propertyConstantsStr = chr(10).join(propertyConstants)
+    propertyMethodsStr = chr(10).join(propertyMethods)
+
+    # Assemble complete Bean class using string concatenation
+    beanParts = [
+        packageLine,
+        "",
+        "import java.sql.*;",
+        "import com.ai.appframe2.bo.DataContainer;",
+        "import com.ai.appframe2.common.DataContainerInterface;",
+        "import com.ai.appframe2.common.AIException;",
+        "import com.ai.appframe2.common.ServiceManager;",
+        "import com.ai.appframe2.common.ObjectType;",
+        "import com.ai.appframe2.common.DataType;",
+        "",
+        businessValueImport,
+        "",
+        f"public class {className} extends DataContainer implements DataContainerInterface,{iValueName}{{",
+        "",
+        f'  private static String  m_boName = "{nameSpace}.bo.{boName}";',
+        "",
+        propertyConstantsStr,
+        "  public static ObjectType S_TYPE = null;",
+        "  static{",
+        "    try {",
+        f'      S_TYPE = ServiceManager.getObjectTypeFactory().getInstance(m_boName);',
+        "    }catch(Exception e){",
+        "      throw new RuntimeException(e);",
+        "    }",
+        "  }",
+        f"  public {className}() throws AIException{{",
+        "      super(S_TYPE);",
+        "  }",
+        "",
+        " public static ObjectType getObjectTypeStatic() throws AIException{",
+        "   return S_TYPE;",
+        " }",
+        "",
+        " public void setObjectType(ObjectType  value) throws AIException{",
+        "   //不能重新设置对象的业务对象类型",
+        "   throw new AIException(\"Cannot reset ObjectType\");",
+        " }",
+        "",
+        propertyMethodsStr,
+        "}"
+    ]
+
+    beanCode = chr(10).join(beanParts)
+    return beanCode
+
+
+def generateEngineCode(packageLine, businessValueImport, className, beanName, iValueName, boName, properties, nameSpace):
+    """
+    Generate Engine class code using string concatenation
+    """
+    # Build IValue namespace for imports
+    iValueFullName = f"{nameSpace}.ivalues.{iValueName}"
+
+    # Assemble Engine class using string concatenation
+    engineParts = [
+        packageLine,
+        "",
+        "import java.util.Map;",
+        "import java.util.HashMap;",
+        "import java.sql.Connection;",
+        "import java.sql.ResultSet;",
+        "import com.ai.appframe2.common.AIException;",
+        "import com.ai.appframe2.common.DataContainerInterface;",
+        "import com.ai.appframe2.common.ServiceManager;",
+        "import com.ai.appframe2.util.criteria.Criteria;",
+        "import com.ai.appframe2.bo.DataContainerFactory;",
+        "",
+        businessValueImport,
+        "",
+        f"public class {className} {{",
+        "",
+        f"  public static {beanName}[] getBeans(DataContainerInterface dc) throws",
+        "      Exception {",
+        "    Map ps = dc.getProperties();",
+        "    StringBuffer buffer = new StringBuffer();",
+        "    Map pList = new HashMap();",
+        "    for (java.util.Iterator cc = ps.entrySet().iterator(); cc.hasNext(); ) {",
+        "      Map.Entry e = (Map.Entry) cc.next();",
+        "      if(buffer.length() >0)",
+        "\t buffer.append(\" and \");",
+        "      buffer.append(e.getKey().toString() + \" = :p_\" + e.getKey().toString());",
+        "      pList.put(\"p_\" + e.getKey().toString(),e.getValue());",
+        "    }",
+        "    Connection conn = ServiceManager.getSession().getConnection();",
+        "    try {",
+        "      return getBeans(buffer.toString(), pList);",
+        "    }finally{",
+        "      if(conn != null)",
+        "\tconn.close();",
+        "    }",
+        "  }",
+        "",
+        "  public static  " + beanName + "[] getBeans(Criteria sql) throws Exception{",
+        "   return getBeans(sql,-1,-1,false);",
+        "  }",
+        "  public static  " + beanName + "[] getBeans(Criteria sql,int startNum,int endNum,boolean isShowFK) throws Exception{",
+        "    String[] cols = null;",
+        "    String condition = \"\";",
+        "    Map param = null;",
+        "    if(sql != null){",
+        "      cols = (String[])sql.getSelectColumns().toArray(new String[0]);",
+        "      condition = sql.toString();",
+        "      param = sql.getParameters();",
+        "    }",
+        "    return (" + beanName + "[])getBeans(cols,condition,param,startNum,endNum,isShowFK);",
+        "  }",
+        "",
+        "",
+        "",
+        "  public static  " + beanName + "[] getBeans(String condition,Map parameter) throws Exception{",
+        "\treturn getBeans(null,condition,parameter,-1,-1,false);",
+        "  }",
+        "",
+        "  public static  " + beanName + "[] getBeans(String[] cols,String condition,Map parameter,",
+        "\t   int startNum,int endNum,boolean isShowFK) throws Exception{",
+        "\tConnection conn = null;",
+        "\ttry{",
+        "\t\tconn = ServiceManager.getSession().getConnection();",
+        "\t\treturn (" + beanName + "[])ServiceManager.getDataStore().retrieve(conn," + beanName + ".class," + beanName + ".getObjectTypeStatic(),cols,condition,parameter,startNum,endNum,isShowFK,false,null);",
+        "\t}catch(Exception e){",
+        "\t\tthrow e;",
+        "\t}finally{",
+        "\t   if(conn != null)",
+        "\t      conn.close();",
+        "\t}",
+        "  }",
+        "",
+        "   public static int getBeansCount(String condition,Map parameter) throws Exception{",
+        "     Connection conn = null;",
+        "      try {",
+        "\t      conn = ServiceManager.getSession().getConnection();",
+        "\t      return ServiceManager.getDataStore().retrieveCount(conn," + beanName + ".getObjectTypeStatic(),condition,parameter,null);",
+        "      }catch(Exception e){",
+        "\t      throw e;",
+        "      }finally{",
+        "\t  if(conn != null)",
+        "\t      conn.close();",
+        "      }",
+        "  }",
+        "",
+        "  public static void save( " + beanName + " aBean) throws Exception",
+        "  {",
+        "\t  Connection conn = null;",
+        "\ttry{",
+        "\t\tconn = ServiceManager.getSession().getConnection();",
+        "\t\t   ServiceManager.getDataStore().save(conn,aBean);",
+        "\t   }catch(Exception e){",
+        "\t\tthrow e;",
+        "\t}finally{",
+        "\t  if(conn != null)",
+        "\t\t  conn.close();",
+        "\t}",
+        "  }",
+        "",
+        "  public static  void save( " + beanName + "[] aBeans) throws Exception{",
+        "\t     Connection conn = null;",
+        "\ttry{",
+        "\t\tconn = ServiceManager.getSession().getConnection();",
+        "\t\tServiceManager.getDataStore().save(conn,aBeans);",
+        "\t}catch(Exception e){",
+        "\t\tthrow e;",
+        "\t}finally{",
+        "\t  if(conn != null)",
+        "\t\t      conn.close();",
+        "\t}",
+        "  }",
+        "",
+        "  public static  void saveBatch( " + beanName + "[] aBeans) throws Exception{",
+        "\t     Connection conn = null;",
+        "\ttry{",
+        "\t\tconn = ServiceManager.getSession().getConnection();",
+        "\t\tServiceManager.getDataStore().saveBatch(conn,aBeans);",
+        "\t}catch(Exception e){",
+        "\t\tthrow e;",
+        "\t}finally{",
+        "\t  if(conn != null)",
+        "\t\t      conn.close();",
+        "\t}",
+        "  }",
+        "",
+        "",
+        "  public static  " + beanName + " wrap(DataContainerInterface source,Map colMatch,boolean canModify){",
+        "     try{",
+        "       return (" + beanName + ")DataContainerFactory.wrap(source," + beanName + ".class,colMatch,canModify);",
+        "     }catch(Exception e){",
+        "       if(e.getCause()!=null)",
+        "\t throw new RuntimeException(e.getCause());",
+        "       else",
+        "\t throw new RuntimeException(e);",
+        "     }",
+        "  }",
+        "  public static  " + beanName + " copy(DataContainerInterface source,Map colMatch,boolean canModify){",
+        "     try {",
+        "       " + beanName + " result = new " + beanName + "();",
+        "       DataContainerFactory.copy(source, result, colMatch);",
+        "       return result;",
+        "     }",
+        "     catch (AIException ex) {",
+        "       if(ex.getCause()!=null)",
+        "\t throw new RuntimeException(ex.getCause());",
+        "       else",
+        "\t throw new RuntimeException(ex);",
+        "     }",
+        "  }",
+        "",
+        "  public static  " + beanName + " transfer(" + iValueFullName + " value) {",
+        "\t   if(value==null)",
+        "\t\t   return null;",
+        "\ttry{",
+        "\t\tif(value instanceof " + beanName + "){",
+        "\t\t\treturn (" + beanName + ")value;",
+        "\t\t}",
+        "\t\t" + beanName + " newBean = new " + beanName + "();",
+        "",
+        "\t\tDataContainerFactory.transfer(value ,newBean);",
+        "\t\treturn newBean;",
+        "\t}catch (Exception ex) {",
+        "\t\tif(ex.getCause()!=null)",
+        "\t\t\tthrow new RuntimeException(ex.getCause());",
+        "\t\telse",
+        "\t\t\tthrow new RuntimeException(ex);",
+        "\t}",
+        "  }",
+        "",
+        "  public static  " + beanName + "[] transfer(" + iValueFullName + "[] value) {",
+        "\t   if(value==null || value.length==0)",
+        "\t\t   return null;",
+        "",
+        "\ttry{",
+        "\t\tif(value instanceof " + beanName + "[]){",
+        "\t\t\treturn (" + beanName + "[])value;",
+        "\t\t}",
+        "\t\t" + beanName + "[] newBeans = new " + beanName + "[value.length];",
+        "\t\t   for(int i=0;i<newBeans.length;i++){",
+        "\t\t\t   newBeans[i] = new " + beanName + "();",
+        "\t\t\tDataContainerFactory.transfer(value[i] ,newBeans[i]);",
+        "\t\t}",
+        "\t\treturn newBeans;",
+        "\t}catch (Exception ex) {",
+        "\t\tif(ex.getCause()!=null)",
+        "\t\t\tthrow new RuntimeException(ex.getCause());",
+        "\t\telse",
+        "\t\t\tthrow new RuntimeException(ex);",
+        "\t}",
+        "  }",
+        "  public static void save(" + iValueFullName + " aValue) throws Exception",
+        "  {",
+        "     save(transfer(aValue));",
+        "  }",
+        "",
+        "  public static  void save( " + iValueFullName + "[] aValues) throws Exception{",
+        "\t  save(transfer(aValues));",
+        "  }",
+        "",
+        "  public static  void saveBatch( " + iValueFullName + "[] aValues) throws Exception{",
+        "     saveBatch(transfer(aValues));",
+        "  }",
+        "}"
+    ]
+
+    engineCode = chr(10).join(engineParts)
+    return engineCode
+
+
+def getClassName(boName, fileType):
+    """
+    Get class name based on BO name and file type
+
+    Args:
+        boName: BO name (without extension)
+        fileType: File type ('Bean', 'Engine', etc.)
+
+    Returns:
+        Generated class name
+    """
+    if '.' in boName:
+        boName = boName[:boName.index('.')]
+
+    type_map = {
+        'BOMap': f'BO{boName}Map',
+        'BOBean': f'BO{boName}Bean',
+        'BOEngine': f'BO{boName}Engine',
+        'Bean': f'{boName}Bean',
+        'Engine': f'{boName}Engine',
+        'INTERFACE': f'I{boName}Value'
+    }
+
+    return type_map.get(fileType, f'{boName}{fileType}')
+
+
+def getSingleDataType(dataType):
+    """
+    Get single data type (remove array indicator if present)
+    e.g., "String[]" -> "String", "int[]" -> "int"
+    Also converts DateTime to Timestamp for Java compatibility
+
+    Args:
+        dataType: Data type string
+
+    Returns:
+        Single data type without array indicator
+    """
+    if dataType and dataType.endswith("[]"):
+        dataType = dataType[:-2]
+    # Convert DateTime to Timestamp for Java compatibility
+    if dataType == "DateTime":
+        dataType = "Timestamp"
+    return dataType
+
+
+def getJavaObjectType(dataType):
+    """
+    Get Java object type for a data type
+
+    Args:
+        dataType: Data type string
+
+    Returns:
+        Java object type
+    """
+    type_map = {
+        'String': 'String',
+        'Integer': 'Integer',
+        'Long': 'Long',
+        'Double': 'Double',
+        'DateTime': 'Timestamp'
+    }
+    return type_map.get(dataType, dataType)
+
+
+def getTransFunc(dataType):
+    """
+    Get DataType conversion function name
+
+    Args:
+        dataType: Data type string
+
+    Returns:
+        Function name for DataType conversion
+    """
+    func_map = {
+        'String': 'getAsString',
+        'Short': 'getAsShort',
+        'Integer': 'getAsInt',
+        'Long': 'getAsLong',
+        'Double': 'getAsDouble',
+        'Float': 'getAsFloat',
+        'Byte': 'getAsByte',
+        'Char': 'getAsChar',
+        'Boolean': 'getAsBoolean',
+        'Date': 'getAsDate',
+        'Time': 'getAsTime',
+        'DateTime': 'getAsDateTime'
+    }
+    return func_map.get(dataType, 'toString')
+
+
+def getNullValue(dataType):
+    """
+    Get null value for a data type
+
+    Args:
+        dataType: Data type string
+
+    Returns:
+        Null value string
+    """
+    null_map = {
+        'String': '""',
+        'Integer': '0',
+        'Long': '0L',
+        'Double': '0.0',
+        'DateTime': 'null'
+    }
+    return null_map.get(dataType, 'null')
+
+
+def isSingleDataType(dataType):
+    """
+    Check if data type is single type (not object)
+
+    Args:
+        dataType: Data type string
+
+    Returns:
+        True if single data type
+    """
+    singleTypes = ['int', 'long', 'double', 'boolean', 'short', 'byte', 'float']
+    # Check against Java primitive types (lowercase comparison)
+    return dataType.lower() in singleTypes
+
+
+def to_camel_case(name, capitalize_first=True):
+    """
+    Convert snake_case to camelCase
+    e.g., "user_id" -> "userId", "user_id" -> "UserId" (if capitalize_first=True)
+
+    Args:
+        name: Input string in snake_case
+        capitalize_first: Whether to capitalize first letter
+
+    Returns:
+        String in camelCase or CamelCase
+    """
+    parts = name.split('_')
+    if capitalize_first:
+        return ''.join(part.capitalize() for part in parts if part)
+    else:
+        return parts[0].lower() + ''.join(part.capitalize() for part in parts[1:] if part)
+
+
+def format_xml_element(element, indent="  ", level=0):
+    """
+    Format XML element with proper indentation (pretty print)
+
+    Args:
+        element: XML element to format
+        indent: Indentation string
+        level: Current indentation level
+    """
+    # Get all children
+    children = list(element)
+
+    # Remove and re-add children with proper indentation
+    for child in children:
+        element.remove(child)
+        format_xml_element(child, indent, level + 1)
+
+    # If there are children, add them with indentation
+    if children:
+        element.text = "\n" + indent * (level + 1)
+        for i, child in enumerate(children):
+            element.append(child)
+            child.tail = "\n" + indent * (level + 1)
+            if i == len(children) - 1:
+                child.tail = "\n" + indent * level
+
+    # Set tail for root element
+    if level == 0:
+        element.tail = "\n"
+
+
+class BOGeneratorSkill:
+    """BO 生成技能的主类"""
+
+    def __init__(self):
+        self.python_available = self.check_python()
+        self.default_namespace = "com.ai.appframe2.bo"
+        self.default_output_dir = "./output"
+        self.current_project_dir = os.getcwd()
+
+    def check_python(self):
+        """检查 Python 是否安装"""
+        python_commands = ['python3', 'python', 'python3.9', 'python3.10']
+
+        for cmd in python_commands:
+            try:
+                result = subprocess.run([cmd, '--version'],
+                                      capture_output=True,
+                                      text=True,
+                                      timeout=2)
+                if result.returncode == 0:
+                    return True, cmd
+            except (subprocess.TimeoutExpired, FileNotFoundError):
+                continue
+
+        return False, None
+
+    def detect_python_installation(self):
+        """检测 Python 安装并提供安装建议"""
+        available, cmd = self.python_available
+
+        if not available:
+            print("=" * 60)
+            print("⚠️  未检测到 Python 安装")
+            print("=" * 60)
+            print()
+            print("要使用此技能，您需要先安装 Python：")
+            print()
+            print("📦  安装方法：")
+            print()
+            print("  macOS:")
+            print("    brew install python3")
+            print("    # 或下载官方安装包")
+            print()
+            print("  Linux (Ubuntu/Debian):")
+            print("    sudo apt-get install python3")
+            print("    sudo apt-get install python3-pip")
+            print()
+            print("  Windows:")
+            print("    从 https://www.python.org/downloads/ 下载安装")
+            print("    # 或使用 Microsoft Store 搜索 'Python'")
+            print()
+            print("  在线环境:")
+            print("    # 使用在线 Python 编辑器：https://www.python.org/shell/")
+            print("    # 使用在线工具完成临时任务")
+            print()
+            print("💡  安装后请重新运行此技能")
+            print("=" * 60)
+            return False
+
+        print(f"✅ 检测到 Python: {cmd}")
+        return True
+
+    def parse_field_description(self, field_desc):
+        """解析字段描述"""
+        # 支持多种格式
+        if isinstance(field_desc, dict):
+            return self.parse_dict_field(field_desc)
+        elif ':' in field_desc:
+            parts = field_desc.split(':')
+            num_parts = len(parts)
+
+            # 提取基础信息
+            name = parts[0].strip()
+
+            # 处理不同格式的字段描述
+            # 格式 1: field_name:type:remark (如 order_id:订单 ID:主键)
+            # 格式 2: field_name:remark:type (如 order_amount:订单金额:DECIMAL(18,2))
+            # 格式 3: field_name:type:type_marker:db_type (如 order_id:订单 ID:主键:VARCHAR(32))
+
+            type_hint = ''
+            remark = ''
+            db_type_spec = ''
+            type_marker = ''
+
+            if num_parts == 2:
+                # 字段名：类型
+                type_hint = parts[1].strip()
+                remark = ''
+            elif num_parts == 3:
+                # 智能判断是哪种格式
+                part1 = parts[1].strip()
+                part2 = parts[2].strip()
+
+                # 检查 part2 是否是数据库类型（包含特定关键字）
+                db_keywords = ['VARCHAR', 'CHAR', 'DECIMAL', 'INT', 'BIGINT', 'TIMESTAMP', 'DATE', 'NUMBER']
+                is_db_type = any(keyword in part2.upper() for keyword in db_keywords)
+
+                if is_db_type:
+                    # 格式：字段名：注释：数据库类型 (如 order_amount:订单金额:DECIMAL(18,2))
+                    remark = part1
+                    db_type_spec = part2
+                else:
+                    # 格式：字段名：类型：注释 (如 order_id:订单 ID:主键)
+                    type_hint = part1
+                    remark = part2
+            elif num_parts >= 4:
+                # 格式：字段名：类型：类型标记：数据库类型 (如 order_id:订单 ID:主键:VARCHAR(32))
+                type_hint = parts[1].strip()
+                type_marker = parts[2].strip()
+                db_type_spec = parts[3].strip()
+                remark = parts[4].strip() if num_parts >= 5 else ''
+
+            # 推断数据类型
+            datatype = self.infer_datatype(name, type_hint if type_hint else (remark if remark else ''))
+
+            # 处理数据库类型和长度信息
+            maxlength = '32'
+            floatlength = '0'
+            db_datatype = 'VARCHAR'
+            field_type = 'COL'
+
+            # 检查是否包含主键标记 (在 remark 或 type_marker 中)
+            if '主键' in remark or '主键' in type_marker or 'PK' in type_marker.upper() or 'PK' in remark.upper():
+                field_type = 'PK'
+
+            # 如果有数据库类型规范，解析它
+            if db_type_spec:
+                inferred_datatype, maxlength, floatlength = self.parse_type_spec(db_type_spec)
+                # 如果显式指定了类型，优先使用解析出的类型
+                if db_type_spec.upper().startswith('VARCHAR') or db_type_spec.upper().startswith('CHAR'):
+                    db_datatype = db_type_spec.split('(')[0].upper()
+                    if '(' in db_type_spec:
+                        db_datatype = f"{db_datatype}({maxlength})"
+                    datatype = 'String'
+                elif db_type_spec.upper().startswith('DECIMAL'):
+                    db_datatype = f"DECIMAL({maxlength},{floatlength})"
+                    datatype = 'Double'
+                elif db_type_spec.upper().startswith('INT') or db_type_spec.upper().startswith('BIGINT'):
+                    db_datatype = db_type_spec.split('(')[0].upper()
+                    datatype = inferred_datatype  # 更新 Java 类型
+                    maxlength = ''  # INT 和 BIGINT 不需要长度
+                elif db_type_spec.upper().startswith('TIMESTAMP') or db_type_spec.upper().startswith('DATE'):
+                    db_datatype = 'TIMESTAMP'
+                    datatype = 'DateTime'
+                    maxlength = ''  # TIMESTAMP 和 DATE 不需要长度
+                elif db_type_spec.upper().startswith('INTEGER'):
+                    db_datatype = 'INTEGER'
+                    datatype = 'Integer'
+                    maxlength = ''  # INTEGER 不需要长度
+                # remark 保持原样
+            else:
+                # 没有数据库类型规范，根据 type_hint 推断 db_datatype
+                db_datatype = self.infer_db_datatype(name, type_hint if type_hint else remark)
+                if isinstance(db_datatype, str) and '(' in db_datatype:
+                    # 如果 infer_db_datatype 返回了带长度的类型，解析它
+                    base = db_datatype.split('(')[0]
+                    if base in ['VARCHAR', 'CHAR', 'DECIMAL']:
+                         pass  # 保持原样
+                    else:
+                         # 尝试从 type_hint 解析长度
+                         parsed_dt, ml, fl = self.parse_type_spec(type_hint if type_hint else remark)
+                         if ml != '32': maxlength = ml
+                         if fl != '0': floatlength = fl
+                elif db_datatype == 'VARCHAR' and (type_hint or remark):
+                     # 尝试从 type_hint 或 remark 解析长度以补充 maxlength
+                     parsed_dt, ml, fl = self.parse_type_spec(type_hint if type_hint else remark)
+                     if ml != '32': maxlength = ml
+                     if fl != '0': floatlength = fl
+
+            # 清理 remark 中的主键标记
+            if '主键' in remark:
+                if remark.strip() == '主键':
+                    remark = ''
+                else:
+                    remark = remark.replace('主键', '').strip()
+            if 'PK' in remark.upper():
+                if remark.upper().strip() == 'PK':
+                    remark = ''
+                else:
+                    import re
+                    remark = re.sub(r'\bPK\b', '', remark, flags=re.IGNORECASE).strip()
+
+            result = {
+                'name': name,
+                'datatype': datatype,
+                'remark': remark,
+                'db_datatype': db_datatype,
+                'maxlength': str(maxlength),
+                'floatlength': str(floatlength),
+                'type': field_type
+            }
+            return result
+
+        else:
+            # 简单格式：字段名
+            return {
+                'name': field_desc.strip(),
+                'datatype': self.infer_datatype(field_desc, ''),
+                'remark': '',
+                'db_datatype': self.infer_db_datatype(field_desc, ''),
+                'maxlength': '32',
+                'floatlength': '0',
+                'type': 'COL'
+            }
+
+    def parse_dict_field(self, field_dict):
+        """解析字典格式的字段描述"""
+        return {
+            'name': field_dict.get('name', ''),
+            'datatype': field_dict.get('datatype', 'String'),
+            'maxlength': field_dict.get('maxlength', '32'),
+            'floatlength': field_dict.get('floatlength', '0'),
+            'type': field_dict.get('type', 'COL'),
+            'remark': field_dict.get('remark', ''),
+            'db_datatype': field_dict.get('db_datatype', 'VARCHAR')
+        }
+
+    def infer_datatype(self, field_name, type_hint):
+        """根据字段名和类型提示推断 Java 数据类型"""
+        # 先检查类型提示
+        if type_hint:
+            type_upper = type_hint.upper()
+            if 'INT' in type_upper or 'NUMBER' in type_upper:
+                if 'BIGINT' in type_upper or 'LONG' in type_upper:
+                    return 'Long'
+                else:
+                    return 'Integer'
+            elif 'DECIMAL' in type_upper or 'FLOAT' in type_upper or 'DOUBLE' in type_upper:
+                return 'Double'
+            elif 'TIMESTAMP' in type_upper or 'DATE' in type_upper or 'DATETIME' in type_upper:
+                return 'DateTime'
+            elif 'VARCHAR' in type_upper or 'CHAR' in type_upper or 'STRING' in type_upper:
+                return 'String'
+
+        # 根据字段名推断
+        keywords_integer = ['count', 'quantity', 'amount', 'status', 'level', 'rank', 'number']
+        keywords_long = ['id', 'balance', 'amount', 'price', 'quantity', 'total', 'count']
+        keywords_double = ['rate', 'ratio', 'percentage', 'discount', 'price', 'amount', 'balance']
+        keywords_datetime = ['time', 'date', 'created', 'updated', 'modified', 'birthday']
+
+        field_lower = field_name.lower()
+
+        # 检查 ID 字段
+        if field_lower.endswith('_id') or field_lower == 'id':
+            return 'String'  # ID 通常是字符串
+
+        # 检查数字类型
+        if any(keyword in field_lower for keyword in keywords_integer):
+            # 进一步判断是 Integer 还是 Long
+            if any(keyword in field_lower for keyword in keywords_long):
+                return 'Long'
+            return 'Integer'
+
+        # 检查浮点类型
+        if any(keyword in field_lower for keyword in keywords_double):
+            return 'Double'
+
+        # 检查时间类型
+        if any(keyword in field_lower for keyword in keywords_datetime):
+            return 'DateTime'
+
+        # 默认为 String
+        return 'String'
+
+    def infer_db_datatype(self, field_name, type_hint):
+        """根据字段名和类型提示推断数据库类型"""
+        # 先检查类型提示
+        if type_hint:
+            type_upper = type_hint.upper()
+            if 'VARCHAR' in type_upper or 'CHAR' in type_upper:
+                return 'VARCHAR'
+            elif 'DECIMAL' in type_upper:
+                return 'DECIMAL'
+            elif 'INT' in type_upper:
+                return 'INT'
+            elif 'BIGINT' in type_upper or 'LONG' in type_upper:
+                return 'BIGINT'
+            elif 'TIMESTAMP' in type_upper:
+                return 'TIMESTAMP'
+            elif 'DATE' in type_upper or 'DATETIME' in type_upper:
+                return 'TIMESTAMP'
+
+        # 根据字段名推断
+        if field_name.lower().endswith('_id') or field_name.lower() == 'id':
+            return 'VARCHAR(32)'
+
+        # 默认
+        return 'VARCHAR'
+
+    def parse_type_spec(self, type_spec):
+        """解析类型规范（如 VARCHAR(32)、DECIMAL(18,2)）"""
+        datatype = 'String'
+        maxlength = '32'
+        floatlength = '0'
+
+        if not type_spec:
+            return datatype, maxlength, floatlength
+
+        type_upper = type_spec.upper()
+
+        # 解析类型和参数
+        if '(' in type_spec:
+            base_type = type_spec.split('(')[0].upper()
+            params = type_spec[type_spec.find('(')+1:type_spec.rfind(')')].split(',')
+
+            if base_type == 'VARCHAR' or base_type == 'CHAR':
+                datatype = 'String'
+                maxlength = params[0] if params else '32'
+            elif base_type == 'DECIMAL':
+                datatype = 'Double'
+                if len(params) >= 2:
+                    maxlength = params[0] if params else '18'
+                    floatlength = params[1] if len(params) >= 2 else '2'
+            elif base_type == 'INT' or base_type == 'BIGINT':
+                datatype = 'Long' if base_type == 'BIGINT' else 'Integer'
+                maxlength = params[0] if params else '10'
+            elif base_type == 'TIMESTAMP' or base_type == 'DATE':
+                datatype = 'DateTime'
+                maxlength = ''
+        else:
+            # 简单类型名称
+            if 'DEC' in type_upper or 'FLOAT' in type_upper or 'DOUBLE' in type_upper:
+                datatype = 'Double'
+            elif 'INT' in type_upper or 'NUMBER' in type_upper:
+                datatype = 'Long'
+            elif 'DATE' in type_upper or 'TIME' in type_upper:
+                datatype = 'DateTime'
+
+        return datatype, maxlength, floatlength
+
+    def infer_namespace(self, table_name):
+        """根据表名推断命名空间"""
+        # 提取简单的模块名推断
+        module_name = table_name.split('_')[0] if '_' in table_name else table_name
+        return f"{self.default_namespace}.{module_name}"
+
+    def infer_output_dir(self):
+        """推断输出目录
+
+        优先顺序：
+        1. 如果当前目录是项目根目录（存在 CLAUDE.md），使用 ./src
+        2. 向上查找找到项目根目录，使用其 src 目录
+        3. 检查常见的项目结构
+        4. 默认创建 output 目录
+        """
+        # 获取当前工作目录
+        current_dir = Path.cwd()
+
+        # 1. 检查当前目录是否是项目根目录（存在 CLAUDE.md）
+        if (current_dir / 'CLAUDE.md').exists():
+            src_dir = current_dir / 'src'
+            src_dir.mkdir(parents=True, exist_ok=True)
+            return str(src_dir)
+
+        # 2. 向上查找找到项目根目录
+        for parent in current_dir.parents:
+            if (parent / 'CLAUDE.md').exists():
+                src_dir = parent / 'src'
+                src_dir.mkdir(parents=True, exist_ok=True)
+                return str(src_dir)
+
+        # 3. 检查常见的项目结构
+        possible_dirs = [
+            './src',
+            './output',
+            './build/output',
+            './src/main/resources',
+            './target/classes'
+        ]
+
+        for dir_path in possible_dirs:
+            if os.path.exists(dir_path):
+                return dir_path
+
+        # 4. 默认创建 output 目录
+        output_dir = './output'
+        os.makedirs(output_dir, exist_ok=True)
+        return output_dir
+
+    def generate_sql(self, table_name, attributes, output_dir, db_type=None):
+        """
+        生成建表 SQL
+
+        Args:
+            table_name: 表名
+            attributes: 字段属性列表
+            output_dir: 输出目录
+            db_type: 数据库类型，如果为None则使用对象的db_type属性
+        """
+        # 使用传入的db_type或对象的db_type属性
+        actual_db_type = db_type if db_type else getattr(self, 'db_type', DEFAULT_DB_TYPE)
+        actual_db_type = normalize_db_type(actual_db_type)
+
+        # 获取SQL方言
+        sql_dialect = get_sql_dialect(actual_db_type)
+
+        sql_dir = Path(output_dir) / 'sql'
+        sql_dir.mkdir(parents=True, exist_ok=True)
+
+        sql_file = sql_dir / f"{table_name}.sql"
+
+        # 构建 SQL 语句 - 根据SQL方言使用不同的语法
+        # Oracle和PostgreSQL不支持 IF EXISTS 的 DROP TABLE (旧版本)
+        if sql_dialect == 'ORACLE':
+            drop_stmt = f"DROP TABLE {table_name};"
+        elif sql_dialect == 'POSTGRESQL':
+            drop_stmt = f"DROP TABLE IF EXISTS {table_name} CASCADE;"
+        else:
+            drop_stmt = f"DROP TABLE IF EXISTS {table_name};"
+
+        sql_lines = [
+            f"-- {table_name} 表的建表 SQL (数据库类型: {actual_db_type}, 方言: {sql_dialect})",
+            "",
+            drop_stmt,
+            "",
+            f"CREATE TABLE {table_name} (",
+        ]
+
+        # 收集字段定义
+        field_defs = []
+        primary_keys = []
+        for attr in attributes:
+            field_name = attr['name']
+            db_datatype = attr.get('db_datatype', 'VARCHAR')
+            maxlength = attr.get('maxlength', '32')
+            floatlength = attr.get('floatlength', '0')
+            remark = attr.get('remark', '')
+            type_attr = attr.get('type', 'COL')
+
+            # 检查主键
+            if type_attr == 'PK':
+                primary_keys.append(field_name)
+
+            # 根据数据库类型调整数据类型
+            adjusted_db_datatype = self._adjust_datatype_for_db(db_datatype, actual_db_type, sql_dialect)
+
+            # 字段定义
+            field_def = f"    {field_name} {adjusted_db_datatype}"
+
+            # 检查 db_datatype 是否已经包含长度信息，且不是 SERIAL 类型
+            if '(' not in adjusted_db_datatype and 'SERIAL' not in adjusted_db_datatype.upper():
+                # 如果没有长度信息，则添加（根据数据库类型）
+                if maxlength and maxlength != '':
+                    field_def += f"({maxlength})"
+                if floatlength and floatlength != '0':
+                    field_def += f",{floatlength}"
+
+            field_def += " NOT NULL"
+
+            # 只有 MySQL 支持字段级别的 COMMENT
+            if remark and sql_dialect == 'MYSQL':
+                field_def += f" COMMENT '{remark}'"
+
+            field_defs.append(field_def)
+
+        # 添加主键约束作为最后一个"字段"
+        if primary_keys:
+            pk_name = f"PK_{table_name}"
+            if sql_dialect == 'ORACLE':
+                pk_def = f"    CONSTRAINT {pk_name} PRIMARY KEY (" + ", ".join(primary_keys) + ")"
+            else:
+                pk_def = "    PRIMARY KEY (" + ", ".join(primary_keys) + ")"
+            field_defs.append(pk_def)
+
+        # 用逗号连接所有字段定义
+        sql_lines.append(",\n".join(field_defs))
+
+        # 表选项 - 根据SQL方言
+        if sql_dialect == 'MYSQL':
+            sql_lines.extend([
+                ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+                f"COMMENT='{table_name}表';",
+            ])
+        elif sql_dialect == 'ORACLE':
+            sql_lines.append(");")
+            # Oracle 使用单独的COMMENT语句
+            for attr in attributes:
+                if attr.get('remark'):
+                    field_name = attr['name']
+                    remark = attr['remark']
+                    sql_lines.append(f"COMMENT ON COLUMN {table_name}.{field_name} IS '{remark}';")
+            sql_lines.append(f"COMMENT ON TABLE {table_name} IS '{table_name}表';")
+        elif sql_dialect == 'POSTGRESQL':
+            sql_lines.append(");")
+            # PostgreSQL 使用单独的COMMENT语句
+            for attr in attributes:
+                if attr.get('remark'):
+                    field_name = attr['name']
+                    remark = attr['remark']
+                    sql_lines.append(f"COMMENT ON COLUMN {table_name}.{field_name} IS '{remark}';")
+            sql_lines.append(f"COMMENT ON TABLE {table_name} IS '{table_name}表';")
+        else:
+            # STANDARD 方言 (DB2, SYBASE)
+            sql_lines.append(");")
+
+        # 写入文件
+        with open(sql_file, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(sql_lines))
+
+        return str(sql_file)
+
+    def _adjust_datatype_for_db(self, db_datatype, db_type, sql_dialect=None):
+        """
+        根据数据库类型和SQL方言调整数据类型
+
+        Args:
+            db_datatype: 原始数据库类型
+            db_type: 目标数据库类型
+            sql_dialect: SQL方言类型（可选，如果不提供会自动计算）
+
+        Returns:
+            调整后的数据库类型
+        """
+        if not db_datatype:
+            return 'VARCHAR(32)'
+
+        # 如果没有提供sql_dialect，则自动计算
+        if sql_dialect is None:
+            sql_dialect = get_sql_dialect(db_type)
+
+        db_datatype_upper = db_datatype.upper()
+
+        if sql_dialect == 'ORACLE':
+            # Oracle 类型映射
+            type_map = {
+                'VARCHAR': 'VARCHAR2',
+                'INT': 'NUMBER(10)',
+                'INTEGER': 'NUMBER(10)',
+                'BIGINT': 'NUMBER(19)',
+                'DECIMAL': 'NUMBER',
+                'TIMESTAMP': 'TIMESTAMP',
+                'DATETIME': 'TIMESTAMP',
+                'DATE': 'DATE',
+                'CLOB': 'CLOB',
+                'BLOB': 'BLOB'
+            }
+            for key, value in type_map.items():
+                if db_datatype_upper.startswith(key):
+                    if key in ['VARCHAR', 'CHAR']:
+                        # 保留长度参数
+                        if '(' in db_datatype:
+                            length = db_datatype[db_datatype.find('('):]
+                            return f'VARCHAR2{length}'
+                    elif key == 'DECIMAL':
+                        if '(' in db_datatype:
+                            params = db_datatype[db_datatype.find('('):]
+                            return f'NUMBER{params}'
+                    return value
+
+        elif sql_dialect == 'MYSQL':
+            # MySQL 类型映射
+            type_map = {
+                'VARCHAR2': 'VARCHAR',
+                'NUMBER': 'DECIMAL',
+            }
+            for key, value in type_map.items():
+                if db_datatype_upper.startswith(key):
+                    if key == 'VARCHAR2':
+                        if '(' in db_datatype:
+                            length = db_datatype[db_datatype.find('('):]
+                            return f'VARCHAR{length}'
+                    elif key == 'NUMBER':
+                        if '(' in db_datatype:
+                            params = db_datatype[db_datatype.find('('):]
+                            return f'DECIMAL{params}'
+                    return value
+
+        elif sql_dialect == 'POSTGRESQL':
+            # PostgreSQL 类型映射
+            type_map = {
+                'VARCHAR2': 'VARCHAR',
+                'NUMBER': 'NUMERIC',
+                'INT': 'INTEGER',
+                'INTEGER': 'INTEGER',
+                'BIGINT': 'BIGINT',
+                'DATETIME': 'TIMESTAMP',
+                'CLOB': 'TEXT',
+                'BLOB': 'BYTEA',
+            }
+            for key, value in type_map.items():
+                if db_datatype_upper.startswith(key):
+                    if key == 'VARCHAR2':
+                        if '(' in db_datatype:
+                            length = db_datatype[db_datatype.find('('):]
+                            return f'VARCHAR{length}'
+                    elif key == 'NUMBER':
+                        if '(' in db_datatype:
+                            params = db_datatype[db_datatype.find('('):]
+                            return f'NUMERIC{params}'
+                    return value
+
+        elif sql_dialect == 'STANDARD':
+            # 标准SQL类型映射 (DB2, SYBASE)
+            type_map = {
+                'VARCHAR2': 'VARCHAR',
+                'NUMBER': 'DECIMAL',
+            }
+            for key, value in type_map.items():
+                if db_datatype_upper.startswith(key):
+                    return value
+
+        # 默认返回原始类型
+        return db_datatype
+
+    def process_input(self, table_name, field_descriptions, namespace=None, output_dir=None, db_type=None):
+        """
+        处理用户输入并生成 BO 文件
+
+        Args:
+            table_name: 表名
+            field_descriptions: 字段描述列表
+            namespace: 命名空间（可选）
+            output_dir: 输出目录（可选）
+            db_type: 数据库类型（可选），支持 ORACLE/MYSQL/DB2/SYBASE/ANTDB/PANWEI/GOLDENDB
+        """
+
+        print("=" * 60)
+        print("🚀 开始生成 BO 配套文件")
+        print("=" * 60)
+        print()
+        print(f"📋 表名：{table_name}")
+
+        # 解析字段描述
+        print("📝 解析字段描述...")
+        attributes = []
+
+        # 处理多行输入
+        for field_desc in field_descriptions:
+            field_desc = field_desc.strip()
+            if not field_desc:
+                continue
+            attr = self.parse_field_description(field_desc)
+            attributes.append(attr)
+            print(f"  - {attr['name']}: {attr['datatype']} ({attr['type']}) - {attr['remark'] or '无注释'}")
+
+        if not attributes:
+            print("❌ 错误：没有提供有效的字段描述")
+            return False
+
+        print(f"✅ 成功解析 {len(attributes)} 个字段")
+        print()
+
+        # 推断或使用命名空间
+        if namespace:
+            final_namespace = namespace
+            print(f"📦 使用指定命名空间：{final_namespace}")
+        else:
+            final_namespace = self.infer_namespace(table_name)
+            print(f"🔧 推断命名空间：{final_namespace}")
+
+        # 推断或使用输出目录
+        if output_dir:
+            final_output_dir = output_dir
+            print(f"📁 使用指定输出目录：{final_output_dir}")
+        else:
+            final_output_dir = self.infer_output_dir()
+            print(f"🔧 推断输出目录：{final_output_dir}")
+
+        # 确定数据库类型
+        if db_type:
+            final_db_type = normalize_db_type(db_type)
+            print(f"🗄️ 使用指定数据库类型：{final_db_type}")
+        else:
+            final_db_type = DEFAULT_DB_TYPE
+            print(f"⚙️ 使用默认数据库类型：{final_db_type}")
+
+        # 保存数据库类型到对象属性，供后续使用
+        self.db_type = final_db_type
+
+        print()
+
+        # 生成 BO 文件
+        print("📦 生成 BO 配置和 Java 文件...")
+        try:
+            attributes_json = json.dumps(attributes, ensure_ascii=False)
+            bo_name = genBo(table_name, final_namespace, attributes_json, final_output_dir)
+            print(f"✅ 成功生成 BO: {bo_name}")
+        except Exception as e:
+            print(f"❌ 生成 BO 文件时出错：{e}")
+            return False
+
+        print()
+
+        # 生成建表 SQL
+        print("🗄️ 生成建表 SQL...")
+        try:
+            sql_file = self.generate_sql(table_name, attributes, final_output_dir, final_db_type)
+            print(f"✅ 成功生成 SQL: {sql_file}")
+        except Exception as e:
+            print(f"❌ 生成 SQL 时出错：{e}")
+            return False
+
+        print()
+        print("=" * 60)
+        print("🎉 生成完成！")
+        print("=" * 60)
+        print()
+        print("📂 生成的文件:")
+        print(f"  1. {final_namespace.replace('.', '/')}/{bo_name}.bo")
+        print(f"  2. {final_namespace.replace('.', '/')}/{bo_name}Bean.java")
+        print(f"  3. {final_namespace.replace('.', '/')}/{bo_name}Engine.java")
+        print(f"  4. {final_namespace.replace('.bo', '.ivalues').replace('.', '/')}/I{bo_name}Value.java")
+        print(f"  5. sql/{table_name}.sql")
+        print(f"\n📊 数据库类型: {final_db_type}")
+        print()
+
+        return True
+
+    def run_interactive(self):
+        """运行交互式模式"""
+        print("🎯 生成 BO 配套文件 - 交互式模式")
+        print("=" * 60)
+        print()
+
+        # 输入表名
+        table_name = input("📋 请输入表名：").strip()
+        if not table_name:
+            print("❌ 表名不能为空")
+            return False
+
+        print()
+        print("📝 请输入字段描述（每行一个字段，输入空行结束）")
+        print("格式：字段名：字段类型：字段注释 或 字段名:VARCHAR(长度):注释：主键")
+        print()
+
+        field_descriptions = []
+        while True:
+            field_desc = input(f"字段 {len(field_descriptions)+1}: ").strip()
+            if not field_desc:
+                break
+            field_descriptions.append(field_desc)
+
+        if not field_descriptions:
+            print("❌ 至少需要一个字段")
+            return False
+
+        print()
+
+        # 询问可选参数
+        use_custom_namespace = input("📦 是否指定命名空间？。默认.n): ").strip().lower()
+        namespace = None
+        if use_custom_namespace == 'y':
+            namespace = input("请输入命名空间。appframe2.bo.user): ").strip()
+
+        use_custom_output = input("📁 是否指定输出目录？.默认.n): ").strip().lower()
+        output_dir = None
+        if use_custom_output == 'y':
+            output_dir = input("请输入输出目录路径：").strip()
+
+        # 询问数据库类型
+        print()
+        print("🗄️ 数据库类型选项：ORACLE, MYSQL, DB2, SYBASE, ANTDB, PANWEI, GOLDENDB")
+        use_custom_db_type = input("是否指定数据库类型？(y/n，默认使用Oracle): ").strip().lower()
+        db_type = 'Oracle'
+        if use_custom_db_type == 'y':
+            db_type = input("请输入数据库类型: ").strip().upper()
+
+        print()
+
+        # 执行生成
+        return self.process_input(table_name, field_descriptions, namespace, output_dir, db_type)
+
+    def run_command_line(self, args):
+        """运行命令行模式"""
+        if len(args) < 2:
+            print("❌ 错误：需要提供表名和字段描述")
+            print()
+            print("用法：python3 skill.py <表名> <字段描述> [命名空间] [输出目录] [数据库类型]")
+            print()
+            print("数据库类型支持：Oracle, MySQL, DB2, Sybase, AntDB, Panwei, GoldenDB")
+            print("  如果不指定，将自动推测或默认使用ORACLE")
+            print()
+            print("示例:")
+            print("  python3 skill.py user_info 'user_id:用户 ID:主键 user_name:用户姓名' 'com.ai.appframe2.bo.user' './output'")
+            print("  python3 skill.py user_info 'user_id:用户 ID:主键' '' '' 'MYSQL'")
+            print()
+            print("高级用法（指定类型）:")
+            print("  python3 skill.py order_info 'order_id:订单 ID:主键:VARCHAR(32) order_amount:订单金额:DECIMAL(18,2):订单金额' 'com.ai.appframe2.bo.order' './output' 'Oracle'")
+            print()
+            print("字段描述支持多种格式:")
+            print("  简单：'user_id:用户 ID:主键'")
+            print("  带类型：'user_id:VARCHAR(32):用户 ID'")
+            print("  完整：'{\"name\":\"user_id\",\"type\":\"PK\",\"remark\":\"用户 ID\"}'")
+            return False
+
+        table_name = args[0]
+        # 支持换行符或空格分隔的字段描述
+        field_descriptions = args[1].split('\n') if '\n' in args[1] else args[1].split()
+
+        namespace = None
+        output_dir = None
+        db_type = None
+
+        if len(args) >= 3:
+            namespace = args[2] if args[2] else None
+        if len(args) >= 4:
+            output_dir = args[3] if args[3] else None
+        if len(args) >= 5:
+            db_type = args[4] if args[4] else 'Oracle'
+
+        return self.process_input(table_name, field_descriptions, namespace, output_dir, db_type)
+
+
+def main():
+    """主函数"""
+    skill = BOGeneratorSkill()
+
+    # 检查 Python 安装
+    if not skill.detect_python_installation():
+        return 1
+
+    print()
+
+    # 判断运行模式
+    if len(sys.argv) == 1:
+        # 交互式模式
+        success = skill.run_interactive()
+    else:
+        # 命令行模式
+        success = skill.run_command_line(sys.argv[1:])
+
+    return 0 if success else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,43 @@
+#!/bin/bash
+
+# 脚本所在的目录
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+# 映射文件路径
+MAPPING_FILE="$SCRIPT_DIR/../references/module_mapping.md"
+
+if [ ! -f "$MAPPING_FILE" ]; then
+  echo "Error: Module mapping file not found at $MAPPING_FILE"
+  exit 1
+fi
+
+if [ -z "$1" ]; then
+  echo "Usage: $0 <keyword>"
+  echo "Example: $0 group (searches by module name)"
+  echo "Example: $0 集团 (searches by description)"
+  echo "Available modules:"
+  # 读取映射文件，跳过表头和分隔线，打印第一列和第二列
+  grep "^|" "$MAPPING_FILE" | grep -v "Keyword" | grep -v "\-\-\-" | awk -F '|' '{printf "  %-15s %s\n", $2, $3}'
+  exit 1
+fi
+
+KEYWORD="$1"
+
+# 在映射文件中搜索关键词 (第一列或第二列)
+# 使用 grep 查找匹配行，然后提取第三列 (包路径)
+MATCH_LINE=$(grep -i "^|.*$KEYWORD.*|" "$MAPPING_FILE" | head -n 1)
+
+if [ -n "$MATCH_LINE" ]; then
+  MODULE_NAME=$(echo "$MATCH_LINE" | awk -F '|' '{print $2}' | xargs)
+  MODULE_DESC=$(echo "$MATCH_LINE" | awk -F '|' '{print $3}' | xargs)
+  PACKAGE_PATH=$(echo "$MATCH_LINE" | awk -F '|' '{print $4}' | xargs)
+  
+  # 将包路径转换为文件系统路径
+  FS_PATH="src/main/java/$(echo $PACKAGE_PATH | tr '.' '/')"
+
+  echo "Found module: $MODULE_NAME ($MODULE_DESC)"
+  echo "Package: $PACKAGE_PATH"
+  echo "Path: $FS_PATH"
+else
+  echo "No module found matching '$KEYWORD' in mapping file."
+  echo "Try listing all available modules with: $0"
+fi

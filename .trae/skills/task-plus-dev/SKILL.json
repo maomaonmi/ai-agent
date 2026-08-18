@@ -1,0 +1,142 @@
+{
+  "name": "task_plus_dev",
+  "version": "1.0.0",
+  "description": "Plus插件开发任务技能，根据业务需求自动生成符合规范的Plus插件代码",
+  "author": "fanhuan",
+  "created": "2026-03-18",
+  "updated": "2026-03-18",
+  "tags": ["plus", "plugin", "development", "order", "java"],
+  "category": "development",
+  "language": "java",
+  "framework": "spring-boot",
+  "entry": "task_plus_dev",
+  "parameters": {
+    "kind": {
+      "type": "string",
+      "required": false,
+      "default": "PERSON",
+      "description": "业务大类（PERSON/GROUP）",
+      "example": "PERSON"
+    },
+    "module_name": {
+      "type": "string",
+      "required": true,
+      "description": "业务模块名称（如：person、enterprise）",
+      "example": "person"
+    },
+    "biz_name": {
+      "type": "string",
+      "required": true,
+      "description": "具体业务名称（如：student、order）",
+      "example": "student"
+    },
+    "plus_name": {
+      "type": "string",
+      "required": true,
+      "description": "Plus插件名称（必须以Plus结尾）",
+      "example": "DeferredBillingRegPlus"
+    },
+    "trade_type": {
+      "type": "string",
+      "required": false,
+      "default": "110",
+      "description": "业务类型编码",
+      "example": "110"
+    },
+    "plus_type": {
+      "type": "string",
+      "required": false,
+      "default": "REG",
+      "description": "Plus类型",
+      "example": "REG"
+    },
+    "exec_no": {
+      "type": "integer",
+      "required": false,
+      "default": 999,
+      "description": "执行顺序",
+      "example": 100
+    },
+    "direction": {
+      "type": "string",
+      "required": false,
+      "default": "FORWARD",
+      "description": "执行方向（FORWARD/REVERSE）",
+      "example": "FORWARD"
+    },
+    "generate_test": {
+      "type": "boolean",
+      "required": false,
+      "default": false,
+      "description": "是否生成单元测试",
+      "example": true
+    }
+  },
+  "supported_types": [
+    "REG",
+    "BEFORE_REG_DB", 
+    "AFTER_REG_DB",
+    "REG_FINAL",
+    "BEFORE_ARCH",
+    "AFTER_ARCH",
+    "FINISH_FINAL"
+  ],
+  "supported_directions": [
+    "FORWARD",
+    "REVERSE",
+    "ABORT"
+  ],
+  "supported_kinds": [
+    "PERSON",
+    "GROUP"
+  ],
+  "output_structure": {
+    "plus_files": [
+      "svc/src/main/java/com/asiainfo/crm/order/svc/business/{module}/{biz}/plus/{subdir}/{PlusName}.java"
+    ],
+    "test_files": [
+      "svc/src/test/java/com/asiainfo/crm/order/test/business/{domain}/{module}/{PlusName}Test.java"
+    ]
+  },
+  "dependencies": {
+    "required": [
+      "spring-boot-starter",
+      "mybatis-plus",
+      "lombok",
+      "slf4j"
+    ],
+    "optional": [
+      "mockito",
+      "junit"
+    ]
+  },
+  "rules": [
+    "rule_order_flow.md",
+    "rule_plus_dev.md",
+    "common_rule.md"
+  ],
+  "validation_rules": {
+    "plus_name_suffix": "Plus$",
+    "module_name_lowercase": "^[a-z]+$",
+    "biz_name_lowercase": "^[a-z]+$",
+    "trade_type_format": "^-?\\d+$"
+  },
+  "examples": [
+    {
+      "command": "/task_plus_dev person student DeferredBillingRegPlus",
+      "description": "生成个人学生模块的延迟计费登记插件"
+    },
+    {
+      "command": "/task_plus_dev enterprise order ProcessOrderFinishPlus --trade-type=240 --exec-no=200",
+      "description": "生成企业订单模块的订单处理完工插件"
+    },
+    {
+      "command": "/task_plus_dev person student UndoDeferredBillingPlus --direction=REVERSE --plus-type=BEFORE_ARCH",
+      "description": "生成个人学生模块的延迟计费返销插件"
+    },
+    {
+      "command": "/task_plus_dev person student DeferredBillingRegPlus --generate_test=false",
+      "description": "生成个人学生模块的延迟计费登记插件（不生成单元测试）"
+    }
+  ]
+}

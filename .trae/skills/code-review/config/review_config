@@ -1,0 +1,63 @@
+{
+  "review": {
+    "rules": {
+      "workflow": {
+        "enabled": true,
+        "strict_mode": true,
+        "forbidden_keywords": [
+          "汇总", "总结", "整体", "total", "summary", "overall",
+          "所有文件", "全部文件", "跨文件", "cross-file"
+        ]
+      },
+      "architecture": {
+        "enabled": true,
+        "layer_detection": {
+          "csv": {
+            "pattern": "CSVImpl.java$",
+            "rules": ["CSV-001", "CSV-002", "CSV-003", "CSV-004", "CSV-005"]
+          },
+          "service": {
+            "pattern": "SV.java$",
+            "rules": ["SV-001", "SV-002", "SV-003", "SV-005"]
+          },
+          "dao": {
+            "pattern": "DAOImpl.java$",
+            "rules": ["DAO-001", "DAO-002", "DAO-003", "DAO-004", "DAO-005", "DAO-006", "DAO-007"]
+          },
+          "bo": {
+            "pattern": "(Bean.java$|Engine.java$|Value.java$)",
+            "rules": ["BO-001", "BO-002", "BO-003", "BO-004", "BO-005", "BO-006"]
+          }
+        }
+      },
+      "core_java": {
+        "enabled": true,
+        "check_hardcode": true,
+        "check_npe": true,
+        "check_logging": true,
+        "check_generic": true
+      },
+      "security_exception": {
+        "enabled": true,
+        "check_input_validation": true,
+        "check_exception_handling": true
+      }
+    },
+    "output": {
+      "directory": "./codeReview/",
+      "naming_pattern": "review-{filename}-{timestamp}.md",
+      "timestamp_format": "yyyyMMddHHmmsss",
+      "encoding": "UTF-8"
+    },
+    "validation": {
+      "enforce_individual_report": true,
+      "forbid_summary": true,
+      "verify_report_count": true,
+      "verify_no_cross_reference": true
+    }
+  },
+  "templates": {
+    "single_file": "templates/single_file_review.md",
+    "problem_table": "templates/problem_table.md"
+  }
+}

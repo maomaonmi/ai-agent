@@ -86,3 +86,19 @@ def test_video_workspace_exposes_reference_video_mode_and_asset_lifecycle():
     assert "thumbnailUrl" in api
     assert "createVideoThumbnail" in api
     assert "Video 1" in workspace
+
+
+def test_video_market_is_reachable_from_more_tools_and_uses_workspace_outputs():
+    chat = (FRONTEND / "components" / "ChatInterface.tsx").read_text(encoding="utf-8")
+    market = (FRONTEND / "features" / "video" / "VideoMarketWorkspace.tsx").read_text(encoding="utf-8")
+
+    assert "VideoMarketWorkspace" in chat
+    assert "openVideoMarket" in chat
+    assert "label.includes('视频')" in chat
+    assert "listVideoTasks(1, 100, 'SUCCEEDED')" in market
+    assert "video-market-spiral-card" in market
+    assert "video-market-trajectory" in market
+    assert "trajectoryPaths" in market
+    assert "暂停环游" in market
+    assert "让作品沿灵感螺旋生长" in market
+    assert "进入工作台" in market
