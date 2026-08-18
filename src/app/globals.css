@@ -10,6 +10,108 @@
   to { transform: translateY(0); opacity: 1; }
 }
 
+@keyframes code-showcase-marquee-left {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(-50%, 0, 0); }
+}
+
+@keyframes code-showcase-marquee-right {
+  from { transform: translate3d(-50%, 0, 0); }
+  to { transform: translate3d(0, 0, 0); }
+}
+
+@keyframes image-plaza-waterfall-up {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(0, -50%, 0); }
+}
+
+@keyframes image-plaza-waterfall-down {
+  from { transform: translate3d(0, -50%, 0); }
+  to { transform: translate3d(0, 0, 0); }
+}
+
+.image-plaza-waterfall-track {
+  will-change: transform;
+  animation-duration: var(--image-plaza-waterfall-duration, 42s);
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+.image-plaza-waterfall-track[data-direction='up'] {
+  animation-name: image-plaza-waterfall-up;
+}
+
+.image-plaza-waterfall-track[data-direction='down'] {
+  animation-name: image-plaza-waterfall-down;
+}
+
+.image-plaza-waterfall:hover .image-plaza-waterfall-track,
+.image-plaza-waterfall:focus-within .image-plaza-waterfall-track {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .image-plaza-waterfall-track {
+    animation: none !important;
+    transform: none !important;
+  }
+}
+
+.code-showcase-marquee {
+  --marquee-gap: 1.25rem;
+  position: relative;
+  overflow: hidden;
+  padding-block: 0.25rem;
+  mask-image: linear-gradient(to right, transparent, #000 3%, #000 97%, transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 3%, #000 97%, transparent);
+}
+
+.code-showcase-marquee-track {
+  display: flex;
+  width: max-content;
+  will-change: transform;
+  animation-duration: var(--marquee-duration, 48s);
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+
+.code-showcase-marquee[data-direction='left'] .code-showcase-marquee-track {
+  animation-name: code-showcase-marquee-left;
+}
+
+.code-showcase-marquee[data-direction='right'] .code-showcase-marquee-track {
+  animation-name: code-showcase-marquee-right;
+}
+
+.code-showcase-marquee-group {
+  display: flex;
+  flex: none;
+  gap: var(--marquee-gap);
+  padding-right: var(--marquee-gap);
+}
+
+.code-showcase-marquee:hover .code-showcase-marquee-track,
+.code-showcase-marquee:focus-within .code-showcase-marquee-track {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .code-showcase-marquee {
+    overflow-x: auto;
+    mask-image: none;
+    -webkit-mask-image: none;
+  }
+
+  .code-showcase-marquee-track {
+    animation: none !important;
+    transform: none !important;
+  }
+
+  .code-showcase-marquee-group[aria-hidden='true'] {
+    display: none;
+  }
+}
+
 :root {
   --background: #ffffff;
   --foreground: #171717;
@@ -159,6 +261,18 @@ html[data-font='mono'] { --app-font: "SFMono-Regular", Consolas, "Liberation Mon
 }
 
 .research-tiptap-document th { background: #f1f5f9; color: #0f172a; font-weight: 650; }
+
+/* Keep the layout action available while browsing any page in the document. */
+[data-writing-layout-actions] {
+  position: fixed !important;
+  bottom: 54px !important;
+  left: var(--writing-layout-button-left, 50%) !important;
+  z-index: 60 !important;
+  transform: translateX(-50%) !important;
+  padding: 0 !important;
+  pointer-events: none;
+}
+[data-writing-layout-actions] > button { pointer-events: auto; }
 
 /* PDF export uses the same A4 pages rendered by the layout workspace. */
 @media print {

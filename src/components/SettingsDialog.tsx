@@ -109,6 +109,10 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
   const [svcHasTavily, setSvcHasTavily] = useState(false);
   const [svcHasFirecrawl, setSvcHasFirecrawl] = useState(false);
   const [svcHasRerank, setSvcHasRerank] = useState(false);
+  const [proxyEnabled, setProxyEnabled] = useState(false);
+  const [proxyUrl, setProxyUrl] = useState('');
+  const [svcHasProxy, setSvcHasProxy] = useState(false);
+  const [proxyHost, setProxyHost] = useState('');
   // Firecrawl 高级参数
   const [fcEnableHighlights, setFcEnableHighlights] = useState(true);
   const [fcScrapeTopN, setFcScrapeTopN] = useState<number>(3);
@@ -162,6 +166,10 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
         setSvcHasTavily(svc.has_tavily_key);
         setSvcHasFirecrawl(svc.has_firecrawl_key);
         setSvcHasRerank(svc.has_rerank_key);
+        setProxyEnabled(Boolean(svc.proxy_enabled));
+        setSvcHasProxy(Boolean(svc.has_proxy));
+        setProxyHost(svc.proxy_host || '');
+        setProxyUrl('');
         // Firecrawl 高级参数：GET 回显，首次加载直接回填
         setFcEnableHighlights(typeof svc.firecrawl_enable_highlights === 'boolean' ? svc.firecrawl_enable_highlights : true);
         setFcScrapeTopN(
@@ -365,7 +373,7 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
   //   - tavilyKey 非空 → 传非空串 → 覆盖为新值
   //   - 点"清空"按钮 → 传 '' → 显式卸载（后端回退环境变量，若环境变量也空则彻底不可用）
   // 消除 GET 脱敏导致的"空串是保留还是清空"二义性。
-  const saveServices = async (opts?: { clearTavily?: boolean; clearFirecrawl?: boolean; clearRerank?: boolean }) => {
+  const saveServices = async (opts?: { clearTavily?: boolean; clearFirecrawl?: boolean; clearRerank?: boolean; clearProxy?: boolean }) => {
     setSvcSaving(true); setSvcMessage('');
     try {
       const payload: Parameters<typeof saveServiceSettings>[0] = {};
@@ -378,6 +386,12 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
       payload.firecrawl_scrape_top_n = Math.max(0, Math.min(5, Number(fcScrapeTopN) || 0));
       payload.firecrawl_markdown_max_chars = Math.max(800, Math.min(4000, Number(fcMdMaxChars) || 2000));
       payload.deep_research_engine = deepResearchEngine === 'native' ? 'native' : 'firecrawl';
+      payload.proxy_enabled = proxyEnabled;
+      if (opts?.clearProxy) {
+        payload.clear_proxy = true;
+      } else if (proxyUrl.trim()) {
+        payload.proxy_url = proxyUrl.trim();
+      }
       if (opts?.clearTavily) {
         payload.clearTavily = true;
       } else if (tavilyKey.trim()) {
@@ -398,6 +412,10 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
       setSvcHasTavily(result.has_tavily_key);
       setSvcHasFirecrawl(result.has_firecrawl_key);
       setSvcHasRerank(result.has_rerank_key);
+      setProxyEnabled(Boolean(result.proxy_enabled));
+      setSvcHasProxy(Boolean(result.has_proxy));
+      setProxyHost(result.proxy_host || '');
+      setProxyUrl('');
       // 刷新 Firecrawl 高级参数（服务端 validator 做了 clamp）
       setFcEnableHighlights(
         typeof result.firecrawl_enable_highlights === 'boolean' ? result.firecrawl_enable_highlights : Boolean(fcEnableHighlights)
@@ -560,6 +578,37 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
           <div className="sticky bottom-0 -mx-5 flex items-center justify-between border-t border-slate-200 bg-white/95 px-5 py-4 backdrop-blur dark:border-slate-700 dark:bg-slate-900/95 sm:-mx-7 sm:px-7"><span role="status" className="text-sm text-slate-500">{message}</span><button type="button" disabled={saving || !form.base_url || !form.model_id} onClick={save} className="rounded-lg bg-sky-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50">{saving ? '保存中…' : '保存配置'}</button></div>
         </div> : section === 'services' ? <div className="space-y-6 p-5 sm:p-7">
           <div className="flex items-start gap-3 rounded-xl bg-sky-50 p-4 text-sm text-sky-900 dark:bg-sky-950/40 dark:text-sky-200"><Info size={18} className="mt-0.5 shrink-0"/><div className="space-y-1"><p className="font-medium">字段语义说明</p><ul className="list-disc space-y-0.5 pl-4 text-[13px]"><li>输入框留空 → <b>保留当前已保存值</b>（后端 GET 脱敏，前端不回显明文）</li><li>填入新 Key → <b>覆盖旧值</b>（立即热更新搜索 / Reranker 客户端）</li><li>点击「清除已保存」→ <b>显式清空</b>，后续回退到环境变量（若仍无则功能降级）</li><li>GLM / 千问 <b>自带原生联网搜索</b>，不需要下方搜索服务 Key；下方服务供 DeepSeek 联网模式使用</li></ul></div></div>
+
+          <section className="space-y-4 rounded-xl border border-slate-200 bg-slate-50/60 p-4 dark:border-slate-700 dark:bg-slate-950/40">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-200">应用网络代理</h4>
+                <p className="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">VPN 开启时建议填写本机 HTTP 代理，例如 http://127.0.0.1:7897。保存后对标准对话、视觉、视频和搜索请求立即生效。</p>
+              </div>
+              <Toggle checked={proxyEnabled} onChange={setProxyEnabled} label="启用应用网络代理" />
+            </div>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-end">
+              <div className="min-w-0 flex-1">
+                <Field label="代理地址" hint={svcHasProxy ? `已保存（${proxyHost || '地址已隐藏'}）；留空 = 保留当前地址` : '支持 HTTP/HTTPS；也可直接填写 127.0.0.1:7897'}>
+                  <input
+                    type="text"
+                    autoComplete="off"
+                    spellCheck={false}
+                    value={proxyUrl}
+                    onChange={(e) => setProxyUrl(e.target.value)}
+                    placeholder={svcHasProxy ? `🔒 已保存（${proxyHost || '地址已隐藏'}；留空 = 不修改）` : 'http://127.0.0.1:7897'}
+                    className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
+                  />
+                </Field>
+              </div>
+              <button
+                type="button"
+                onClick={() => saveServices({ clearProxy: true })}
+                disabled={svcSaving || !svcHasProxy}
+                className="h-11 rounded-lg border border-rose-200 px-3 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/30"
+              >清除已保存</button>
+            </div>
+          </section>
 
           <Field label="DeepSeek 联网搜索服务提供商" required hint="Tavily 需绑支付，额度用完可切 Firecrawl（免费档 500 credits/月，无需绑卡）">
             <div className="grid grid-cols-2 gap-3">

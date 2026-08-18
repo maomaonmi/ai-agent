@@ -2,7 +2,7 @@
 
 import { MODE_OPTIONS } from './ModeSelector';
 import { SessionSummary } from '../lib/api';
-import { Activity, ChevronUp, LogOut, Puzzle, Settings, UserRound } from 'lucide-react';
+import { Activity, ChevronUp, Film, LogOut, Puzzle, Settings, UserRound } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 interface SessionSidebarProps {
@@ -20,6 +20,8 @@ interface SessionSidebarProps {
   onOpenSettings: () => void;
   onOpenDirectory: (tab?: 'skills' | 'connectors' | 'plugins') => void;
   onOpenHooks: () => void;
+  onOpenImageStudio: () => void;
+  onOpenVideoStudio: () => void;
 }
 
 function modeLabel(mode: SessionSummary['mode']) {
@@ -41,6 +43,8 @@ export default function SessionSidebar({
   onOpenSettings,
   onOpenDirectory,
   onOpenHooks,
+  onOpenImageStudio,
+  onOpenVideoStudio,
 }: SessionSidebarProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -104,6 +108,22 @@ export default function SessionSidebar({
           >
             <Puzzle size={16} className="shrink-0 text-slate-500" />
             MCP · Skills · Plugins
+          </button>
+          <button
+            type="button"
+            onClick={onOpenImageStudio}
+            className="mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100"
+          >
+            <span aria-hidden="true" className="text-base">✦</span>
+            AI 生图
+          </button>
+          <button
+            type="button"
+            onClick={onOpenVideoStudio}
+            className="mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <Film size={16} className="shrink-0 text-cyan-500" />
+            AI 视频
           </button>
           <button
             type="button"
@@ -210,6 +230,15 @@ export default function SessionSidebar({
             className="mt-3 flex h-9 w-9 items-center justify-center rounded-lg text-lg text-slate-600 hover:bg-slate-100 hover:text-slate-950"
           >
             ◫
+          </button>
+          <button
+            type="button"
+            aria-label="打开 AI 视频"
+            title="AI 视频"
+            onClick={onOpenVideoStudio}
+            className="mt-3 flex h-9 w-9 items-center justify-center rounded-lg text-cyan-600 hover:bg-cyan-50 hover:text-cyan-700"
+          >
+            <Film size={18} />
           </button>
           <button
             type="button"

@@ -6,6 +6,423 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const ACCEPTANCE_REQUEST_TIMEOUT_MS = 50_000;
 
+export interface ImageModelCapability {
+  id: string;
+  name: string;
+  provider: string;
+  description: string;
+  max_outputs: number;
+  max_width: number;
+  max_height: number;
+  supports_negative_prompt: boolean;
+  enabled: boolean;
+}
+
+export interface ImageDirectorResult {
+  recommended_model: string;
+  fallback_models?: string[];
+  enhanced_prompt_zh: string;
+  enhanced_prompt_en?: string;
+  negative_prompt?: string;
+  routing_reasons?: string[];
+  suggested_ratio?: string;
+  warnings?: string[];
+}
+
+export interface ImageAsset {
+  id: string;
+  url: string;
+  thumbnail_url?: string;
+  width?: number;
+  height?: number;
+  mime_type?: string;
+}
+
+export interface ImageBatch {
+  batch_id: string;
+  task_id?: string;
+  status: string;
+  raw_prompt: string;
+  director?: ImageDirectorResult | null;
+  images: ImageAsset[];
+}
+
+export interface ImagePlazaAsset {
+  id: string;
+  url: string;
+  mime_type?: string;
+  prompt?: string;
+  prompt_en?: string;
+  negative_prompt?: string;
+  tags?: string[];
+  source?: string;
+  created_at?: number;
+  updated_at?: number;
+}
+
+export interface ImagePromptAnalysis {
+  asset_id: string;
+  status: 'ready' | 'fallback';
+  prompt: string;
+  prompt_en?: string;
+  negative_prompt?: string;
+  tags?: string[];
+  message?: string;
+}
+
+export async function getImageModels(): Promise<ImageModelCapability[]> {
+  const response = await fetch(`${API_BASE_URL}/api/image/models`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const payload = await response.json() as { models?: ImageModelCapability[] };
+  return payload.models ?? [];
+}
+
+export async function directImagePrompt(input: {
+  raw_prompt: string;
+  ratio?: string;
+  count?: number;
+  model_mode?: 'auto' | 'manual';
+  model?: string | null;
+}): Promise<ImageDirectorResult> {
+  const response = await fetch(`${API_BASE_URL}/api/image/direct`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json();
+}
+
+export async function createImageGeneration(input: {
+  raw_prompt: string;
+  ratio?: string;
+  count?: number;
+  model_mode?: 'auto' | 'manual';
+  model?: string | null;
+  enhance?: boolean;
+  reference_image?: string;
+}): Promise<ImageBatch> {
+  const response = await fetch(`${API_BASE_URL}/api/image/generations`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const batch = await response.json() as ImageBatch;
+  return { ...batch, images: (batch.images ?? []).map((image) => ({ ...image, url: image.url.startsWith('http') ? image.url : `${API_BASE_URL}${image.url}` })) };
+}
+
+export async function listImageBatches(limit = 24, query = ''): Promise<{ batches: ImageBatch[]; count: number }> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (query) params.set('query', query);
+  const response = await fetch(`${API_BASE_URL}/api/image/batches?${params.toString()}`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const payload = await response.json() as { batches: ImageBatch[]; count: number };
+  return { ...payload, batches: payload.batches.map((batch) => ({ ...batch, images: (batch.images ?? []).map((image) => ({ ...image, url: image.url.startsWith('http') ? image.url : `${API_BASE_URL}${image.url}` })) })) };
+}
+
+export async function listImagePlazaAssets(limit = 48): Promise<{ assets: ImagePlazaAsset[]; count: number }> {
+  const response = await fetch(`${API_BASE_URL}/api/image/plaza/assets?limit=${encodeURIComponent(String(limit))}`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const payload = await response.json() as { assets?: ImagePlazaAsset[]; count: number };
+  return {
+    ...payload,
+    assets: (payload.assets ?? []).map((asset) => ({
+      ...asset,
+      url: asset.url.startsWith('http') ? asset.url : `${API_BASE_URL}${asset.url}`,
+    })),
+  };
+}
+
+export async function uploadImagePlazaAsset(file: File): Promise<ImagePlazaAsset> {
+  const body = new FormData();
+  body.append('file', file);
+  const response = await fetch(`${API_BASE_URL}/api/image/plaza/assets`, { method: 'POST', body });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const asset = await response.json() as ImagePlazaAsset;
+  return { ...asset, url: asset.url.startsWith('http') ? asset.url : `${API_BASE_URL}${asset.url}` };
+}
+
+export async function analyzeImagePlazaAsset(assetId: string): Promise<ImagePromptAnalysis> {
+  const response = await fetch(`${API_BASE_URL}/api/image/plaza/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ asset_id: assetId }),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<ImagePromptAnalysis>;
+}
+
+export interface VideoFramePromptAnalysis {
+  status: 'ready';
+  prompt: string;
+  model?: string;
+  mode: 'image_to_video' | 'start_end_video';
+}
+
+export async function analyzeVideoFrames(input: {
+  mode: 'image_to_video' | 'start_end_video';
+  first_frame_url: string;
+  last_frame_url?: string;
+}): Promise<VideoFramePromptAnalysis> {
+  const response = await fetch(`${API_BASE_URL}/api/video/analyze_frames`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<VideoFramePromptAnalysis>;
+}
+
+export interface VideoModelCapability {
+  id: string;
+  name: string;
+  provider: 'qianwen' | 'zhipu' | string;
+  description: string;
+  modes: string[];
+  future_modes: string[];
+  ratios: string[];
+  resolutions: string[];
+  duration_min: number;
+  duration_max: number;
+  durations: number[];
+  supports_audio: boolean;
+  supports_audio_input: boolean;
+  enabled: boolean;
+  docs_url?: string;
+}
+
+export interface VideoTask {
+  id: string;
+  status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNKNOWN' | string;
+  progress: number;
+  provider: string;
+  model: string;
+  prompt: string;
+  mode?: 'text_to_video' | 'image_to_video' | 'start_end_video' | 'reference_to_video';
+  parameters: {
+    ratio: string; duration: number; resolution: string; audio_url?: string | null;
+    first_frame_url?: string | null; last_frame_url?: string | null; negative_prompt?: string | null;
+    seed?: number | null; prompt_extend?: boolean; watermark?: boolean; shot_type?: 'single' | 'multi' | null;
+    references?: VideoReference[];
+  };
+  provider_status?: string | null;
+  created_at: number;
+  updated_at: number;
+  submitted_at?: number | null;
+  started_at?: number | null;
+  completed_at?: number | null;
+  result?: { video_url?: string | null; asset_id?: string | null } | null;
+  error?: { code?: string | null; message?: string | null } | null;
+}
+
+export type VideoReferencePurpose = 'subject' | 'style' | 'motion' | 'scene';
+
+export interface VideoReference {
+  assetId: string;
+  mediaKind: 'reference_video' | 'reference_image' | 'first_frame';
+  purpose: VideoReferencePurpose;
+}
+
+export interface VideoReferenceAsset {
+  assetId: string;
+  status: 'UPLOADING' | 'UPLOADED' | 'PROBING' | 'TRANSCODING' | 'READY' | 'REJECTED' | 'EXPIRED' | 'DELETED' | string;
+  progress: number;
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+  durationSeconds: number | null;
+  width: number | null;
+  height: number | null;
+  error: { code?: string | null; message?: string | null } | null;
+  createdAt: number;
+  updatedAt: number;
+  expiresAt: number;
+  previewUrl?: string;
+  thumbnailUrl?: string;
+}
+
+export interface VideoTaskEvent {
+  task_id?: string;
+  status?: VideoTask['status'];
+  progress?: number;
+  message?: string;
+  payload?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+function videoUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  return url.startsWith('http') ? url : `${API_BASE_URL}${url}`;
+}
+
+export async function getVideoModels(): Promise<VideoModelCapability[]> {
+  const response = await fetch(`${API_BASE_URL}/api/video/models`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const payload = await response.json() as { models?: VideoModelCapability[] };
+  return payload.models ?? [];
+}
+
+export async function createVideoTask(input: {
+  mode?: 'text_to_video' | 'image_to_video' | 'start_end_video' | 'reference_to_video';
+  prompt: string;
+  model: string;
+  ratio: string;
+  duration: number;
+  resolution: string;
+  prompt_extend?: boolean;
+  watermark?: boolean;
+  audio?: boolean | null;
+  audio_url?: string;
+  first_frame_url?: string;
+  last_frame_url?: string;
+  negative_prompt?: string;
+  seed?: number;
+  shot_type?: 'single' | 'multi';
+  quality?: string;
+  fps?: number;
+  references?: VideoReference[];
+}): Promise<VideoTask> {
+  const clientRequestId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `video-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const response = await fetch(`${API_BASE_URL}/api/video/create_task`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...input, client_request_id: clientRequestId }),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const task = await response.json() as VideoTask;
+  return { ...task, result: task.result ? { ...task.result, video_url: videoUrl(task.result.video_url) } : task.result };
+}
+
+export async function createReferenceAssetUpload(input: {
+  filename: string;
+  contentType: string;
+  sizeBytes: number;
+}): Promise<{ assetId: string; uploadUrl: string; expiresAt: number; headers: Record<string, string> }> {
+  const response = await fetch(`${API_BASE_URL}/api/video/reference-assets/upload-url`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename: input.filename, content_type: input.contentType, size_bytes: input.sizeBytes }),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json();
+}
+
+export async function uploadReferenceVideo(file: File): Promise<VideoReferenceAsset> {
+  const plan = await createReferenceAssetUpload({ filename: file.name, contentType: file.type || 'video/mp4', sizeBytes: file.size });
+  let upload: Response;
+  try {
+    upload = await fetch(plan.uploadUrl, { method: 'PUT', headers: plan.headers, body: file });
+  } catch (cause) {
+    if (cause instanceof TypeError) {
+      throw new Error('OSS 上传被浏览器拦截，请在 OSS 桶 CORS 中允许当前前端地址和 PUT/Content-Type');
+    }
+    throw cause;
+  }
+  if (!upload.ok) throw new Error(`OSS 上传失败（HTTP ${upload.status}）`);
+  const complete = await fetch(`${API_BASE_URL}/api/video/reference-assets/${encodeURIComponent(plan.assetId)}/complete`, { method: 'POST' });
+  if (!complete.ok) throw new Error(await parseApiError(complete));
+  const asset = await complete.json() as VideoReferenceAsset;
+  const previewUrl = URL.createObjectURL(file);
+  const thumbnailUrl = await createVideoThumbnail(file);
+  return { ...asset, previewUrl, thumbnailUrl };
+}
+
+async function createVideoThumbnail(file: File): Promise<string | undefined> {
+  if (typeof document === 'undefined') return undefined;
+  const sourceUrl = URL.createObjectURL(file);
+  return new Promise((resolve) => {
+    const video = document.createElement('video');
+    let captured = false;
+    video.preload = 'metadata';
+    video.muted = true;
+    video.playsInline = true;
+    const cleanup = () => {
+      video.removeAttribute('src');
+      video.load();
+      URL.revokeObjectURL(sourceUrl);
+    };
+    const captureFrame = () => {
+      if (captured) return;
+      captured = true;
+      const canvas = document.createElement('canvas');
+      const width = video.videoWidth || 320;
+      const height = video.videoHeight || 180;
+      const scale = Math.min(1, 320 / Math.max(width, height));
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      const context = canvas.getContext('2d');
+      if (!context) { cleanup(); resolve(undefined); return; }
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob((blob) => {
+        cleanup();
+        resolve(blob ? URL.createObjectURL(blob) : undefined);
+      }, 'image/jpeg', 0.82);
+    };
+    video.onloadedmetadata = () => {
+      // Avoid a common black opening frame by sampling shortly after the
+      // beginning instead of drawing at timestamp 0.
+      const duration = Number.isFinite(video.duration) ? video.duration : 1;
+      const target = Math.min(Math.max(0.1, duration * 0.15), Math.max(0, duration - 0.05));
+      if (target > 0) video.currentTime = target;
+      else captureFrame();
+    };
+    video.onseeked = captureFrame;
+    video.onerror = () => { cleanup(); resolve(undefined); };
+    video.src = sourceUrl;
+  });
+}
+
+export async function getReferenceAsset(assetId: string): Promise<VideoReferenceAsset> {
+  const response = await fetch(`${API_BASE_URL}/api/video/reference-assets/${encodeURIComponent(assetId)}`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json();
+}
+
+export async function deleteReferenceAsset(assetId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/video/reference-assets/${encodeURIComponent(assetId)}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error(await parseApiError(response));
+}
+
+export async function getVideoTaskStatus(taskId: string): Promise<VideoTask> {
+  const response = await fetch(`${API_BASE_URL}/api/video/status/${encodeURIComponent(taskId)}`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const task = await response.json() as VideoTask;
+  return { ...task, result: task.result ? { ...task.result, video_url: videoUrl(task.result.video_url) } : task.result };
+}
+
+export async function listVideoTasks(page = 1, pageSize = 20, taskStatus?: string): Promise<{ tasks: VideoTask[]; page: number; pageSize: number }> {
+  const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+  if (taskStatus) params.set('status', taskStatus);
+  const response = await fetch(`${API_BASE_URL}/api/video/tasks?${params.toString()}`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const payload = await response.json() as { tasks: VideoTask[]; page: number; pageSize: number };
+  return { ...payload, tasks: payload.tasks.map((task) => ({ ...task, result: task.result ? { ...task.result, video_url: videoUrl(task.result.video_url) } : task.result })) };
+}
+
+export async function deleteVideoTask(taskId: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/video/tasks/${encodeURIComponent(taskId)}`, { method: 'DELETE' });
+  if (!response.ok) throw new Error(await parseApiError(response));
+}
+
+export function openVideoTaskStream(
+  taskId: string,
+  onEvent: (eventName: string, event: VideoTaskEvent, lastEventId: string) => void,
+  onError: () => void,
+): EventSource {
+  const source = new EventSource(`${API_BASE_URL}/api/video/stream/${encodeURIComponent(taskId)}`);
+  for (const eventName of ['snapshot', 'status', 'progress', 'result', 'error', 'heartbeat']) {
+    source.addEventListener(eventName, (event) => {
+      try {
+        const message = event as MessageEvent<string>;
+        onEvent(eventName, JSON.parse(message.data) as VideoTaskEvent, message.lastEventId || '0');
+      } catch {
+        onError();
+      }
+    });
+  }
+  source.onerror = onError;
+  return source;
+}
+
 export interface PublishedCodeProject {
   project_id: string;
   source_session_id: string | null;
@@ -232,6 +649,9 @@ export type SearchProvider = "tavily" | "firecrawl";
 export type DeepResearchEngine = "firecrawl" | "native";
 
 export interface ServiceSettings {
+  proxy_enabled: boolean;
+  has_proxy: boolean;
+  proxy_host: string;
   search_provider: SearchProvider;
   tavily_api_key: string;
   firecrawl_api_key: string;
@@ -264,8 +684,11 @@ export interface SaveServiceSettingsPayload
       | "firecrawl_scrape_top_n"
       | "firecrawl_markdown_max_chars"
       | "deep_research_engine"
+      | "proxy_enabled"
     >
   > {
+  clear_proxy?: boolean;
+  proxy_url?: string;
   clearTavily?: boolean;
   clearFirecrawl?: boolean;
   clearRerank?: boolean;
@@ -937,6 +1360,7 @@ type ResearchHandlers = {
   onResearchProcess?: (event: ResearchProcessEvent) => void;
   onResearchReasonDone?: (event: ResearchReasonDoneEvent) => void;
   onResearchDone?: (event: ResearchDoneEvent) => void;
+  onWebDocs?: (event: WebDocsEvent) => void;
   onError?: (event: ErrorEvent) => void;
   // Why: 调研模式复用 NodeProgressPanel 链路面板，把 research_process 翻译成 NodeEvent 推入同一栈，
   //   不再单独渲染 ResearchProgressPanel；刷新/重启后从 SessionSnapshot.nodeProgress 恢复。
@@ -1384,6 +1808,13 @@ export async function sendDeepResearch(
             });
             // Why: 同一个 HTTP chunk 可能塞多个事件，强制让出 50ms 让浏览器逐帧绘制
             await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          // 千问原生调研搜索结果。count 对旧后端为可选，避免来源因协议小差异被丢弃。
+          else if (Array.isArray(parsed.docs)) {
+            handlers.onWebDocs?.({
+              docs: parsed.docs as WebDoc[],
+              count: parsed.count !== undefined ? Number(parsed.count) : parsed.docs.length,
+            });
           }
           // R1 推理完成事件
           else if (parsed.reasoning !== undefined) {

@@ -125,6 +125,23 @@ export default function WritingLayoutWorkspace({ document, tocSections, onTempla
   const current = Math.min(page, totalPages);
 
   useEffect(() => setPage(1), [layoutDocument.id]);
+  useEffect(() => {
+    const root = window.document.querySelector<HTMLElement>('[data-writing-layout-root]');
+    if (!root) return;
+    const pane = root.closest<HTMLElement>('[data-writing-workspace]') ?? root;
+    const updatePosition = () => {
+      const bounds = pane.getBoundingClientRect();
+      root.style.setProperty('--writing-layout-button-left', `${bounds.left + bounds.width / 2}px`);
+    };
+    updatePosition();
+    const observer = new ResizeObserver(updatePosition);
+    observer.observe(pane);
+    window.addEventListener('resize', updatePosition);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updatePosition);
+    };
+  }, []);
   const goToPage = (next: number) => { const target = Math.min(totalPages, Math.max(1, next)); setPage(target); window.document.getElementById(`writing-layout-page-${target}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
   useEffect(() => { const nodes = Array.from(window.document.querySelectorAll<HTMLElement>('[data-layout-page]')); const observer = new IntersectionObserver((entries) => { const visible = entries.filter((entry) => entry.isIntersecting).sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0]; if (visible) setPage(Number((visible.target as HTMLElement).dataset.layoutPage) || 1); }, { threshold: [0.3, 0.6, 0.9] }); nodes.forEach((node) => observer.observe(node)); return () => observer.disconnect(); }, [totalPages]);
 

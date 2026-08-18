@@ -2,6 +2,8 @@ import { EMPTY_THESIS_OUTLINE, ThesisOutlineEvent, ThesisOutlineState } from './
 
 export function thesisOutlineReducer(state: ThesisOutlineState, event: ThesisOutlineEvent): ThesisOutlineState {
   switch (event.type) {
+    case 'reset':
+      return EMPTY_THESIS_OUTLINE;
     case 'thesis_outline_started':
       return { ...EMPTY_THESIS_OUTLINE, targetWords: event.target_words ?? state.targetWords, status: 'generating' };
     case 'token':

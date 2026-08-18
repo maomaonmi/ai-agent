@@ -64,7 +64,12 @@ import ChatNodeNavigator, { ChatNode } from './ChatNodeNavigator';
 import CodeWorkspace from './CodeWorkspace';
 import CodeShowcasePage from './code-showcase/CodeShowcasePage';
 import WritingWorkspace from '../features/ai-writing/WritingWorkspace';
+import ImagePlazaWorkspace from '../features/picture/ImagePlazaWorkspace';
+import ImageStudioWorkspace from '../features/picture/ImageStudioWorkspace';
+import VideoStudioWorkspace from '../features/video/VideoStudioWorkspace';
 import ResearchWorkspace from '../features/deep-research/ResearchWorkspace';
+import ResearchDocumentCard from '../features/deep-research/ResearchDocumentCard';
+import { deriveReportTitle } from '../features/deep-research/report/researchReportAdapter';
 import type { CompiledWritingPrompt } from '../features/ai-writing/writingTypes';
 import type { WritingDraft } from '../features/ai-writing/writingTypes';
 import type { WritingDocumentState } from '../features/ai-writing/writingDocumentTypes';
@@ -106,6 +111,32 @@ function readRuntimeDefaults(): RuntimeSettings {
   } catch {
     return DEFAULT_RUNTIME_SETTINGS;
   }
+}
+
+function researchChunksFromWebDocs(docs: WebDoc[]): ResearchChunk[] {
+  return docs.map((doc, index) => ({
+    id: Number.isFinite(doc.id) ? doc.id : index + 1,
+    title: doc.title || '未命名来源',
+    url: doc.url || '',
+    score: Number.isFinite(doc.score) ? doc.score : 0,
+    text: doc.content || '',
+  }));
+}
+
+function mergeResearchSources(current: ResearchChunk[], incoming: ResearchChunk[]): ResearchChunk[] {
+  const merged = new Map<string, ResearchChunk>();
+  [...current, ...incoming].forEach((source) => {
+    const key = source.url.trim() || `${source.title}\n${source.text}`;
+    if (key.trim()) merged.set(key, source);
+  });
+  return [...merged.values()].map((source, index) => ({ ...source, id: index + 1 }));
+}
+
+function researchSourcesFromMessage(message?: ChatMessage): ResearchChunk[] {
+  if (!message) return [];
+  return message.researchChunks?.length
+    ? message.researchChunks
+    : researchChunksFromWebDocs(message.webDocs ?? []);
 }
 
 function buildCodeProjectCover(vfs: VirtualFileSystem, title: string): string {
@@ -216,8 +247,21 @@ export default function ChatInterface() {
       if (perRoundResearchChunksRef.current.length > 0) msg.researchChunks = perRoundResearchChunksRef.current;
       if (perRoundTokenUsageRef.current) msg.tokenUsage = perRoundTokenUsageRef.current;
       updated[lastAi] = msg;
+      messagesRef.current = updated;
       return updated;
     });
+  }, []);
+
+  const handleResearchWebDocs = useCallback((event: { docs: WebDoc[] }) => {
+    const docs = event.docs ?? [];
+    if (!docs.length) return;
+    perRoundWebDocsRef.current = [...perRoundWebDocsRef.current, ...docs];
+    perRoundResearchChunksRef.current = mergeResearchSources(
+      perRoundResearchChunksRef.current,
+      researchChunksFromWebDocs(docs),
+    );
+    setWebDocs(perRoundWebDocsRef.current);
+    setResearchChunks(perRoundResearchChunksRef.current);
   }, []);
 
   const handleNodeEvent = useCallback((event: NodeEvent) => {
@@ -265,6 +309,7 @@ export default function ChatInterface() {
   //   这里的 state 仅给 buildSnapshot/readSnapshot 的字段赋值留个"安全兜底"。
   const [webDocs, setWebDocs] = useState<WebDoc[]>([]);
   const [researchChunks, setResearchChunks] = useState<ResearchChunk[]>([]);
+  const [researchPaneWidthPx, setResearchPaneWidthPx] = useState<number>();
   const [researchProgress, setResearchProgress] = useState<ResearchProcessEvent | null>(null);
   // 多智能体协同树
   const [agentTalks, setAgentTalks] = useState<AgentTalkEvent[]>([]);
@@ -314,7 +359,7 @@ export default function ChatInterface() {
   const [isRuntimeSettingsOpen, setIsRuntimeSettingsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   // Why: SPA 全屏视图切换（计划书 §1 D1）——'chat' 正常聊天 / 'marketplace' 市场全屏页。
-  const [view, setView] = useState<'chat' | 'marketplace' | 'hooks' | 'code-showcase' | 'writing'>('chat');
+  const [view, setView] = useState<'chat' | 'marketplace' | 'hooks' | 'code-showcase' | 'writing' | 'image-studio' | 'image-plaza' | 'video-studio'>('chat');
   const [directoryTab, setDirectoryTab] = useState<'skills' | 'connectors' | 'plugins'>('connectors');
   // Why: SettingsDialog 深链——市场页齿轮点击后打开设置并定位到 directory section + 子页签。
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | null>(null);
@@ -530,13 +575,13 @@ export default function ChatInterface() {
     localStorage.setItem('historySidebarCollapsed', String(collapsed));
   };
 
-  const buildSnapshot = (): SessionSnapshot => {
+  const buildSnapshot = (snapshotMessages: ChatMessage[] = messages): SessionSnapshot => {
     // 为什么这里单独拼一次 global nodeProgress/webDocs/researchChunks：
     //   - SessionSnapshot 顶层字段是「老会话恢复兼容」所需（applySnapshot 里会把这些字段迁移到最后一条 assistant 消息）；
     //   - 真正的持久化主体是 messages[i].nodeProgress/webDocs/researchChunks（每轮绑定），这里顶层只同步「当前轮」的 refs 作兜底。
     let lastAiMsg: ChatMessage | undefined;
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i].role === 'assistant') { lastAiMsg = messages[i]; break; }
+    for (let i = snapshotMessages.length - 1; i >= 0; i -= 1) {
+      if (snapshotMessages[i].role === 'assistant') { lastAiMsg = snapshotMessages[i]; break; }
     }
     const globalNodeProgress: NodeEvent[] = perRoundNodeEventsRef.current.length > 0
       ? perRoundNodeEventsRef.current
@@ -548,7 +593,7 @@ export default function ChatInterface() {
       ? perRoundResearchChunksRef.current
       : (lastAiMsg?.researchChunks ?? researchChunks);
     return {
-      messages,
+      messages: snapshotMessages,
       reasoningSteps,
       webDocs: globalWebDocs,
       researchChunks: globalResearchChunks,
@@ -575,6 +620,15 @@ export default function ChatInterface() {
       codeProjectKind,
       codeAgentRuns: agentRuns,
     };
+  };
+
+  const persistResearchMessages = (sessionId: string | null | undefined, nextMessages: ChatMessage[]) => {
+    messagesRef.current = nextMessages;
+    setMessages(nextMessages);
+    if (!sessionId) return;
+    void saveSessionSnapshot(sessionId, buildSnapshot(nextMessages), false).catch((requestError) => {
+      setError(requestError instanceof Error ? requestError.message : '保存调研来源失败');
+    });
   };
 
   const resetConversation = () => {
@@ -836,8 +890,10 @@ export default function ChatInterface() {
 
   const openWritingWorkspace = async () => {
     await persistCurrentSession();
+    localStorage.removeItem('ai-writing-draft-v1');
     localStorage.removeItem('ai-writing-document-v2');
     localStorage.removeItem('ai-writing-submitted-instruction-v1');
+    localStorage.removeItem('ai-writing-thesis-outline-v1');
     startDraftSession('writing');
     setView('writing');
   };
@@ -855,15 +911,17 @@ export default function ChatInterface() {
     return sessionId;
   };
 
-  const submitWritingDraft = async ({ instruction, compiledPrompt }: { instruction: string; compiledPrompt: CompiledWritingPrompt }) => {
+  const submitWritingDraft = async ({ instruction, compiledPrompt }: { instruction: string; compiledPrompt: CompiledWritingPrompt }, onStreamToken: (token: string) => void) => {
     const sessionId = await ensureWritingSession(instruction);
     const request = [compiledPrompt.systemPrompt, ...compiledPrompt.constraints, '', `用户要求：${compiledPrompt.userPrompt}`].join('\n');
+    const isRevision = compiledPrompt.constraints.includes('仅返回修改后的正文');
+    const writingRuntimeSettings = isRevision ? { ...runtimeSettings, responseLength: 'brief' as const, webSearch: 'off' as const, deepThinking: 'off' as const } : runtimeSettings;
     let answer = '';
     await sendChatMessage(request, 'standard', {
-      onToken: (token) => { answer += token; },
+      onToken: (token) => { answer += token; onStreamToken(token); },
       onDone: (event) => { if (event.answer) answer = event.answer; },
       onError: (event) => { throw new Error(event.message); },
-    }, { sessionId, runtimeSettings });
+    }, { sessionId, runtimeSettings: writingRuntimeSettings });
     const writingMessages: ChatMessage[] = [{ role: 'user', content: instruction }, { role: 'assistant', content: answer }];
     setMessages(writingMessages);
     // Save the completed writing payload directly. The general debounced
@@ -873,12 +931,6 @@ export default function ChatInterface() {
       messages: writingMessages,
     }, true);
     setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
-    setWritingSessionRestore({
-      sessionId,
-      revision: writingRestoreRevisionRef.current += 1,
-      instruction,
-      result: answer,
-    });
     return answer || '写作任务已完成。';
   };
 
@@ -1120,6 +1172,18 @@ export default function ChatInterface() {
   const closeDirectory = useCallback(() => setView('chat'), []);
   const openHooks = useCallback(() => setView('hooks'), []);
   const closeHooks = useCallback(() => setView('chat'), []);
+  const openImageWorkspace = useCallback((draftPrompt = '') => {
+    setInput(draftPrompt);
+    setView('image-studio');
+  }, []);
+  const openImagePlaza = useCallback((draftPrompt = '') => {
+    setInput(draftPrompt);
+    setView('image-plaza');
+  }, []);
+  const openVideoWorkspace = useCallback((draftPrompt = '') => {
+    setInput(draftPrompt);
+    setView('video-studio');
+  }, []);
 
   // Why: Create with agent（计划书 §3.1 D4）——关市场→新建会话→输入框预填随机提示词（不发送）。
   const handleCreateWithAgent = useCallback(async (prompt: string) => {
@@ -1177,18 +1241,14 @@ export default function ChatInterface() {
     const question = feedbackMsg.feedbackQuestion ?? '';
     const originalQuery = messages[msgIndex - 1]?.content ?? '';  // 用户原始问题
 
-    // 更新消息：标记已回答
+    // 同一原子更新中标记反问已回答并追加用户回答，供随后流式回调可靠读取。
     setMessages((prev) => {
       const updated = [...prev];
       updated[msgIndex] = { ...updated[msgIndex], feedbackAnswer: answer };
-      return updated;
+      const next = [...updated, { role: 'user' as const, content: answer }];
+      messagesRef.current = next;
+      return next;
     });
-
-    // 追加用户回答作为一条用户消息
-    setMessages((prev) => [
-      ...prev,
-      { role: 'user' as const, content: answer },
-    ]);
 
     setIsLoading(true);
     setError(null);
@@ -1218,12 +1278,13 @@ export default function ChatInterface() {
         onResearchProcess: (event) => {
           setResearchProgress(event);
         },
+        onWebDocs: handleResearchWebDocs,
         onResearchDone: (event) => {
           setResearchProgress(null);
-          perRoundResearchChunksRef.current = (event.top_chunks as ResearchChunk[]) ?? [];
+          perRoundResearchChunksRef.current = mergeResearchSources(perRoundResearchChunksRef.current, (event.top_chunks as ResearchChunk[]) ?? []);
           setResearchChunks(perRoundResearchChunksRef.current);
-          setMessages((prev) => [
-            ...prev,
+          persistResearchMessages(activeSessionId, [
+            ...messagesRef.current,
             {
               role: 'assistant',
               content: event.report || '✅ 深度调研完成！',
@@ -1234,8 +1295,7 @@ export default function ChatInterface() {
           ]);
         },
         onResearchReasonDone: (event) => {
-          setMessages((prev) => {
-            const updated = [...prev];
+            const updated = [...messagesRef.current];
             const last = updated[updated.length - 1];
             if (last && last.role === 'assistant') {
               updated[updated.length - 1] = {
@@ -1248,8 +1308,7 @@ export default function ChatInterface() {
                 researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : last.researchChunks,
               };
             }
-            return updated;
-          });
+            persistResearchMessages(activeSessionId, updated);
         },
         onError: (event) => {
           setError(event.message);
@@ -1266,7 +1325,9 @@ export default function ChatInterface() {
       setIsLoading(false);
       sealOffProcessingNodes();
     }
-  }, [messages, isLoading, handleNodeEvent, sealOffProcessingNodes, activeSessionId, runtimeSettings, researchEngine, researchOptions]);
+  // The research persistence helper intentionally snapshots the latest render state.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, isLoading, handleNodeEvent, handleResearchWebDocs, sealOffProcessingNodes, activeSessionId, runtimeSettings, researchEngine, researchOptions]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1332,12 +1393,14 @@ export default function ChatInterface() {
       // Why: 重写历史消息时，先截断到 rewritingIndex（该条及其后的记录全部清除），
       // 再追加新的用户消息，实现 ChatGPT 式"编辑并重发"。
       const base = rewritingIndex != null ? prev.slice(0, rewritingIndex) : prev;
-      return [...base, {
-        role: 'user',
+      const next = [...base, {
+        role: 'user' as const,
         content: userMessage,
         // Why: Code 模式历史消息回显图片缩略图；standard/deep 模式消息列表也支持展示附件。
         attachments: requestAttachments.length ? requestAttachments : undefined,
       }];
+      messagesRef.current = next;
+      return next;
     });
     // 截断后重写索引失效，下一轮提交按普通发送处理
     setRewritingIndex(null);
@@ -1391,14 +1454,15 @@ export default function ChatInterface() {
           onResearchProcess: (event) => {
             setResearchProgress(event);
           },
+          onWebDocs: handleResearchWebDocs,
           onResearchDone: (event) => {
             setResearchProgress(null);
             // 1. 写入本轮 per-round ref（会被随后的 syncRoundStateToLastMessage 覆写到消息）
-            perRoundResearchChunksRef.current = (event.top_chunks as ResearchChunk[]) ?? [];
+            perRoundResearchChunksRef.current = mergeResearchSources(perRoundResearchChunksRef.current, (event.top_chunks as ResearchChunk[]) ?? []);
             setResearchChunks(perRoundResearchChunksRef.current);
             // 2. 先追加消息占位（此时 nodeProgress / webDocs 可能已经在回调里累积到了 ref）
-            setMessages((prev) => [
-              ...prev,
+            persistResearchMessages(requestSessionId, [
+              ...messagesRef.current,
               {
                 role: 'assistant',
                 content: event.report ||
@@ -1410,8 +1474,7 @@ export default function ChatInterface() {
             ]);
           },
           onResearchReasonDone: (event) => {
-            setMessages((prev) => {
-              const updated = [...prev];
+              const updated = [...messagesRef.current];
               const last = updated[updated.length - 1];
               if (last && last.role === 'assistant') {
                 updated[updated.length - 1] = {
@@ -1425,8 +1488,7 @@ export default function ChatInterface() {
                   researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : last.researchChunks,
                 };
               }
-              return updated;
-            });
+              persistResearchMessages(requestSessionId, updated);
           },
           onError: (event) => {
             setError(event.message);
@@ -1694,12 +1756,19 @@ export default function ChatInterface() {
   const handleDeleteSession = async (sessionId: string) => {
     if (isLoading) return;
     try {
+      const deletedSession = sessions.find((session) => session.session_id === sessionId);
       await deleteSession(sessionId);
       titleRequestedRef.current.delete(sessionId);
       const remaining = sessions.filter(
         (session) => session.session_id !== sessionId,
       );
       setSessions(remaining);
+      if (deletedSession?.mode === 'writing' && sessionId === activeSessionId) {
+        localStorage.removeItem('ai-writing-draft-v1');
+        localStorage.removeItem('ai-writing-document-v2');
+        localStorage.removeItem('ai-writing-submitted-instruction-v1');
+        localStorage.removeItem('ai-writing-thesis-outline-v1');
+      }
       if (sessionId === activeSessionId) {
         if (remaining[0]) {
           await openSession(remaining[0]);
@@ -1861,13 +1930,14 @@ export default function ChatInterface() {
     }
     return nodes;
   }, []);
+
   const latestResearchUserMessage = mode === 'research'
     ? [...messages].reverse().find((message) => message.role === 'user')
     : undefined;
   const latestResearchReportMessage = mode === 'research'
     ? [...messages].reverse().find((message) => message.role === 'assistant' && message.type !== 'qwen_feedback')
     : undefined;
-  const researchPaneWidth = isHistoryCollapsed
+  const researchPaneWidth = researchPaneWidthPx ? `${researchPaneWidthPx}px` : isHistoryCollapsed
     ? 'calc((100vw - 3.5rem) * 0.52)'
     : 'calc((100vw - 18rem) * 0.52)';
   const researchWorkspaceStyle = mode === 'research' && messages.length > 0
@@ -1893,6 +1963,8 @@ export default function ChatInterface() {
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenDirectory={openDirectory}
         onOpenHooks={openHooks}
+        onOpenImageStudio={() => openImageWorkspace()}
+        onOpenVideoStudio={() => openVideoWorkspace()}
       />
       <SettingsDialog
         open={isSettingsOpen}
@@ -1964,6 +2036,15 @@ export default function ChatInterface() {
             onThesisBodyRequest={handleThesisBodyRequest}
           />
         </div>
+      )}
+      {view === 'image-plaza' && (
+        <ImagePlazaWorkspace initialPrompt={input} onBack={() => setView('chat')} />
+      )}
+      {view === 'image-studio' && (
+        <ImageStudioWorkspace initialPrompt={input} onBack={() => setView('chat')} />
+      )}
+      {view === 'video-studio' && (
+        <VideoStudioWorkspace initialPrompt={input} onBack={() => setView('chat')} />
       )}
       {isCodeWorkbenchTransitioning && (
         <div className="fixed inset-0 z-[200] flex items-end justify-center overflow-hidden bg-slate-950/10 backdrop-blur-[2px]" aria-label="正在打开 Code 工作台" role="status">
@@ -2148,6 +2229,7 @@ export default function ChatInterface() {
               // Why: 千问深度调研反问卡片——type='qwen_feedback' 时渲染为内嵌卡片，
               //   显示模型反问问题 + 输入框，用户回答后触发 Step 2 继续研究。
               const isQwenFeedback = msg.type === 'qwen_feedback';
+              const isResearchDocument = mode === 'research' && isAssistant && !isQwenFeedback && msg.content.trim().length > 0;
 
               return (
               <div
@@ -2242,8 +2324,12 @@ export default function ChatInterface() {
                       )}
                     </div>
                   </div>
-                ) : (
-                <div className={`
+                ) : isResearchDocument ? (
+                  <ResearchDocumentCard
+                    title={deriveReportTitle(msg.content)}
+                    sourceCount={msgResearchChunks?.length ?? msgWebDocs?.length ?? 0}
+                  />
+                ) : <div className={`
                   ${showPanel ? 'mt-1' : ''}
                   max-w-[85%] rounded-2xl px-5 py-3 ${
                   msg.role === 'user'
@@ -2343,7 +2429,7 @@ export default function ChatInterface() {
                     );
                   })()}
                 </div>
-                )}
+                }
               </div>
               );
             })}
@@ -2716,6 +2802,7 @@ export default function ChatInterface() {
                         role="menuitem"
                         onClick={() => {
                           setMoreToolsOpen(false);
+                          if (label.includes('生图')) openImagePlaza(input);
                           if (label === '代码') setView('code-showcase');
                           if (label === 'AI 写作') void openWritingWorkspace();
                         }}
@@ -2781,9 +2868,11 @@ export default function ChatInterface() {
         <ResearchWorkspace
           title={latestResearchUserMessage?.content || '深度调研报告'}
           report={latestResearchReportMessage?.content || ''}
-          sources={latestResearchReportMessage?.researchChunks ?? researchChunks}
+          sources={researchSourcesFromMessage(latestResearchReportMessage).length > 0 ? researchSourcesFromMessage(latestResearchReportMessage) : researchChunks}
           loading={isLoading}
           sidebarCollapsed={isHistoryCollapsed}
+          sessionId={activeSessionId || undefined}
+          onWidthChange={setResearchPaneWidthPx}
         />
       )}
 

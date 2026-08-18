@@ -58,6 +58,7 @@ export const EMPTY_THESIS_OUTLINE: ThesisOutlineState = {
 };
 
 export type ThesisOutlineEvent =
+  | { type: 'reset' }
   | { type: 'thesis_outline_started'; target_words?: ThesisTargetWords | null }
   | { type: 'token'; token: string }
   | { type: 'title'; title: string }

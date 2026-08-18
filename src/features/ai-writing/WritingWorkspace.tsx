@@ -4,16 +4,16 @@ import { useEffect, useMemo, useReducer, useRef, useState, type PointerEvent as 
 import {
   ArrowLeft, ArrowUp, BookOpen, BriefcaseBusiness, Check, ChevronDown, FilePenLine,
   Copy, Download, FileText, GraduationCap, LayoutTemplate, Maximize2, NotebookPen, PenLine, Share2,
-  Sparkles, ThumbsDown, ThumbsUp, MoreHorizontal,
+  Sparkles, ThumbsDown, ThumbsUp, MoreHorizontal, Mic, Plus,
   Trash2, WandSparkles,
 } from 'lucide-react';
 import { compileWritingPrompt } from './prompts';
 import { createDefaultWritingValues, WRITING_SCENE_MAP, WRITING_SCENES } from './writingScenes';
 import { documentFromV1Result, createEmptyWritingDocument, formatCitationMarkers, WritingDocumentState, WritingDocumentView } from './writingDocumentTypes';
-import { WritingDraft, WritingSceneId } from './writingTypes';
+import { CompiledWritingPrompt, WritingDraft, WritingSceneId } from './writingTypes';
 import { routeWritingModel } from './writingModelRouter';
 import ThesisOutlineView from './thesis/ThesisOutlineView';
-import ThesisBodyView from './thesis/ThesisBodyView';
+import ThesisBodyView, { type WritingRevisionSuggestion, type WritingTextSelection } from './thesis/ThesisBodyView';
 import { createRestoredReferenceSearchKeys } from './thesis/thesisReferencePersistence';
 import { inferBodyArtifactStatus, inferOutlineArtifactLabel } from './writingTimelinePersistence';
 import WritingLayoutWorkspace from './layout/WritingLayoutWorkspace';
@@ -412,7 +412,7 @@ function WritingSceneOrbit({ activeScene, onSelect }: WritingSceneOrbitProps) {
 
 interface WritingWorkspaceProps {
   onBack: () => void;
-  onSubmit: (payload: { instruction: string; compiledPrompt: ReturnType<typeof compileWritingPrompt> }) => Promise<string>;
+  onSubmit: (payload: { instruction: string; compiledPrompt: ReturnType<typeof compileWritingPrompt> }, onStreamToken: (token: string) => void) => Promise<string>;
   onEnsureWritingSession: (instruction: string) => Promise<string>;
   onThesisBodyRequest?: (payload: { phase: 'start' | 'complete' | 'failed'; title: string }) => Promise<void> | void;
   initialResult?: string;
@@ -441,7 +441,8 @@ function readDocument(scene: WritingSceneId, initialResult: string, allowStoredD
   if (allowStoredDocument && typeof window !== 'undefined') {
     try {
       const stored = JSON.parse(localStorage.getItem(DOCUMENT_STORAGE_KEY) ?? 'null') as WritingDocumentState | null;
-      if (stored?.scene && WRITING_SCENE_MAP[stored.scene]) return stored;
+      // 全局草稿只允许恢复到同一写作场景，避免已删除论文正文串入通用/小说等场景。
+      if (stored?.scene === scene && WRITING_SCENE_MAP[stored.scene]) return stored;
     } catch { /* corrupted local draft falls back safely */ }
   }
   return initialResult.trim() ? documentFromV1Result(scene, initialResult) : createEmptyWritingDocument(scene);
@@ -480,6 +481,8 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
   const [copied, setCopied] = useState(false);
   const [fileManifestOpen, setFileManifestOpen] = useState(false);
   const [downloadMenuOpen, setDownloadMenuOpen] = useState(false);
+  const [textSelection, setTextSelection] = useState<WritingTextSelection | null>(null);
+  const [revisionSuggestion, setRevisionSuggestion] = useState<WritingRevisionSuggestion | null>(null);
   const [thesisOutline, dispatchThesisOutline] = useReducer(thesisOutlineReducer, initialThesisOutline, (value) => value ?? readThesisOutline());
   const layoutTocSections = useMemo(() => draft.scene === 'thesis' ? buildThesisTocSections(thesisOutline) : undefined, [draft.scene, thesisOutline]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -493,9 +496,9 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
   const documentPaneRef = useRef<HTMLElement>(null);
   const scene = WRITING_SCENE_MAP[draft.scene];
   const values = draft.valuesByScene[draft.scene];
+  const styleField = scene.fields.find((field) => field.id === 'style');
   const compiled = useMemo(() => compileWritingPrompt(draft.scene, draft.instruction, values), [draft, values]);
   const route = routeWritingModel(compiled);
-  const activeSection = writingDoc.sections.find((item) => item.id === writingDoc.activeSectionId) ?? writingDoc.sections[0];
   const displayedInstruction = submittedInstruction.trim() || draft.instruction.trim() || writingDoc.title;
   const documentTitle = thesisOutline.title || writingDoc.title || '论文正文';
   const restoredBodyArtifactStatus = inferBodyArtifactStatus(writingDoc);
@@ -621,17 +624,65 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
 
   const selectScene = (next: WritingSceneId) => {
     setDraft((current) => ({ ...current, scene: next }));
-    setWritingDoc((current) => ({ ...current, scene: next, updatedAt: Date.now() }));
+    setWritingDoc((current) => current.scene === next ? current : createEmptyWritingDocument(next));
+    if (next !== 'thesis') dispatchThesisOutline({ type: 'reset' });
+    setSubmittedInstruction('');
+    setWorkspaceStarted(false);
     setOpenField(null);
   };
   const selectValue = (fieldId: string, value: string) => setDraft((current) => ({ ...current, valuesByScene: { ...current.valuesByScene, [current.scene]: { ...current.valuesByScene[current.scene], [fieldId]: value } } }));
   const clearDraft = () => {
     localStorage.removeItem(DRAFT_STORAGE_KEY); localStorage.removeItem(DOCUMENT_STORAGE_KEY); localStorage.removeItem(SUBMITTED_INSTRUCTION_KEY); localStorage.removeItem(THESIS_OUTLINE_STORAGE_KEY);
     setDraft({ scene: 'general', instruction: '', valuesByScene: createDefaultWritingValues() });
-    setWritingDoc(createEmptyWritingDocument('general')); setSubmittedInstruction(''); setWorkspaceStarted(false); setError('');
+    setWritingDoc(createEmptyWritingDocument('general')); setSubmittedInstruction(''); setWorkspaceStarted(false); setError(''); setTextSelection(null); setRevisionSuggestion(null);
+  };
+  async function requestWritingRevision(action: 'regenerate' | 'resize' | 'polish' | 'instruction', value?: string) {
+    if (isSubmitting || !writingDoc.sections.length) return;
+    const section = writingDoc.sections.find((item) => item.id === textSelection?.sectionId) ?? writingDoc.sections.find((item) => item.id === writingDoc.activeSectionId) ?? writingDoc.sections[0];
+    const originalText = textSelection?.text || section.content;
+    const userRequest = action === 'instruction' ? (value || draft.instruction).trim() : action === 'regenerate' ? '重新生成这段内容，保持事实和核心观点不变，但改善结构与表达。' : action === 'polish' ? '智能润色这段内容，使表达更准确、自然、连贯。' : `将这段内容${value || '适度调整篇幅'}，不要引入无依据的新事实。`;
+    if (!originalText.trim() || !userRequest) return;
+    const style = styleField ? (values.style || styleField.defaultValue) : '';
+    const revisionPrompt: CompiledWritingPrompt = {
+      systemPrompt: '你是专业中文文档编辑。根据用户要求修改指定文本，保留原意、事实、专有名词和引用标记。仅返回修改后的正文，不要解释，不要添加 Markdown 代码围栏。',
+      userPrompt: `修改要求：${userRequest}\n${style ? `写作风格：${style}\n` : ''}目标文本：\n${originalText}`,
+      constraints: ['仅返回修改后的正文', '不得虚构事实', textSelection?.text ? '只处理用户选中的文本' : '处理当前章节'],
+      routingHints: { capability: scene.routingProfile, prefersOutlineFirst: false },
+    };
+    setIsSubmitting(true); setError('');
+    setRevisionSuggestion({ sectionId: section.id, originalText, content: '', status: 'generating', anchorRect: textSelection?.anchorRect });
+    let streamed = '';
+    try {
+      const result = await onSubmit({ instruction: userRequest, compiledPrompt: revisionPrompt }, (token) => {
+        streamed += token;
+        setRevisionSuggestion((current) => current ? { ...current, content: streamed, status: 'generating' } : current);
+      });
+      const content = (streamed || result).trim();
+      setRevisionSuggestion((current) => current ? { ...current, content, status: 'ready' } : current);
+      if (action === 'instruction') setDraft((current) => ({ ...current, instruction: '' }));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '正文修改失败');
+      setRevisionSuggestion((current) => current ? { ...current, status: 'failed' } : current);
+    } finally { setIsSubmitting(false); }
+  }
+  const applyRevisionSuggestion = (mode: 'insert' | 'replace') => {
+    if (!revisionSuggestion || revisionSuggestion.status !== 'ready') return;
+    setWritingDoc((current) => {
+      const sections = current.sections.map((section) => {
+        if (section.id !== revisionSuggestion.sectionId) return section;
+        const nextContent = mode === 'insert' ? `${section.content.trimEnd()}\n\n${revisionSuggestion.content}` : section.content.includes(revisionSuggestion.originalText) ? section.content.replace(revisionSuggestion.originalText, revisionSuggestion.content) : revisionSuggestion.content;
+        return { ...section, content: nextContent, status: 'complete' as const };
+      });
+      return { ...current, sections, generatedLength: sections.reduce((total, section) => total + section.content.replace(/\s/g, '').length, 0), updatedAt: Date.now() };
+    });
+    setRevisionSuggestion(null); setTextSelection(null);
   };
   const submit = async () => {
     if (!draft.instruction.trim() || isSubmitting) return;
+    if (writingDoc.generatedLength > 0 && writingDoc.view === 'body') {
+      await requestWritingRevision('instruction', draft.instruction);
+      return;
+    }
     setSubmittedInstruction(draft.instruction);
     localStorage.setItem(SUBMITTED_INSTRUCTION_KEY, draft.instruction);
     setWorkspaceStarted(true); setIsSubmitting(true); setError('');
@@ -656,10 +707,20 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
       } finally { setIsSubmitting(false); }
       return;
     }
-    setWritingDoc((current) => ({ ...current, researchStatus: 'writing', sections: current.sections.map((section) => ({ ...section, status: 'generating' })), updatedAt: Date.now() }));
+    const title = draft.instruction.slice(0, 44) || '未命名写作';
+    const streamingDocument = createEmptyWritingDocument(draft.scene, title);
+    streamingDocument.view = 'body';
+    streamingDocument.researchStatus = 'writing';
+    streamingDocument.sections[0].status = 'generating';
+    setWritingDoc(streamingDocument);
+    let streamedContent = '';
     try {
-      const content = await onSubmit({ instruction: draft.instruction, compiledPrompt: compiled });
-      setWritingDoc(documentFromV1Result(draft.scene, content, draft.instruction.slice(0, 44) || '未命名写作'));
+      const content = await onSubmit({ instruction: draft.instruction, compiledPrompt: compiled }, (token) => {
+        streamedContent += token;
+        setWritingDoc((current) => ({ ...current, generatedLength: streamedContent.replace(/\s/g, '').length, sections: current.sections.map((section, index) => index === 0 ? { ...section, content: streamedContent, status: 'generating' } : section), updatedAt: Date.now() }));
+      });
+      const finalContent = streamedContent || content;
+      setWritingDoc((current) => ({ ...current, title, researchStatus: 'done', generatedLength: finalContent.replace(/\s/g, '').length, sections: current.sections.map((section, index) => index === 0 ? { ...section, title: '正文', content: finalContent, status: 'complete' } : section), updatedAt: Date.now() }));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : '写作任务提交失败');
       setWritingDoc((current) => ({ ...current, researchStatus: 'failed', sections: current.sections.map((section) => ({ ...section, status: 'failed' })), updatedAt: Date.now() }));
@@ -767,6 +828,7 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
       setBodyArtifactUrl(URL.createObjectURL(wordBlob));
       setBodyArtifactStatus('complete');
       try { await onThesisBodyRequest?.({ phase: 'complete', title: documentTitle }); } catch { /* document generation already succeeded */ }
+      setDraft((current) => ({ ...current, instruction: '' }));
     } catch (reason) {
       if (!controller.signal.aborted) {
         setError(reason instanceof Error ? reason.message : '论文正文生成失败');
@@ -870,7 +932,7 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
       </header>
       <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto px-6 pb-32 pt-2 sm:px-10">
         <div className="flex justify-end"><div className="max-w-[82%] rounded-2xl bg-blue-50 px-4 py-3 text-[15px] leading-6 text-slate-900">{displayedInstruction}</div></div>
-        <div className="mt-12 text-[15px] leading-7 text-slate-800">
+        {draft.scene === 'thesis' ? <div data-thesis-timeline className="mt-12 text-[15px] leading-7 text-slate-800">
           <p>为确保完全符合你的创作要求，我们会分步骤生成全文。你可以修改大纲来优化内容，也可以继续提出修改要求。</p>
           <button type="button" onClick={() => setWritingDoc((current) => ({ ...current, view: 'outline', updatedAt: Date.now() }))} className="mt-5 flex w-full max-w-md items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4 text-left shadow-sm hover:border-blue-200 hover:bg-blue-50/30">
             <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-rose-50 text-rose-500"><FileText size={18}/></span><span><strong className="block text-sm">大纲｜{writingDoc.title}</strong><span className="mt-0.5 block text-xs text-slate-400">{outlineArtifactLabel}</span></span>
@@ -884,12 +946,20 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
           </div>}
           {writingDoc.layoutStatus === 'formatted' && <div className="mt-10"><div className="flex justify-end"><div className="max-w-[82%] rounded-2xl bg-blue-50 px-4 py-3 text-[15px] leading-6 text-slate-900">我要基于正文排版</div></div><button type="button" onClick={() => setWritingDoc((current) => ({ ...current, view: 'layout' }))} className="mt-6 flex w-full max-w-md items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4 text-left shadow-sm"><span className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600 font-bold text-white">W</span><span><strong className="block text-sm">{documentTitle}</strong><span className="text-xs text-blue-600">已排版 · 点击查看</span></span></button></div>}
           <div className="mt-6 flex items-center gap-5 text-slate-500"><button type="button" aria-label="满意" className="hover:text-slate-900"><ThumbsUp size={18}/></button><button type="button" aria-label="不满意" className="hover:text-slate-900"><ThumbsDown size={18}/></button><button type="button" aria-label="分享" className="hover:text-slate-900"><Share2 size={18}/></button><button type="button" aria-label="更多操作" className="hover:text-slate-900"><MoreHorizontal size={19}/></button></div>
-        </div>
+        </div> : <div data-standard-writing-timeline className="mt-10 text-[15px] leading-7 text-slate-800"><p>{isSubmitting ? '正在根据你的要求生成正文…' : '正文已生成，你可以在右侧直接编辑，也可以继续提出修改要求。'}</p><button type="button" onClick={() => setWritingDoc((current) => ({ ...current, view: 'body' }))} className="mt-5 flex w-full max-w-md items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-4 text-left shadow-sm"><span className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-600 font-bold text-white">W</span><span className="min-w-0"><strong className="block truncate text-sm">正文｜{writingDoc.title}</strong><span className="text-xs text-slate-400">{isSubmitting ? '正在流式生成…' : `${writingDoc.generatedLength} 字 · 已保存`}</span></span></button><div className="mt-6 flex items-center gap-5 text-slate-500"><button type="button" aria-label="满意" className="hover:text-slate-900"><ThumbsUp size={18}/></button><button type="button" aria-label="不满意" className="hover:text-slate-900"><ThumbsDown size={18}/></button><button type="button" aria-label="分享" className="hover:text-slate-900"><Share2 size={18}/></button><button type="button" aria-label="更多操作" className="hover:text-slate-900"><MoreHorizontal size={19}/></button></div></div>}
       </div>
       <div className="absolute bottom-5 left-5 right-5 hidden lg:block">
-        <div className="rounded-[22px] border border-slate-200 bg-white p-2 shadow-[0_10px_35px_rgba(15,23,42,0.06)]">
-          <textarea value={draft.instruction} onChange={(event) => setDraft((current) => ({ ...current, instruction: event.target.value }))} placeholder="向 AI 写作提出修改要求" className="min-h-14 w-full resize-none border-0 bg-transparent px-3 py-2 text-sm outline-none placeholder:text-slate-400"/>
-          <div className="flex items-center gap-3 px-2 pb-1 text-xs text-slate-600"><Sparkles size={14} className="text-blue-600"/><span>修改全文</span><button type="button" disabled={!draft.instruction.trim() || isSubmitting} onClick={() => void submit()} className="ml-auto flex h-9 w-9 items-center justify-center rounded-full bg-slate-950 text-white disabled:bg-slate-200"><ArrowUp size={16}/></button></div>
+        <div data-writing-follow-up-composer className="rounded-[26px] border border-slate-200 bg-white p-3 shadow-[0_14px_44px_rgba(15,23,42,0.09)]">
+          <textarea value={draft.instruction} onChange={(event) => setDraft((current) => ({ ...current, instruction: event.target.value }))} placeholder={textSelection ? '描述如何修改选中的文字' : '描述修改要求，我来帮你完善正文'} className="min-h-14 max-h-32 w-full resize-none border-0 bg-transparent px-3 py-2 text-[15px] leading-6 outline-none placeholder:text-slate-400"/>
+          <div className="relative flex min-w-0 flex-nowrap items-center gap-1 overflow-visible border-t border-slate-100 px-1 pt-2">
+            <button type="button" aria-label="添加附件" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-slate-700 hover:bg-slate-100"><Plus size={21}/></button>
+            <span className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-blue-50 px-3 text-sm font-medium text-blue-700"><Sparkles size={15}/>AI 写作</span>
+            <div data-writing-select className="relative shrink-0"><button type="button" onClick={() => setOpenField(openField === '__scene_followup__' ? null : '__scene_followup__')} className="inline-flex h-9 items-center gap-1 rounded-lg px-2 text-sm text-slate-700 hover:bg-slate-100">{scene.label}场景<ChevronDown size={13}/></button>{openField === '__scene_followup__' && <div className="absolute bottom-full left-0 z-50 mb-2 min-w-40 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">{WRITING_SCENES.map((item) => <button key={item.id} type="button" onClick={() => { selectScene(item.id); setOpenField(null); }} className="block w-full rounded-lg px-3 py-2 text-left text-sm hover:bg-slate-50">{item.label}场景</button>)}</div>}</div>
+            {scene.fields.map((item) => <div key={item.id} data-writing-select className="relative shrink-0"><button type="button" onClick={() => setOpenField(openField === `followup-${item.id}` ? null : `followup-${item.id}`)} className="inline-flex h-9 items-center gap-1 rounded-lg px-2 text-sm text-slate-700 hover:bg-slate-100"><span>{item.label}：{values[item.id]}</span><ChevronDown size={13}/></button>{openField === `followup-${item.id}` && <div className="absolute bottom-full left-0 z-50 mb-2 max-h-64 min-w-40 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">{item.options.map((option) => <button key={option.value} type="button" onClick={() => { selectValue(item.id, option.value); setOpenField(null); }} className={`block w-full whitespace-nowrap rounded-lg px-3 py-2 text-left text-sm ${values[item.id] === option.value ? 'bg-blue-50 text-blue-700' : 'hover:bg-slate-50'}`}>{option.label}</button>)}</div>}</div>)}
+            {textSelection && <span className="ml-1 max-w-36 truncate rounded-full bg-amber-50 px-2.5 py-1.5 text-xs text-amber-700" title={textSelection.text}>已选择文字</span>}
+            <button type="button" aria-label="语音输入" className="ml-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-slate-700 hover:bg-slate-100"><Mic size={17}/></button>
+            <button type="button" disabled={!draft.instruction.trim() || isSubmitting} onClick={() => void submit()} aria-label="发送修改要求" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-950 text-white disabled:bg-slate-200"><ArrowUp size={17}/></button>
+          </div>
         </div>
       </div>
     </section>
@@ -925,14 +995,14 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
       <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto" style={{ padding: 0 }}>
         <div
           data-writing-body-print-root={writingDoc.view === 'layout' ? undefined : ''}
-          className={writingDoc.view === 'body' && draft.scene === 'thesis' ? 'w-full' : ''}
-          style={writingDoc.view === 'body' && draft.scene === 'thesis'
+          className={writingDoc.view === 'body' ? 'w-full' : ''}
+          style={writingDoc.view === 'body'
             ? { width: '100%' }
             : { width: 'calc(100% - 96px)', maxWidth: 980, margin: '0 auto', paddingTop: 32, paddingBottom: 48 }}
         >
           {writingDoc.view === 'outline' && draft.scene === 'thesis' && <><label className="mb-5 inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">期望字数：<select aria-label="期望字数" value={values.length || '不限'} onChange={(event) => selectValue('length', event.target.value)} className="cursor-pointer bg-transparent font-medium outline-none">{scene.fields.find((field) => field.id === 'length')?.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label><ThesisOutlineView outline={thesisOutline} typingText={outlineTypingText} onSetChapterLength={setChapterLength} onAddSection={addThesisSection} onDeleteChapter={deleteThesisChapter} onRegenerate={() => void regenerateThesisOutline()} onGenerateBody={() => void generateThesisBody()}/></>}
-          {writingDoc.view === 'body' && draft.scene === 'thesis' && <ThesisBodyView document={writingDoc} outline={thesisOutline} generating={isSubmitting} paused={bodyPaused} onPause={pauseThesisBody} onContinue={() => void generateThesisBody()} onSectionChange={updateThesisBodySection}/>} 
-          {writingDoc.view === 'body' && draft.scene !== 'thesis' && <article><h1 className="text-2xl font-semibold">{writingDoc.title}</h1>{isSubmitting ? <div className="mt-8 space-y-4" aria-busy="true"><div className="h-4 w-3/4 animate-pulse rounded bg-slate-100"/><div className="h-4 w-full animate-pulse rounded bg-slate-100"/><div className="h-4 w-5/6 animate-pulse rounded bg-slate-100"/></div> : <div className="mt-7 whitespace-pre-wrap text-[15px] leading-8 text-slate-800">{activeSection?.content || '正文正在生成，请稍候…'}</div>}</article>}
+          {writingDoc.view === 'body' && draft.scene === 'thesis' && <ThesisBodyView document={writingDoc} outline={thesisOutline} generating={isSubmitting} paused={bodyPaused} onPause={pauseThesisBody} onContinue={() => void generateThesisBody()} onSectionChange={updateThesisBodySection} styleOptions={styleField?.options.map((option) => option.label)} currentStyle={values.style} onStyleChange={(style) => selectValue('style', style)} onTextSelection={setTextSelection} onRevisionAction={(action, value) => void requestWritingRevision(action, value)} revisionSuggestion={revisionSuggestion} onApplyRevision={applyRevisionSuggestion} onDismissRevision={() => setRevisionSuggestion(null)}/>} 
+          {writingDoc.view === 'body' && draft.scene !== 'thesis' && <ThesisBodyView document={writingDoc} outline={thesisOutline} generating={isSubmitting} paused={false} onPause={() => undefined} onContinue={() => void submit()} onSectionChange={updateThesisBodySection} showNavigation={false} showGenerationControls={false} styleOptions={styleField?.options.map((option) => option.label)} currentStyle={values.style} onStyleChange={(style) => selectValue('style', style)} onTextSelection={setTextSelection} onRevisionAction={(action, value) => void requestWritingRevision(action, value)} revisionSuggestion={revisionSuggestion} onApplyRevision={applyRevisionSuggestion} onDismissRevision={() => setRevisionSuggestion(null)}/>} 
           {writingDoc.view === 'layout' && <WritingLayoutWorkspace document={writingDoc} tocSections={layoutTocSections} onTemplate={applyLayoutTemplate} onMetadata={updateLayoutMetadata}/>} 
           {error && <div role="alert" className="mt-5 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div>}
         </div>
