@@ -1,0 +1,15 @@
+# Local secrets and provider credentials
+.env
+.env.*
+!.env.example
+OSS.env
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local video/image assets and logs
+data/video-studio/
+data/image-studio/
+logs/

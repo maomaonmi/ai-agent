@@ -7,6 +7,7 @@ CLI 直启 uvicorn main:app --reload 不会读取该配置，落盘 generated/ �
 
 import asyncio
 import ast
+import base64
 import json
 import sqlite3
 import logging
@@ -15,6 +16,8 @@ import re
 import shutil
 import sys
 import time
+import hashlib
+import uuid
 from types import SimpleNamespace
 from pathlib import Path
 from typing import Annotated, TypedDict, List, Dict, Literal, Optional, Any, NotRequired, TypeVar, Callable, Awaitable, AsyncGenerator
@@ -25,10 +28,10 @@ from contextlib import asynccontextmanager
 # 不再在模块层打补丁——reload 子进程先解析 loop 再 import app，补丁来不及生效；
 # 改用 uvicorn.run(..., loop="win_loop:proactor_loop_factory")（见 __main__）。
 
-from fastapi import FastAPI, HTTPException, WebSocket
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket
+from fastapi.responses import StreamingResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -46,7 +49,7 @@ from agent_factory import (
     generate_agent_config,
 )
 from session_memory import SessionNotFoundError, SessionStore
-from model_settings import MODEL_CATALOG, ModelSettings, ModelSettingsStore, ServiceSettings, ServiceSettingsStore, capabilities_for_model, ensure_direct_connection
+from model_settings import MODEL_CATALOG, ModelSettings, ModelSettingsStore, ServiceSettings, ServiceSettingsStore, apply_network_proxy, capabilities_for_model
 from thesis_writing import (
     ThesisBodyRequest,
     ThesisOutlineRequest,
@@ -79,6 +82,14 @@ from mcp_marketplace import (
 )
 from terminal_service import TERMINAL_POOL, handle_terminal_websocket
 from plugins_registry import PluginsStore
+from video_api import create_video_router
+from video_assets import VideoAssetStore
+from video_engine import QwenVideoProvider, VideoJobRepository, ZhipuVideoProvider
+from video_monitor import VideoTaskMonitor
+from video_reference import AliyunOssSignedUrlProvider, ReferenceAssetService
+from video_probe import FFprobeService
+from video_runtime import load_video_runtime_config
+from video_transcode import FFmpegService
 
 from 全知全能.day32_deep_research_retrieval import (
     generate_sub_queries,
@@ -99,6 +110,7 @@ logger = logging.getLogger("app.main")
 # 用户在设置页面填 Key 后保存，会触发 apply_service_settings() 热更新，无需重启后端。
 service_settings_store = ServiceSettingsStore()
 _service_cfg = service_settings_store.load()
+apply_network_proxy(_service_cfg)
 
 # ---------- 搜索服务全局状态（热更新时赋值对应变量）----------
 # DeepSeek 无原生联网搜索 → 走独立搜索服务。
@@ -172,6 +184,8 @@ def apply_service_settings(settings: ServiceSettings) -> None:
     DEEP_RESEARCH_ENGINE = settings.deep_research_engine or "firecrawl"
     if DEEP_RESEARCH_ENGINE not in {"firecrawl", "native"}:
         DEEP_RESEARCH_ENGINE = "firecrawl"
+    apply_network_proxy(settings)
+    print(f"[Service] 网络代理: {'已启用' if settings.proxy_enabled and settings.proxy_url else '未启用'}")
     print(
         f"[Service] Firecrawl 高级参数：highlights={'on' if FIRECRAWL_ENABLE_HIGHLIGHTS else 'off'}, "
         f"scrape_top_n={FIRECRAWL_SCRAPE_TOP_N}, md_max_chars={FIRECRAWL_MD_MAX_CHARS}, "
@@ -202,7 +216,119 @@ SESSION_DB_PATH = Path(os.getenv(
     "SESSION_DB_PATH",
     str(Path(__file__).resolve().parent / "data" / "agent_memory.db"),
 ))
+
+IMAGE_ASSET_DIR = Path(os.getenv(
+    "IMAGE_ASSET_DIR",
+    str(Path(__file__).resolve().parent / "data" / "image-studio"),
+))
+IMAGE_ASSET_DIR.mkdir(parents=True, exist_ok=True)
+IMAGE_UPLOAD_DIR = IMAGE_ASSET_DIR / "uploads"
+IMAGE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+VIDEO_ASSET_DIR = Path(os.getenv(
+    "VIDEO_ASSET_DIR",
+    str(Path(__file__).resolve().parent / "data" / "video-studio"),
+))
+VIDEO_ASSET_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _initialize_image_store() -> None:
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS image_generation_batches (
+                id TEXT PRIMARY KEY,
+                raw_prompt TEXT NOT NULL,
+                enhanced_prompt TEXT,
+                model TEXT,
+                provider TEXT,
+                ratio TEXT NOT NULL,
+                count INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                error_message TEXT,
+                created_at REAL NOT NULL,
+                completed_at REAL
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS image_generation_assets (
+                id TEXT PRIMARY KEY,
+                batch_id TEXT NOT NULL,
+                local_path TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                width INTEGER,
+                height INTEGER,
+                created_at REAL NOT NULL,
+                FOREIGN KEY(batch_id) REFERENCES image_generation_batches(id)
+            )
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS image_plaza_assets (
+                id TEXT PRIMARY KEY,
+                local_path TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                prompt TEXT,
+                prompt_en TEXT,
+                negative_prompt TEXT,
+                tags TEXT,
+                source TEXT NOT NULL DEFAULT 'user',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            )
+        """)
+        connection.commit()
+
+
+_initialize_image_store()
 session_store = SessionStore(SESSION_DB_PATH)
+video_job_repository = VideoJobRepository(SESSION_DB_PATH)
+video_asset_store = VideoAssetStore(VIDEO_ASSET_DIR, video_job_repository)
+video_runtime_config = load_video_runtime_config()
+video_reference_assets = None
+if video_runtime_config.oss_configured:
+    try:
+        video_reference_assets = ReferenceAssetService(
+            video_job_repository,
+            AliyunOssSignedUrlProvider(video_runtime_config),
+            probe=FFprobeService(video_runtime_config.resolve_ffprobe() or video_runtime_config.ffprobe_path),
+            transcode=FFmpegService(video_runtime_config.resolve_ffmpeg() or video_runtime_config.ffmpeg_path),
+            work_dir=VIDEO_ASSET_DIR / "reference-work",
+        )
+    except Exception as exc:
+        # Keep the existing text/image video routes available when the optional
+        # OSS SDK or credentials are not ready yet; reference upload returns a
+        # structured 503 instead of breaking application startup.
+        logger.warning("参考视频 OSS 未启用: %s", exc)
+
+
+def _build_video_providers() -> dict[str, Any]:
+    """Build video adapters from the existing provider settings store.
+
+    Empty-key providers are omitted so a missing configuration becomes a
+    stable PROVIDER_NOT_CONFIGURED task failure instead of a vague upstream
+    authentication exception.
+    """
+
+    providers: dict[str, Any] = {}
+    qwen_settings = model_settings_store.load("qwen")
+    if qwen_settings.api_key:
+        providers["qianwen"] = QwenVideoProvider(
+            qwen_settings.api_key,
+            base_url=os.getenv("DASHSCOPE_VIDEO_BASE_URL", "https://dashscope.aliyuncs.com/api/v1"),
+        )
+    glm_settings = model_settings_store.load("glm")
+    if glm_settings.api_key:
+        providers["zhipu"] = ZhipuVideoProvider(
+            glm_settings.api_key,
+            base_url=os.getenv("ZHIPU_VIDEO_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
+        )
+    return providers
+
+
+video_task_monitor = VideoTaskMonitor(
+    video_job_repository,
+    _build_video_providers(),
+    asset_store=video_asset_store,
+    reference_assets=video_reference_assets,
+)
 code_project_store = CodeProjectStore(SESSION_DB_PATH)
 # Why: Phase2 记忆系统三个 store——必须放在 SessionStore 之后实例化，
 # 因为 raw_event_ledger / profile_cards / conversation_summaries / vfs_checkpoints / skills
@@ -4451,12 +4577,15 @@ async def lifespan(app: FastAPI):
     get_langgraph_app()
     get_plan_execute_app()
     _cleanup_old_generated_runs()
+    await video_task_monitor.start()
     # Why: MCP 池随应用生命周期启动（启用即拉起常驻），关闭时统一回收子进程，
     # 避免孤儿 npx/python 进程残留。
     await mcp_pool.sync_from_config()
     print("[FastAPI] 启动完成，服务已就绪")
     yield
     print("[FastAPI] 关闭中...")
+    await video_task_monitor.stop()
+    await video_asset_store.client.aclose()
     await mcp_pool.shutdown_all()
 
 
@@ -4510,6 +4639,570 @@ app.include_router(create_code_router(
     # Why: Plugins 页签禁用的内置辅助工具（run_terminal 等）在工具编排层过滤。
     plugins_store=plugins_store,
 ))
+app.include_router(create_video_router(
+    video_job_repository,
+    video_task_monitor,
+    asset_root=str(VIDEO_ASSET_DIR),
+    reference_assets=video_reference_assets,
+))
+
+
+# Image Studio foundation: keep model capability metadata and director routing
+# behind the API so the UI never hard-codes provider limits.
+IMAGE_MODEL_CAPABILITIES = [
+    {"id": "qwen-image-3.0-pro", "name": "千问 3.0 Pro", "provider": "qianwen", "description": "复杂版面、小字与摄影级细节", "max_outputs": 6, "max_width": 2048, "max_height": 2048, "supports_negative_prompt": True, "enabled": True},
+    {"id": "qwen-image-3.0", "name": "千问 3.0", "provider": "qianwen", "description": "平衡质量与速度", "max_outputs": 6, "max_width": 2048, "max_height": 2048, "supports_negative_prompt": True, "enabled": True},
+    {"id": "wan2.7-image-pro", "name": "万相 2.7 Pro", "provider": "qianwen", "description": "4K、品牌色与角色一致性", "max_outputs": 4, "max_width": 4096, "max_height": 4096, "supports_negative_prompt": True, "enabled": True},
+    {"id": "wan2.7-image", "name": "万相 2.7", "provider": "qianwen", "description": "平衡版长图与多图生成", "max_outputs": 4, "max_width": 2048, "max_height": 2048, "supports_negative_prompt": True, "enabled": True},
+    {"id": "z-image-turbo", "name": "Z-Image Turbo", "provider": "qianwen", "description": "极速低成本的写实人像与商品图", "max_outputs": 1, "max_width": 2048, "max_height": 2048, "supports_negative_prompt": False, "enabled": True},
+    {"id": "cogview-4", "name": "智谱 CogView-4", "provider": "zhipu", "description": "中文文字、国风与复杂语义", "max_outputs": 4, "max_width": 2048, "max_height": 2048, "supports_negative_prompt": False, "enabled": True},
+    {"id": "glm-image", "name": "智谱 GLM-Image", "provider": "zhipu", "description": "知识密集版面与通用高质量生图", "max_outputs": 4, "max_width": 2048, "max_height": 2048, "supports_negative_prompt": False, "enabled": True},
+]
+
+
+class ImageDirectRequest(BaseModel):
+    raw_prompt: str = Field(min_length=1, max_length=2000)
+    ratio: str = "1:1"
+    count: int = Field(default=1, ge=1, le=12)
+    model_mode: Literal["auto", "manual"] = "auto"
+    model: Optional[str] = None
+    # A 20 MB browser upload expands to roughly 27 MB as a base64 data URL.
+    reference_image: Optional[str] = Field(default=None, max_length=30_000_000)
+
+    @field_validator("reference_image")
+    @classmethod
+    def validate_reference_image(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if not (value.startswith("data:image/") and ";base64," in value) and not value.startswith("https://"):
+            raise ValueError("参考图必须是安全的图片地址或 data URL")
+        return value
+
+
+def _image_director_result(request: ImageDirectRequest) -> dict[str, Any]:
+    has_cjk = bool(re.search(r"[\u3400-\u9fff]", request.raw_prompt))
+    has_required_text = bool(re.search(r"(带|写着|文字|标题|标语|招牌|海报|霓虹字|logo|logo文字)", request.raw_prompt, re.I))
+    needs_4k = bool(re.search(r"4k|超清|4096|影视分镜|连续角色|角色一致", request.raw_prompt, re.I))
+    speed_first = bool(re.search(r"快速|极速|草图|低成本|实时预览", request.raw_prompt, re.I))
+    if request.model_mode == "manual" and request.model:
+        recommended = request.model
+        reasons = ["用户已锁定模型"]
+    elif needs_4k:
+        recommended = "wan2.7-image-pro"
+        reasons = ["检测到 4K 或角色一致性需求"]
+    elif has_cjk and has_required_text:
+        recommended = "cogview-4"
+        reasons = ["检测到需要准确呈现的中文文字"]
+    elif speed_first:
+        recommended = "z-image-turbo"
+        reasons = ["检测到速度或成本优先"]
+    elif has_cjk:
+        recommended = "qwen-image-3.0-pro"
+        reasons = ["中文语义与复杂构图需要高质量模型"]
+    else:
+        recommended = "qwen-image-3.0"
+        reasons = ["通用需求采用平衡模型"]
+    return {
+        "recommended_model": recommended,
+        "fallback_models": [m["id"] for m in IMAGE_MODEL_CAPABILITIES if m["id"] != recommended][:2],
+        "enhanced_prompt_zh": request.raw_prompt.strip() + "，画面主体清晰，构图完整，细节丰富，光影自然，材质真实。",
+        "enhanced_prompt_en": request.raw_prompt.strip(),
+        "negative_prompt": "模糊、低清晰度、变形、错误文字、水印、重复主体",
+        "routing_reasons": reasons,
+        "suggested_ratio": request.ratio,
+        "warnings": [],
+    }
+
+
+@app.get("/api/image/models")
+async def get_image_models():
+    return {"models": IMAGE_MODEL_CAPABILITIES}
+
+
+@app.post("/api/image/direct")
+async def direct_image_prompt(request: ImageDirectRequest):
+    if request.model_mode == "manual" and request.model not in {m["id"] for m in IMAGE_MODEL_CAPABILITIES}:
+        raise HTTPException(status_code=400, detail="所选图片模型不可用")
+    return _image_director_result(request)
+
+
+def _image_size_for_ratio(ratio: str) -> str:
+    return {
+        "1:1": "1280x1280",
+        "4:3": "1472x1088",
+        "3:4": "1088x1472",
+        "16:9": "1728x960",
+        "9:16": "960x1728",
+    }.get(ratio, "1280x1280")
+
+
+def _dashscope_image_size_for_ratio(ratio: str) -> str:
+    return _image_size_for_ratio(ratio).replace("x", "*")
+
+
+async def _download_image(url: str, asset_id: str, batch_id: str) -> dict[str, Any]:
+    if not url.startswith("https://"):
+        raise ValueError("供应商返回了不安全的图片地址")
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+    content_type = response.headers.get("content-type", "image/png").split(";", 1)[0]
+    if content_type not in {"image/png", "image/jpeg", "image/webp"}:
+        raise ValueError("供应商返回的不是受支持的图片格式")
+    if len(response.content) > 25 * 1024 * 1024:
+        raise ValueError("图片文件超过 25MB 限制")
+    extension = {"image/jpeg": "jpg", "image/webp": "webp"}.get(content_type, "png")
+    target_dir = IMAGE_ASSET_DIR / batch_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{asset_id}.{extension}"
+    target.write_bytes(response.content)
+    return {"id": asset_id, "url": f"/api/image/assets/{asset_id}", "local_path": str(target), "mime_type": content_type}
+
+
+async def _call_zhipu_image(model: str, prompt: str, count: int, ratio: str) -> list[str]:
+    settings = model_settings_store.load("glm")
+    api_key = settings.api_key or os.getenv("ZHIPU_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="智谱 API Key 尚未配置")
+    actual_model = "cogView-4-250304" if model == "cogview-4" else "glm-image"
+    payload = {"model": actual_model, "prompt": prompt, "size": _image_size_for_ratio(ratio)}
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        response = await client.post("https://open.bigmodel.cn/api/paas/v4/images/generations", headers={"Authorization": f"Bearer {api_key}"}, json=payload)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail="智谱图片生成请求失败")
+    data = response.json()
+    return [item["url"] for item in data.get("data", []) if item.get("url")][:count]
+
+
+async def _call_qwen_image(model: str, prompt: str, count: int, ratio: str, reference_image: Optional[str] = None) -> list[str]:
+    settings = model_settings_store.load("qwen")
+    api_key = settings.api_key or os.getenv("DASHSCOPE_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="千问 API Key 尚未配置")
+    base_url = os.getenv("DASHSCOPE_IMAGE_BASE_URL", "https://dashscope.aliyuncs.com")
+    content: list[dict[str, str]] = [{"text": prompt}]
+    if reference_image:
+        content.append({"image": reference_image})
+    payload = {
+        "model": model,
+        "input": {"messages": [{"role": "user", "content": content}]},
+        "parameters": {"prompt_extend": True, "size": _dashscope_image_size_for_ratio(ratio), "n": min(count, 6)},
+    }
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(f"{base_url.rstrip('/')}/api/v1/services/aigc/multimodal-generation/generation", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail="千问图片生成请求失败")
+    data = response.json()
+    urls: list[str] = []
+    for choice in data.get("output", {}).get("choices", []):
+        for content in choice.get("message", {}).get("content", []):
+            if isinstance(content, dict) and content.get("image"):
+                urls.append(content["image"])
+    return urls[:count]
+
+
+async def _call_dashscope_multimodal_image(model: str, prompt: str, count: int, ratio: str, *, prompt_extend: bool, thinking_mode: bool = False, reference_image: Optional[str] = None) -> list[str]:
+    settings = model_settings_store.load("qwen")
+    api_key = settings.api_key or os.getenv("DASHSCOPE_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="千问 API Key 尚未配置")
+    base_url = os.getenv("DASHSCOPE_IMAGE_BASE_URL", "https://dashscope.aliyuncs.com")
+    params: dict[str, Any] = {"size": _dashscope_image_size_for_ratio(ratio), "n": min(count, 4), "watermark": False}
+    if model.startswith("wan"):
+        params["thinking_mode"] = thinking_mode
+    else:
+        params["prompt_extend"] = prompt_extend
+    content: list[dict[str, str]] = [{"text": prompt}]
+    if reference_image:
+        content.append({"image": reference_image})
+    payload = {"model": model, "input": {"messages": [{"role": "user", "content": content}]}, "parameters": params}
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(f"{base_url.rstrip('/')}/api/v1/services/aigc/multimodal-generation/generation", headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}, json=payload)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=f"{model} 图片生成请求失败")
+    data = response.json()
+    return [content["image"] for choice in data.get("output", {}).get("choices", []) for content in choice.get("message", {}).get("content", []) if isinstance(content, dict) and content.get("image")][:count]
+
+
+@app.post("/api/image/generations")
+async def create_image_generation(request: ImageDirectRequest):
+    director = _image_director_result(request)
+    selected_model = request.model if request.model_mode == "manual" and request.model else director["recommended_model"]
+    capability = next((model for model in IMAGE_MODEL_CAPABILITIES if model["id"] == selected_model), None)
+    if capability is None:
+        raise HTTPException(status_code=400, detail="所选图片模型不可用")
+    count = min(request.count, capability["max_outputs"])
+    batch_id = str(uuid.uuid4())
+    now = time.time()
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        connection.execute("INSERT INTO image_generation_batches (id, raw_prompt, enhanced_prompt, model, provider, ratio, count, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (batch_id, request.raw_prompt, director["enhanced_prompt_zh"], selected_model, capability["provider"], request.ratio, count, "generating", now))
+        connection.commit()
+    try:
+        if capability["provider"] == "zhipu":
+            remote_urls = await _call_zhipu_image(selected_model, director["enhanced_prompt_zh"], count, request.ratio)
+        elif selected_model in {"qwen-image-3.0-pro", "qwen-image-3.0"}:
+            remote_urls = await _call_qwen_image(selected_model, director["enhanced_prompt_zh"], count, request.ratio, request.reference_image)
+        elif selected_model in {"wan2.7-image-pro", "wan2.7-image"}:
+            remote_urls = await _call_dashscope_multimodal_image(selected_model, director["enhanced_prompt_zh"], count, request.ratio, prompt_extend=False, thinking_mode=True, reference_image=request.reference_image)
+        elif selected_model == "z-image-turbo":
+            remote_urls = await _call_dashscope_multimodal_image(selected_model, director["enhanced_prompt_zh"][:800], 1, request.ratio, prompt_extend=False, reference_image=request.reference_image)
+        else:
+            raise HTTPException(status_code=503, detail="当前图片模型暂未接入该图像协议")
+        assets = []
+        for remote_url in remote_urls:
+            asset = await _download_image(remote_url, str(uuid.uuid4()), batch_id)
+            assets.append(asset)
+        with sqlite3.connect(SESSION_DB_PATH) as connection:
+            for asset in assets:
+                connection.execute("INSERT INTO image_generation_assets (id, batch_id, local_path, mime_type, created_at) VALUES (?, ?, ?, ?, ?)", (asset["id"], batch_id, asset["local_path"], asset["mime_type"], time.time()))
+            connection.execute("UPDATE image_generation_batches SET status = ?, completed_at = ? WHERE id = ?", ("succeeded", time.time(), batch_id))
+            connection.commit()
+        return {"batch_id": batch_id, "task_id": batch_id, "status": "succeeded", "raw_prompt": request.raw_prompt, "director": director, "images": [{key: value for key, value in asset.items() if key != "local_path"} for asset in assets]}
+    except HTTPException as exc:
+        with sqlite3.connect(SESSION_DB_PATH) as connection:
+            connection.execute("UPDATE image_generation_batches SET status = ?, error_message = ? WHERE id = ?", ("failed", str(exc.detail), batch_id)); connection.commit()
+        raise
+    except Exception as exc:
+        with sqlite3.connect(SESSION_DB_PATH) as connection:
+            connection.execute("UPDATE image_generation_batches SET status = ?, error_message = ? WHERE id = ?", ("failed", str(exc), batch_id)); connection.commit()
+        raise HTTPException(status_code=502, detail="图片下载或供应商响应处理失败")
+
+
+@app.get("/api/image/assets/{asset_id}")
+async def get_image_asset(asset_id: str):
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        row = connection.execute("SELECT local_path, mime_type FROM image_generation_assets WHERE id = ?", (asset_id,)).fetchone()
+    if not row or not Path(row[0]).is_file():
+        raise HTTPException(status_code=404, detail="图片资产不存在")
+    return FileResponse(row[0], media_type=row[1])
+
+
+IMAGE_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+IMAGE_UPLOAD_MIME_EXTENSIONS = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+
+
+def _detect_uploaded_image_mime(content: bytes, declared_mime: str) -> str | None:
+    """Validate both the browser MIME hint and the file signature before persisting."""
+    signatures = {
+        "image/png": content.startswith(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg": content.startswith(b"\xff\xd8\xff"),
+        "image/webp": content.startswith(b"RIFF") and content[8:12] == b"WEBP",
+    }
+    if declared_mime in IMAGE_UPLOAD_MIME_EXTENSIONS and signatures.get(declared_mime):
+        return declared_mime
+    return next((mime for mime, valid in signatures.items() if valid), None)
+
+
+def _plaza_asset_row(asset_id: str) -> tuple | None:
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        return connection.execute(
+            "SELECT id, local_path, mime_type, prompt, prompt_en, negative_prompt, tags, source, created_at, updated_at "
+            "FROM image_plaza_assets WHERE id = ?",
+            (asset_id,),
+        ).fetchone()
+
+
+@app.post("/api/image/plaza/assets")
+async def upload_image_plaza_asset(file: UploadFile = File(...)):
+    """Persist a user upload for the image plaza.
+
+    The upload is intentionally kept separate from generated batches so it can be
+    shown in “我的发布” across browser sessions without pretending it was AI generated.
+    """
+    if file.content_type not in IMAGE_UPLOAD_MIME_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="仅支持 PNG、JPG、JPEG 或 WebP 图片")
+    content = await file.read(IMAGE_UPLOAD_MAX_BYTES + 1)
+    if len(content) > IMAGE_UPLOAD_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="图片大小不能超过 20MB")
+    mime_type = _detect_uploaded_image_mime(content, file.content_type or "")
+    if not mime_type:
+        raise HTTPException(status_code=415, detail="图片文件签名校验失败")
+    asset_id = str(uuid.uuid4())
+    target = IMAGE_UPLOAD_DIR / f"{asset_id}.{IMAGE_UPLOAD_MIME_EXTENSIONS[mime_type]}"
+    target.write_bytes(content)
+    now = time.time()
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        connection.execute(
+            "INSERT INTO image_plaza_assets (id, local_path, mime_type, prompt, source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (asset_id, str(target), mime_type, "", "user", now, now),
+        )
+        connection.commit()
+    return {
+        "id": asset_id,
+        "url": f"/api/image/plaza/assets/{asset_id}",
+        "mime_type": mime_type,
+        "prompt": "",
+        "source": "user",
+        "created_at": now,
+    }
+
+
+@app.get("/api/image/plaza/assets")
+async def list_image_plaza_assets(limit: int = 48):
+    limit = max(1, min(limit, 100))
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        rows = connection.execute(
+            "SELECT id, local_path, mime_type, prompt, prompt_en, negative_prompt, tags, source, created_at, updated_at "
+            "FROM image_plaza_assets ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return {
+        "assets": [
+            {
+                "id": row[0],
+                "url": f"/api/image/plaza/assets/{row[0]}",
+                "mime_type": row[2],
+                "prompt": row[3] or "",
+                "prompt_en": row[4] or "",
+                "negative_prompt": row[5] or "",
+                "tags": json.loads(row[6]) if row[6] else [],
+                "source": row[7],
+                "created_at": row[8],
+                "updated_at": row[9],
+            }
+            for row in rows
+            if Path(row[1]).is_file()
+        ],
+        "count": len(rows),
+    }
+
+
+@app.get("/api/image/plaza/assets/{asset_id}")
+async def get_image_plaza_asset(asset_id: str):
+    row = _plaza_asset_row(asset_id)
+    if not row or not Path(row[1]).is_file():
+        raise HTTPException(status_code=404, detail="上传图片不存在")
+    return FileResponse(row[1], media_type=row[2])
+
+
+class ImagePromptAnalysisRequest(BaseModel):
+    asset_id: str = Field(min_length=1, max_length=100)
+
+
+def _parse_image_prompt_analysis(raw: str) -> dict[str, Any] | None:
+    candidate = raw.strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.I | re.S).strip()
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", candidate, flags=re.S)
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    prompt = str(parsed.get("prompt") or parsed.get("prompt_zh") or "").strip()
+    if not prompt:
+        return None
+    tags = parsed.get("tags") if isinstance(parsed.get("tags"), list) else []
+    return {
+        "prompt": prompt[:6000],
+        "prompt_en": str(parsed.get("prompt_en") or "").strip()[:6000],
+        "negative_prompt": str(parsed.get("negative_prompt") or "").strip()[:2000],
+        "tags": [str(tag).strip()[:40] for tag in tags[:12] if str(tag).strip()],
+    }
+
+
+async def _call_image_prompt_vision(image_data_uri: str) -> dict[str, Any] | None:
+    """Use a configured vision model when available; return None for an honest fallback."""
+    candidates: list[tuple[ModelSettings, str]] = []
+    glm_settings = model_settings_store.load("glm")
+    if glm_settings.api_key:
+        candidates.append((glm_settings, glm_settings.vision_model_id or "glm-5v-turbo"))
+    qwen_settings = model_settings_store.load("qwen")
+    if qwen_settings.api_key:
+        candidates.append((qwen_settings, "qwen-vl-max"))
+    instruction = (
+        "请分析这张图片并返回严格 JSON，不要 Markdown。字段必须包含："
+        "prompt（可直接用于 AI 生图的中文详细提示词）、prompt_en（英文提示词）、"
+        "negative_prompt（负面提示词）、tags（最多 8 个中文标签）。"
+        "描述主体、风格、构图、镜头、光线、色彩、材质与可见文字；不要臆造不可见信息。"
+    )
+    for settings, model_id in candidates:
+        try:
+            client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url, timeout=60)
+            response = await client.chat.completions.create(
+                model=model_id,
+                messages=[{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": image_data_uri}},
+                    {"type": "text", "text": instruction},
+                ]}],
+                max_tokens=1600,
+                temperature=0.2,
+            )
+            content = response.choices[0].message.content if response.choices else ""
+            parsed = _parse_image_prompt_analysis(str(content or ""))
+            if parsed:
+                return parsed
+        except Exception:
+            logger.exception("[image-plaza] 视觉提示词解析失败 provider=%s", settings.provider)
+    return None
+
+
+class VideoFrameAnalysisRequest(BaseModel):
+    """画像转视频提示词请求；图片可以是公开 URL 或前端生成的 data URL。"""
+
+    mode: Literal["image_to_video", "start_end_video"] = "image_to_video"
+    first_frame_url: str = Field(min_length=1, max_length=16_000_000)
+    last_frame_url: str | None = Field(default=None, max_length=16_000_000)
+
+    @field_validator("first_frame_url", "last_frame_url")
+    @classmethod
+    def validate_image_reference(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        value = value.strip()
+        if value.startswith("data:image/"):
+            if ";base64," not in value or len(value.split(",", 1)[1]) < 16:
+                raise ValueError("图片 data URL 无效")
+            return value
+        if not re.match(r"^https?://[^\s]+$", value, flags=re.I):
+            raise ValueError("图片必须是公开 HTTP/HTTPS URL 或 data URL")
+        return value
+
+
+def _clean_video_prompt(raw: str) -> str:
+    """Normalize a vision model's free-form response into one editable prompt."""
+    value = raw.strip()
+    value = re.sub(r"<think>.*?</think>", "", value, flags=re.I | re.S).strip()
+    value = re.sub(r"^```(?:text|markdown)?\s*|\s*```$", "", value, flags=re.I | re.S).strip()
+    if value.startswith("{"):
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, dict):
+                value = str(parsed.get("prompt") or parsed.get("prompt_zh") or value).strip()
+        except json.JSONDecodeError:
+            pass
+    return value.strip("\"'")[:5000]
+
+
+async def _call_video_frame_vision(image_data_uris: list[str], mode: str) -> tuple[str, str] | None:
+    """Use Qwen3.7 Flash first and GLM-5V Turbo as the configured fallback."""
+    candidates: list[tuple[ModelSettings, str]] = []
+    qwen_settings = model_settings_store.load("qwen")
+    if qwen_settings.api_key:
+        candidates.append((qwen_settings, "qwen3.7-flash"))
+    glm_settings = model_settings_store.load("glm")
+    if glm_settings.api_key:
+        candidates.append((glm_settings, glm_settings.vision_model_id or "glm-5v-turbo"))
+    if not candidates:
+        return None
+
+    instruction = (
+        "你将看到一张首帧图" if mode != "start_end_video" else "你将看到一张首帧图和一张尾帧图"
+    ) + (
+        "。请生成一段可直接用于图生视频的中文提示词，描述主体动作、镜头运动、景别、光线、环境和期望的连续动态。"
+        if mode != "start_end_video" else
+        "。请生成一段可直接用于首尾帧图生视频的中文提示词，重点描述主体、场景、镜头运动、动作连续性、光线变化，以及从首帧自然过渡到尾帧的方式。"
+    ) + "只输出提示词正文，不要 Markdown、JSON、解释或前后缀。"
+
+    content: list[dict[str, Any]] = []
+    for index, image_url in enumerate(image_data_uris):
+        if index == 1:
+            content.append({"type": "text", "text": "以上是首帧，下面是尾帧："})
+        content.append({"type": "image_url", "image_url": {"url": image_url}})
+    content.append({"type": "text", "text": instruction})
+
+    for settings, model_id in candidates:
+        try:
+            client = AsyncOpenAI(api_key=settings.api_key, base_url=settings.base_url, timeout=60)
+            response = await client.chat.completions.create(
+                model=model_id,
+                messages=[{"role": "user", "content": content}],
+                max_tokens=1200,
+                temperature=0.3,
+            )
+            raw_content = response.choices[0].message.content if response.choices else ""
+            if isinstance(raw_content, list):
+                raw_content = "".join(str(item.get("text", "")) for item in raw_content if isinstance(item, dict))
+            prompt = _clean_video_prompt(str(raw_content or ""))
+            if prompt:
+                return prompt, model_id
+        except Exception:
+            logger.exception("[video] 视觉提示词生成失败 provider=%s model=%s", settings.provider, model_id)
+    return None
+
+
+@app.post("/api/video/analyze_frames")
+async def analyze_video_frames(request: VideoFrameAnalysisRequest) -> dict[str, Any]:
+    if request.mode == "start_end_video" and not request.last_frame_url:
+        raise HTTPException(status_code=422, detail="首尾帧模式必须同时提供尾帧图片")
+    image_urls = [request.first_frame_url]
+    if request.last_frame_url:
+        image_urls.append(request.last_frame_url)
+    result = await _call_video_frame_vision(image_urls, request.mode)
+    if not result:
+        has_configured_model = bool(
+            model_settings_store.load("qwen").api_key
+            or model_settings_store.load("glm").api_key
+        )
+        if not has_configured_model:
+            raise HTTPException(status_code=503, detail="暂无可用的视觉模型，请配置 Qwen 或 GLM API Key")
+        raise HTTPException(
+            status_code=502,
+            detail="视觉模型调用失败，请检查模型 ID、API Key 额度和网络连接后重试",
+        )
+    prompt, model_id = result
+    return {"status": "ready", "prompt": prompt, "model": model_id, "mode": request.mode}
+
+
+@app.post("/api/image/plaza/analyze")
+async def analyze_image_plaza_asset(request: ImagePromptAnalysisRequest):
+    row = _plaza_asset_row(request.asset_id)
+    if not row or not Path(row[1]).is_file():
+        raise HTTPException(status_code=404, detail="上传图片不存在")
+    if row[3]:
+        return {"asset_id": row[0], "status": "ready", **{
+            "prompt": row[3], "prompt_en": row[4] or "", "negative_prompt": row[5] or "", "tags": json.loads(row[6]) if row[6] else [],
+        }}
+    raw_bytes = Path(row[1]).read_bytes()
+    if len(raw_bytes) > IMAGE_UPLOAD_MAX_BYTES:
+        raise HTTPException(status_code=413, detail="图片大小不能超过 20MB")
+    parsed = await _call_image_prompt_vision(f"data:{row[2]};base64,{base64.b64encode(raw_bytes).decode('ascii')}")
+    if parsed:
+        now = time.time()
+        with sqlite3.connect(SESSION_DB_PATH) as connection:
+            connection.execute(
+                "UPDATE image_plaza_assets SET prompt = ?, prompt_en = ?, negative_prompt = ?, tags = ?, updated_at = ? WHERE id = ?",
+                (parsed["prompt"], parsed["prompt_en"], parsed["negative_prompt"], json.dumps(parsed["tags"], ensure_ascii=False), now, row[0]),
+            )
+            connection.commit()
+        return {"asset_id": row[0], "status": "ready", **parsed}
+    fallback = {
+        "prompt": "请根据这张参考图还原主体、构图、风格、光线、色彩与材质，保留画面中的关键细节。",
+        "prompt_en": "Recreate the subject, composition, style, lighting, color palette and material details from the reference image.",
+        "negative_prompt": "模糊、低清晰度、变形、错误文字、水印、重复主体",
+        "tags": ["参考图", "构图分析", "风格还原"],
+    }
+    return {"asset_id": row[0], "status": "fallback", "message": "未配置可用的视觉模型，已返回可编辑的参考图提示词。", **fallback}
+
+
+@app.get("/api/image/batches")
+async def list_image_batches(limit: int = 24, query: str = ""):
+    limit = max(1, min(limit, 100))
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        rows = connection.execute("SELECT id, raw_prompt, model, provider, ratio, count, status, created_at, completed_at FROM image_generation_batches ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        batches = []
+        for row in rows:
+            if query and query.lower() not in row[1].lower():
+                continue
+            assets = connection.execute("SELECT id, mime_type FROM image_generation_assets WHERE batch_id = ? ORDER BY created_at", (row[0],)).fetchall()
+            batches.append({"batch_id": row[0], "raw_prompt": row[1], "model": row[2], "provider": row[3], "ratio": row[4], "count": row[5], "status": row[6], "created_at": row[7], "completed_at": row[8], "images": [{"id": asset[0], "url": f"/api/image/assets/{asset[0]}", "mime_type": asset[1]} for asset in assets]})
+    return {"batches": batches, "count": len(batches)}
+
+
+@app.get("/api/image/tasks/{task_id}")
+async def get_image_task(task_id: str):
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        batch = connection.execute("SELECT id, raw_prompt, model, status, error_message, created_at, completed_at FROM image_generation_batches WHERE id = ?", (task_id,)).fetchone()
+        if not batch:
+            raise HTTPException(status_code=404, detail="图片任务不存在")
+        assets = connection.execute("SELECT id, mime_type FROM image_generation_assets WHERE batch_id = ? ORDER BY created_at", (task_id,)).fetchall()
+    return {"task_id": batch[0], "batch_id": batch[0], "status": batch[3], "raw_prompt": batch[1], "model": batch[2], "error_message": batch[4], "created_at": batch[5], "completed_at": batch[6], "images": [{"id": asset[0], "url": f"/api/image/assets/{asset[0]}", "mime_type": asset[1]} for asset in assets]}
 
 
 @app.websocket("/ws/terminal/{workspace_id}/{run_id}")
@@ -4816,6 +5509,24 @@ async def update_service_settings(payload: dict):
         raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象")
     current = service_settings_store.load()
     update_data = current.model_dump()
+
+    # 0) 应用级 HTTP/HTTPS 代理：缺省保留；地址为空表示清除；保存后热更新。
+    if "proxy_enabled" in payload and payload["proxy_enabled"] is not None:
+        raw_enabled = payload["proxy_enabled"]
+        if isinstance(raw_enabled, bool):
+            update_data["proxy_enabled"] = raw_enabled
+        elif isinstance(raw_enabled, (int, float)):
+            update_data["proxy_enabled"] = bool(raw_enabled)
+        elif isinstance(raw_enabled, str) and raw_enabled.strip().lower() in {"true", "1", "on", "yes", "false", "0", "off", "no"}:
+            update_data["proxy_enabled"] = raw_enabled.strip().lower() in {"true", "1", "on", "yes"}
+        else:
+            raise HTTPException(status_code=400, detail="proxy_enabled 必须是布尔值")
+    if payload.get("clear_proxy") is True:
+        update_data["proxy_url"] = ""
+    elif "proxy_url" in payload and payload["proxy_url"] is not None:
+        if not isinstance(payload["proxy_url"], str):
+            raise HTTPException(status_code=400, detail="proxy_url 必须是字符串")
+        update_data["proxy_url"] = payload["proxy_url"].strip()
 
     # 1) search_provider（枚举）：缺省保留；非空白名单校验；空串回退默认 firecrawl
     if "search_provider" in payload and payload["search_provider"] is not None:
@@ -5229,7 +5940,6 @@ def generate_thesis_outline_events(request: ThesisOutlineRequest, settings: Mode
     })
 
     try:
-        ensure_direct_connection(settings.base_url)
         stream = OpenAI(
             api_key=settings.api_key,
             base_url=settings.base_url,
@@ -5352,7 +6062,6 @@ def generate_thesis_reference_events(request: ThesisReferenceRequest, settings: 
         return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
     native_url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
-    ensure_direct_connection(native_url)
     headers = {
         "Authorization": f"Bearer {settings.api_key}",
         "Content-Type": "application/json",
@@ -5573,7 +6282,6 @@ def generate_thesis_body_events(request: ThesisBodyRequest, settings: ModelSetti
     completed = set(request.completed_chapter_ids)
     yield event("thesis_body_started", {"type": "body_started"})
     try:
-        ensure_direct_connection(settings.base_url)
         client = OpenAI(api_key=settings.api_key, base_url=settings.base_url, timeout=180)
         generated_any = False
         for chapter in request.chapters:
@@ -5909,7 +6617,6 @@ def generate_direct_chat_events(request: ChatRequest, settings: ModelSettings, m
             create_kwargs["tools"] = tools_override
             if tool_choice_override:
                 create_kwargs["tool_choice"] = tool_choice_override
-        ensure_direct_connection(settings.base_url)
         stream = OpenAI(api_key=settings.api_key, base_url=settings.base_url, timeout=120).chat.completions.create(**create_kwargs)
         for chunk in stream:
             if getattr(chunk, "usage", None) is not None:

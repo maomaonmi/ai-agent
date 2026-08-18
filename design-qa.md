@@ -1,30 +1,29 @@
-# AI 写作已提交态 Design QA
+# AI 生图广场 Design QA
 
-- Source visual truth: `C:/Users/xys/AppData/Local/Temp/codex-clipboard-e340a51d-f04d-4e8b-bdd0-fac1c408da09.png`
-- Source dimensions: 2048 × 1002 px
-- Intended viewport/state: desktop，保留产品历史侧栏，AI 写作首次提交后的双栏状态
-- Implementation: `frontend/ai-agent/src/features/ai-writing/WritingWorkspace.tsx`
-- Implementation screenshot: unavailable
-- Browser interactions tested: unavailable
-- Console errors checked: unavailable
+- Source visual truth: `C:/Users/xys/AppData/Local/Temp/codex-clipboard-f4140203-6511-4873-9776-c98c00ec7efa.png`, `C:/Users/xys/AppData/Local/Temp/codex-clipboard-c30f234e-1b66-4b7b-bd44-cd1ddd2abc7e.png`
+- Intended viewport/state: standalone AI image ecosystem plaza with light/dark appearance, upload flow, carousel and gallery
+- Implementation: `frontend/ai-agent/src/features/picture/ImagePlazaWorkspace.tsx`
+- Static checks: `npx tsc --noEmit`, scoped ESLint, and `python -m py_compile main.py` passed; image director tests passed (6/6)
+- Browser interactions tested: unavailable in this environment
+- Console errors checked: unavailable in this environment
 
-## Full-view comparison evidence
+## Design decisions verified statically
 
-源图已打开并用于结构、分栏、密度、文档层级和输入区位置还原。当前工具上下文未提供可调用的 in-app Browser 页面控制能力，因此无法捕获相同 viewport/state 的实现截图，也不能完成合成并排视觉对照。
-
-## Focused-region comparison evidence
-
-未完成。需要实际运行态截图后重点比较：左侧对话消息与底部输入框、右侧顶部标签、大纲章节卡片、双栏比例和历史侧栏保留状态。
-
-## Static implementation findings
-
-- 已提交态由原表单页面改为左右 1:1 工作区。
-- 左栏包含用户需求、写作说明、大纲入口和固定底部修改输入框。
-- 右栏包含标题、大纲/正文/排版标签、结构化大纲和保存状态。
-- 历史侧栏仍由 `ChatInterface` 外层保留。
+- Dark, high-contrast studio shell combines the reference gallery's immersion with the reference generator's control density.
+- Left panel owns prompt, model routing, ratio, output count, resolution and CTA; right panel is image-first and uses a responsive masonry gallery.
+- Lightbox includes download, prompt reuse (做同款), and a clearly marked next-stage reference-image action.
+- The UI never fabricates image assets: empty and history states render only persisted API results.
+- Light/dark surfaces now use the existing `dark` document class, so SettingsDialog changes apply without a second theme store.
+- Layout is mobile-first: single-column at narrow widths, two columns from `lg`, and a responsive masonry gallery from `sm`/`2xl`.
+- The desktop shell no longer uses a fixed `max-width`; it fills the available viewport after the conversation sidebar, removing the large side gutters visible at 80% zoom.
+- “更多 → AI 生图” now opens a full-viewport plaza; the previous generator remains available from “开始创作/进入工作台”.
+- Entry points are intentionally split: the sidebar AI 生图 button opens the generator workspace, while the composer’s “更多 → AI 生图” opens the ecosystem plaza.
+- The plaza has a header ecosystem nav, a prompt-led creation hero, a five-card auto-advancing carousel (three cards on smaller screens, five on wide screens) inspired by the third reference, and a searchable/category-filtered masonry gallery.
+- “上传图片” accepts PNG/JPG/WebP, validates size and file signatures on the server, and persists assets in SQLite plus `data/image-studio/uploads` so “我的发布” survives reloads.
+- Every carousel/gallery card opens a responsive detail dialog with image preview, tags, copyable prompt, English prompt, negative prompt, and “立即试用”; uploaded assets invoke the configured GLM-5V/Qwen-VL analyzer and cache the result, with an explicit editable fallback when no vision key is configured.
 
 ## Blocking gap
 
-- 缺少浏览器渲染截图，无法验证字体、实际间距、溢出、下拉交互、控制台和最终视觉一致性。
+The configured tool context does not expose an in-app browser/DevTools controller, so a runtime screenshot, responsive viewport pass, and console inspection could not be completed. Run the app locally and capture the image-studio route before sign-off.
 
 final result: blocked

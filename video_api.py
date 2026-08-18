@@ -6,11 +6,12 @@ import asyncio
 import json
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from video_engine import TERMINAL_VIDEO_STATUSES, VideoGenerationRequest, VideoJobRepository, VideoTaskStatus, get_video_capabilities
 from video_monitor import VideoTaskMonitor
+from video_reference import ReferenceAssetError, ReferenceAssetService, ReferenceAssetUploadRequest
 
 
 def _task_payload(row: dict[str, Any]) -> dict[str, Any]:
@@ -25,11 +26,20 @@ def _task_payload(row: dict[str, Any]) -> dict[str, Any]:
         "provider": row["provider"],
         "model": row["model"],
         "prompt": row["prompt"],
+        "mode": request_snapshot.get("mode", "text_to_video"),
         "parameters": {
             "ratio": row["ratio"],
             "duration": row["duration"],
             "resolution": row["resolution"],
             "audio_url": request_snapshot.get("audio_url"),
+            "first_frame_url": request_snapshot.get("first_frame_url"),
+            "last_frame_url": request_snapshot.get("last_frame_url"),
+            "negative_prompt": request_snapshot.get("negative_prompt"),
+            "seed": request_snapshot.get("seed"),
+            "prompt_extend": request_snapshot.get("prompt_extend", True),
+            "watermark": request_snapshot.get("watermark", False),
+            "shot_type": request_snapshot.get("shot_type"),
+            "references": request_snapshot.get("references", []),
         },
         "provider_status": row.get("provider_status"),
         "created_at": row["created_at"],
@@ -55,11 +65,38 @@ def _error_response(code: str, message: str, *, status_code: int) -> JSONRespons
     )
 
 
+def _reference_asset_payload(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "assetId": row["id"],
+        "status": row["status"],
+        "progress": row.get("progress", 0),
+        "filename": row["original_name"],
+        "contentType": row["mime_type"],
+        "sizeBytes": row["size_bytes"],
+        "durationSeconds": row.get("duration_seconds"),
+        "width": row.get("width"),
+        "height": row.get("height"),
+        "error": {
+            "code": row.get("error_code"),
+            "message": row.get("error_message"),
+        } if row.get("error_code") or row.get("error_message") else None,
+        "createdAt": row["created_at"],
+        "updatedAt": row.get("updated_at", row["created_at"]),
+        "expiresAt": row["expires_at"],
+    }
+
+
 def _sse_event(event: str, sequence: int, payload: dict[str, Any]) -> str:
     return f"id: {sequence}\nevent: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def create_video_router(repository: VideoJobRepository, monitor: VideoTaskMonitor, *, asset_root: str | None = None) -> APIRouter:
+def create_video_router(
+    repository: VideoJobRepository,
+    monitor: VideoTaskMonitor,
+    *,
+    asset_root: str | None = None,
+    reference_assets: ReferenceAssetService | None = None,
+) -> APIRouter:
     router = APIRouter(tags=["video"])
 
     @router.get("/api/video/models")
@@ -68,12 +105,72 @@ def create_video_router(repository: VideoJobRepository, monitor: VideoTaskMonito
 
     @router.post("/api/video/create_task", status_code=status.HTTP_202_ACCEPTED, response_model=None)
     async def create_video_task(request: VideoGenerationRequest) -> Any:
+        if request.mode == "reference_to_video":
+            if reference_assets is None:
+                return _error_response("REFERENCE_STORAGE_NOT_CONFIGURED", "参考视频 OSS 存储未配置", status_code=503)
+            try:
+                reference_assets.assert_ready([reference.asset_id for reference in request.references])
+            except ReferenceAssetError as exc:
+                code_status = 404 if exc.code == "REFERENCE_ASSET_NOT_FOUND" else 409 if exc.code in {"ASSET_NOT_READY", "REFERENCE_ASSET_EXPIRED"} else 503
+                return _error_response(exc.code, str(exc), status_code=code_status)
         existing = repository.get_by_client_request_id(request.client_request_id)
         if existing:
             return _task_payload(existing)
         task = repository.create_task(request, client_request_id=request.client_request_id)
         submitted = await monitor.submit_task(task["id"], request)
         return _task_payload(submitted)
+
+    @router.post("/api/video/reference-assets", status_code=status.HTTP_201_CREATED, response_model=None)
+    @router.post("/api/video/reference-assets/upload-url", status_code=status.HTTP_201_CREATED, response_model=None)
+    async def create_reference_asset_upload(request: ReferenceAssetUploadRequest) -> dict[str, Any] | JSONResponse:
+        if reference_assets is None:
+            return _error_response("REFERENCE_STORAGE_NOT_CONFIGURED", "参考视频 OSS 存储未配置", status_code=503)
+        try:
+            plan = reference_assets.create_upload(request)
+        except ReferenceAssetError as exc:
+            status_code = 503 if exc.code in {"OSS_NOT_CONFIGURED", "OSS_SDK_NOT_INSTALLED"} else 422
+            return _error_response(exc.code, str(exc), status_code=status_code)
+        return {
+            "assetId": plan.asset_id,
+            "objectKey": plan.object_key,
+            "uploadUrl": plan.upload_url,
+            "expiresAt": plan.expires_at,
+            "headers": plan.headers,
+        }
+
+    @router.post("/api/video/reference-assets/{asset_id}/complete", response_model=None)
+    async def complete_reference_asset_upload(asset_id: str, background_tasks: BackgroundTasks) -> dict[str, Any] | JSONResponse:
+        if reference_assets is None:
+            return _error_response("REFERENCE_STORAGE_NOT_CONFIGURED", "参考视频 OSS 存储未配置", status_code=503)
+        try:
+            asset = reference_assets.complete_upload(asset_id)
+            if asset.get("status") == "UPLOADED":
+                background_tasks.add_task(reference_assets.process_upload, asset_id)
+        except ReferenceAssetError as exc:
+            status_code = 404 if exc.code == "REFERENCE_ASSET_NOT_FOUND" else 409 if exc.code.endswith("EXPIRED") or exc.code.endswith("UPLOADABLE") else 422
+            return _error_response(exc.code, str(exc), status_code=status_code)
+        return _reference_asset_payload(asset)
+
+    @router.get("/api/video/reference-assets/{asset_id}", response_model=None)
+    async def get_reference_asset(asset_id: str) -> dict[str, Any] | JSONResponse:
+        if reference_assets is None:
+            return _error_response("REFERENCE_STORAGE_NOT_CONFIGURED", "参考视频 OSS 存储未配置", status_code=503)
+        asset = repository.get_reference_asset(asset_id)
+        if asset is None:
+            return _error_response("REFERENCE_ASSET_NOT_FOUND", "参考视频资产不存在", status_code=404)
+        return _reference_asset_payload(asset)
+
+    @router.delete("/api/video/reference-assets/{asset_id}", response_model=None)
+    async def delete_reference_asset(asset_id: str) -> dict[str, Any] | JSONResponse:
+        if reference_assets is None:
+            return _error_response("REFERENCE_STORAGE_NOT_CONFIGURED", "参考视频 OSS 存储未配置", status_code=503)
+        try:
+            deleted = reference_assets.delete_asset(asset_id)
+        except ReferenceAssetError as exc:
+            return _error_response(exc.code, str(exc), status_code=502)
+        if deleted is None:
+            return _error_response("REFERENCE_ASSET_NOT_FOUND", "参考视频资产不存在", status_code=404)
+        return {"deleted": True, "assetId": asset_id}
 
     @router.get("/api/video/status/{task_id}", response_model=None)
     async def get_video_status(task_id: str) -> Any:

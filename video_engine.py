@@ -16,7 +16,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable, Protocol
+from typing import Any, Iterable, Literal, Protocol
 from urllib.parse import urlparse
 
 import httpx
@@ -40,8 +40,8 @@ TERMINAL_VIDEO_STATUSES = {
 
 
 # Source of truth for the UI and validation.  Values reflect the official
-# model pages supplied for this feature; future input modes are deliberately
-# advertised but not accepted by the V1 request schema.
+# model pages supplied for this feature; capability metadata is shared by the
+# API and the workspace so provider limits are not duplicated in the UI.
 _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
         "id": "happyhorse-1.1-t2v",
@@ -162,6 +162,96 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "enabled": True,
         "docs_url": "https://docs.bigmodel.cn/cn/guide/models/video-generation/cogvideox-3",
     },
+    {
+        "id": "wan2.7-i2v", "name": "Wan 2.7 I2V", "provider": "qianwen",
+        "description": "统一支持首帧、首尾帧与驱动音频", "modes": ["image_to_video", "start_end_video"],
+        "future_modes": [], "ratios": ["auto", "16:9"], "resolutions": ["720P", "1080P"],
+        "duration_min": 2, "duration_max": 15, "durations": [], "supports_audio": False,
+        "supports_audio_input": True, "enabled": True,
+        "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan27-image-to-video/create-task",
+    },
+    {
+        "id": "wan2.6-i2v-flash", "name": "Wan 2.6 I2V Flash", "provider": "qianwen",
+        "description": "快速有声首帧图生视频", "modes": ["image_to_video"], "future_modes": [],
+        "ratios": ["auto", "16:9"], "resolutions": ["720P", "1080P"], "duration_min": 2,
+        "duration_max": 15, "durations": [], "supports_audio": True, "supports_audio_input": True,
+        "enabled": True, "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan-image-to-video-first-frame/create-task",
+    },
+    {
+        "id": "wan2.6-i2v", "name": "Wan 2.6 I2V", "provider": "qianwen",
+        "description": "高质量首帧图生视频", "modes": ["image_to_video"], "future_modes": [],
+        "ratios": ["auto", "16:9"], "resolutions": ["720P", "1080P"], "duration_min": 2,
+        "duration_max": 15, "durations": [], "supports_audio": False, "supports_audio_input": True,
+        "enabled": True, "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan-image-to-video-first-frame/create-task",
+    },
+    {
+        "id": "wan2.2-kf2v-flash", "name": "Wan 2.2 首尾帧", "provider": "qianwen",
+        "description": "首尾帧平滑过渡", "modes": ["start_end_video"], "future_modes": [],
+        "ratios": ["auto", "16:9"], "resolutions": ["480P", "720P", "1080P"], "duration_min": 5,
+        "duration_max": 5, "durations": [5], "supports_audio": False, "supports_audio_input": False,
+        "enabled": True, "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan-image-to-video-first-last-frames/create-task",
+    },
+    {
+        "id": "viduq1-text", "name": "Vidu Q1 Text", "provider": "zhipu",
+        "description": "Vidu Q1 文生视频", "modes": ["text_to_video"], "future_modes": [],
+        "ratios": ["16:9"], "resolutions": ["1080P"], "duration_min": 5, "duration_max": 5,
+        "durations": [5], "supports_audio": False, "supports_audio_input": False, "enabled": True,
+        "docs_url": "https://docs.bigmodel.cn/cn/guide/models/video-generation/viduq1",
+    },
+    {
+        "id": "viduq1-image", "name": "Vidu Q1 Image", "provider": "zhipu",
+        "description": "Vidu Q1 首帧图生视频", "modes": ["image_to_video"], "future_modes": [],
+        "ratios": ["16:9"], "resolutions": ["1080P"], "duration_min": 5, "duration_max": 5,
+        "durations": [5], "supports_audio": False, "supports_audio_input": False, "enabled": True,
+        "docs_url": "https://docs.bigmodel.cn/cn/guide/models/video-generation/viduq1",
+    },
+    {
+        "id": "viduq1-start-end", "name": "Vidu Q1 首尾帧", "provider": "zhipu",
+        "description": "Vidu Q1 高质量首尾帧转场", "modes": ["start_end_video"], "future_modes": [],
+        "ratios": ["16:9"], "resolutions": ["1080P"], "duration_min": 5, "duration_max": 5,
+        "durations": [5], "supports_audio": False, "supports_audio_input": False, "enabled": True,
+        "docs_url": "https://docs.bigmodel.cn/cn/guide/models/video-generation/viduq1",
+    },
+    {
+        "id": "wan2.7-r2v", "name": "Wan 2.7 R2V", "provider": "qianwen",
+        "description": "参考视频驱动的主体、动作与风格生成",
+        "modes": ["reference_to_video"], "future_modes": [],
+        "ratios": ["auto", "16:9", "9:16", "1:1", "4:3", "3:4"],
+        "resolutions": ["720P", "1080P"], "duration_min": 2, "duration_max": 10,
+        "durations": [], "supports_audio": True, "supports_audio_input": False, "enabled": True,
+        "max_reference_videos": 3, "max_references": 5,
+        "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan27-reference-to-video/create-task",
+    },
+    {
+        "id": "wan2.7-r2v-2026-06-12", "name": "Wan 2.7 R2V 快照", "provider": "qianwen",
+        "description": "固定版本的参考视频生成",
+        "modes": ["reference_to_video"], "future_modes": [],
+        "ratios": ["auto", "16:9", "9:16", "1:1", "4:3", "3:4"],
+        "resolutions": ["720P", "1080P"], "duration_min": 2, "duration_max": 10,
+        "durations": [], "supports_audio": True, "supports_audio_input": False, "enabled": True,
+        "max_reference_videos": 3, "max_references": 5,
+        "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan27-reference-to-video/create-task",
+    },
+    {
+        "id": "wan2.6-r2v-flash", "name": "Wan 2.6 R2V Flash", "provider": "qianwen",
+        "description": "快速参考视频生成，支持静音输出",
+        "modes": ["reference_to_video"], "future_modes": [],
+        "ratios": ["16:9", "9:16", "1:1", "4:3", "3:4"],
+        "resolutions": ["720P", "1080P"], "duration_min": 2, "duration_max": 10,
+        "durations": [], "supports_audio": True, "supports_audio_input": False, "enabled": True,
+        "max_reference_videos": 3, "max_references": 5,
+        "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan-reference-to-video/create-task",
+    },
+    {
+        "id": "wan2.6-r2v", "name": "Wan 2.6 R2V", "provider": "qianwen",
+        "description": "高质量参考视频生成",
+        "modes": ["reference_to_video"], "future_modes": [],
+        "ratios": ["16:9", "9:16", "1:1", "4:3", "3:4"],
+        "resolutions": ["720P", "1080P"], "duration_min": 2, "duration_max": 10,
+        "durations": [], "supports_audio": True, "supports_audio_input": False, "enabled": True,
+        "max_reference_videos": 3, "max_references": 5,
+        "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan-reference-to-video/create-task",
+    },
 )
 
 
@@ -178,10 +268,22 @@ def video_capability(model_id: str) -> dict[str, Any]:
     raise ValueError(f"不支持的视频模型：{model_id}")
 
 
+class VideoReference(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    asset_id: str = Field(min_length=1, max_length=128, alias="assetId")
+    media_kind: Literal["reference_video", "reference_image", "first_frame"] = Field(alias="mediaKind")
+    purpose: Literal["subject", "style", "motion", "scene"] = "motion"
+    # Internal-only field populated by the task monitor immediately before
+    # submission. It is excluded from model dumps and never persisted.
+    url: str | None = Field(default=None, exclude=True, repr=False)
+
+
 class VideoGenerationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    prompt: str = Field(min_length=1, max_length=5000)
+    mode: Literal["text_to_video", "image_to_video", "start_end_video", "reference_to_video"] = "text_to_video"
+    prompt: str = Field(default="", max_length=5000)
     model: str
     ratio: str = "16:9"
     duration: int = Field(default=5, ge=2, le=30)
@@ -190,16 +292,20 @@ class VideoGenerationRequest(BaseModel):
     watermark: bool = False
     audio: bool | None = None
     audio_url: str | None = Field(default=None, max_length=2048)
+    first_frame_url: str | None = Field(default=None, max_length=14_000_000)
+    last_frame_url: str | None = Field(default=None, max_length=14_000_000)
+    negative_prompt: str | None = Field(default=None, max_length=500)
+    seed: int | None = Field(default=None, ge=0, le=2147483647)
+    shot_type: Literal["single", "multi"] | None = None
     quality: str = "quality"
     fps: int = Field(default=30, ge=1, le=60)
+    references: list[VideoReference] = Field(default_factory=list, max_length=5)
     client_request_id: str | None = Field(default=None, max_length=128)
 
     @field_validator("prompt")
     @classmethod
     def trim_prompt(cls, value: str) -> str:
         normalized = value.strip()
-        if not normalized:
-            raise ValueError("prompt 不能为空")
         return normalized
 
     @field_validator("model")
@@ -219,28 +325,45 @@ class VideoGenerationRequest(BaseModel):
     @field_validator("audio_url")
     @classmethod
     def validate_audio_url(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip()
-        if not normalized:
-            return None
-        parsed = urlparse(normalized)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("audio_url 必须是可公开访问的 HTTP/HTTPS URL")
-        hostname = (parsed.hostname or "").lower().rstrip(".")
-        if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith((".local", ".internal")):
-            raise ValueError("audio_url 必须是可公开访问的 URL，不能使用本地地址")
-        try:
-            address = ipaddress.ip_address(hostname)
-        except ValueError:
-            address = None
-        if address is not None and not address.is_global:
-            raise ValueError("audio_url 必须是可公开访问的 URL，不能使用本地地址")
-        return normalized
+        return _validate_public_media_url(value, "audio_url")
+
+    @field_validator("first_frame_url", "last_frame_url")
+    @classmethod
+    def validate_frame_url(cls, value: str | None, info: Any) -> str | None:
+        if value and value.strip().lower().startswith("data:image/"):
+            return value.strip()
+        return _validate_public_media_url(value, info.field_name)
+
+    @field_validator("negative_prompt")
+    @classmethod
+    def trim_negative_prompt(cls, value: str | None) -> str | None:
+        return value.strip() if value and value.strip() else None
 
     @model_validator(mode="after")
     def validate_model_limits(self) -> "VideoGenerationRequest":
         capability = video_capability(self.model)
+        if self.mode not in capability["modes"]:
+            raise ValueError(f"{self.model} 不支持模式 {self.mode}")
+        if self.mode in {"text_to_video", "reference_to_video"} and not self.prompt:
+            raise ValueError("prompt 不能为空")
+        if self.mode in {"image_to_video", "start_end_video"} and not self.first_frame_url:
+            raise ValueError("图生视频必须提供首帧 URL")
+        if self.mode == "start_end_video" and not self.last_frame_url:
+            raise ValueError("首尾帧视频必须提供尾帧 URL")
+        if self.mode == "reference_to_video" and not self.references:
+            raise ValueError("参考视频生成至少需要一个参考素材")
+        if self.mode != "reference_to_video" and self.references:
+            raise ValueError("references 仅用于参考视频生成")
+        if self.last_frame_url and self.mode != "start_end_video":
+            raise ValueError("尾帧 URL 仅用于首尾帧模式")
+        if self.model == "wan2.7-i2v" and not self.prompt:
+            raise ValueError("wan2.7-i2v 的 prompt 不能为空")
+        prompt_limit = 800 if self.model == "wan2.2-kf2v-flash" else 1500 if self.model.startswith("wan2.6-i2v") else 5000
+        if len(self.prompt) > prompt_limit:
+            raise ValueError(f"{self.model} 的 prompt 不能超过 {prompt_limit} 个字符")
+        if self.shot_type and not self.model.startswith("wan2.6-i2v"):
+            if not self.model.startswith("wan2.6-r2v"):
+                raise ValueError("shot_type 仅适用于 wan2.6 图生视频或参考视频")
         if self.ratio not in capability["ratios"]:
             raise ValueError(f"{self.model} 不支持画幅 {self.ratio}")
         if self.model == "cogvideox-3" and len(self.prompt) > 512:
@@ -248,11 +371,21 @@ class VideoGenerationRequest(BaseModel):
         if self.resolution not in capability["resolutions"]:
             raise ValueError(f"{self.model} 不支持分辨率 {self.resolution}")
         if self.duration < capability["duration_min"] or self.duration > capability["duration_max"]:
-            raise ValueError(
-                f"{self.model} 的 duration 必须在 {capability['duration_min']}–{capability['duration_max']} 秒之间"
-            )
+            raise ValueError(f"{self.model} 的 duration 必须在 {capability['duration_min']}–{capability['duration_max']} 秒之间")
         if capability["durations"] and self.duration not in capability["durations"]:
             raise ValueError(f"{self.model} 的 duration 只能是 {capability['durations']}")
+        if self.mode == "reference_to_video":
+            max_references = int(capability.get("max_references", 5))
+            max_videos = int(capability.get("max_reference_videos", 3))
+            if len(self.references) > max_references:
+                raise ValueError(f"{self.model} 最多支持 {max_references} 个参考素材")
+            video_count = sum(item.media_kind == "reference_video" for item in self.references)
+            if video_count > max_videos:
+                raise ValueError(f"{self.model} 最多支持 {max_videos} 个参考视频")
+            if self.model.startswith("wan2.6-r2v") and any(item.media_kind != "reference_video" for item in self.references):
+                raise ValueError("Wan 2.6 R2V 当前仅支持参考视频")
+            if self.model.startswith("wan2.6-r2v") and self.audio is False and self.model != "wan2.6-r2v-flash":
+                raise ValueError("wan2.6-r2v 不支持静音输出")
         if self.audio is not None and not capability["supports_audio"]:
             raise ValueError(f"{self.model} 不支持音频")
         if self.audio_url and not capability["supports_audio_input"]:
@@ -260,6 +393,27 @@ class VideoGenerationRequest(BaseModel):
         if self.model == "cogvideox-3" and self.quality not in {"quality", "speed"}:
             raise ValueError("CogVideoX-3 的 quality 必须是 quality 或 speed")
         return self
+
+
+def _validate_public_media_url(value: str | None, field_name: str) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"{field_name} 必须是可公开访问的 HTTP/HTTPS URL")
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith((".local", ".internal")):
+        raise ValueError(f"{field_name} 必须是可公开访问的 URL，不能使用本地地址")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
+        raise ValueError(f"{field_name} 必须是可公开访问的 URL，不能使用本地地址")
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -332,22 +486,75 @@ class QwenVideoProvider:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
+    @staticmethod
+    def _reference_size(request: VideoGenerationRequest) -> str:
+        height = {"720P": 720, "1080P": 1080}.get(request.resolution, 720)
+        ratio = request.ratio if request.ratio != "auto" else "16:9"
+        widths = {"16:9": 16, "9:16": 9, "1:1": 1, "4:3": 4, "3:4": 3}
+        heights = {"16:9": 9, "9:16": 16, "1:1": 1, "4:3": 3, "3:4": 4}
+        if ratio not in widths:
+            raise ValueError("wan2.6-r2v 的 ratio 必须能映射为官方 size")
+        width = round(height * widths[ratio] / heights[ratio])
+        return f"{width}*{height}"
+
     async def submit(self, request: VideoGenerationRequest) -> ProviderSubmission:
-        parameters: dict[str, Any] = {
-            "resolution": request.resolution,
-            "duration": request.duration,
-            "prompt_extend": request.prompt_extend,
-            "watermark": request.watermark,
-        }
-        if request.ratio != "auto":
+        if request.model.startswith("wan2.6-r2v"):
+            parameters: dict[str, Any] = {"size": self._reference_size(request), "duration": request.duration}
+        else:
+            parameters = {
+                "resolution": request.resolution,
+                "duration": request.duration,
+                "prompt_extend": request.prompt_extend,
+                "watermark": request.watermark,
+            }
+        if request.mode != "reference_to_video" and request.mode == "text_to_video" and request.ratio != "auto":
+            parameters["ratio"] = request.ratio
+        if request.model.startswith("wan2.7-r2v") and request.ratio != "auto":
             parameters["ratio"] = request.ratio
         if request.audio is not None:
             parameters["audio"] = request.audio
+        if request.seed is not None:
+            parameters["seed"] = request.seed
+        if request.shot_type is not None:
+            parameters["shot_type"] = request.shot_type
+        if request.model.startswith("wan2.6-r2v"):
+            if request.audio is not None:
+                parameters["audio"] = request.audio
+            parameters["prompt_extend"] = request.prompt_extend
+            parameters["watermark"] = request.watermark
         input_payload: dict[str, Any] = {"prompt": request.prompt}
-        if request.audio_url:
+        if request.negative_prompt:
+            input_payload["negative_prompt"] = request.negative_prompt
+        if request.model.startswith("wan2.7-r2v"):
+            input_payload["media"] = [
+                {"type": reference.media_kind, "url": reference.url}
+                for reference in request.references
+            ]
+        elif request.model.startswith("wan2.6-r2v"):
+            input_payload["reference_urls"] = [reference.url for reference in request.references]
+        elif request.model == "wan2.7-i2v":
+            media = [{"type": "first_frame", "url": request.first_frame_url}]
+            if request.last_frame_url:
+                media.append({"type": "last_frame", "url": request.last_frame_url})
+            if request.audio_url:
+                media.append({"type": "driving_audio", "url": request.audio_url})
+            input_payload["media"] = media
+        elif request.model.startswith("wan2.6-i2v"):
+            input_payload["img_url"] = request.first_frame_url
+            if request.audio_url:
+                input_payload["audio_url"] = request.audio_url
+        elif request.model == "wan2.2-kf2v-flash":
+            input_payload["first_frame_url"] = request.first_frame_url
+            input_payload["last_frame_url"] = request.last_frame_url
+        elif request.audio_url:
             input_payload["audio_url"] = request.audio_url
+        endpoint = (
+            "/services/aigc/image2video/video-synthesis"
+            if request.model == "wan2.2-kf2v-flash"
+            else "/services/aigc/video-generation/video-synthesis"
+        )
         response = await self.client.post(
-            f"{self.base_url}/services/aigc/video-generation/video-synthesis",
+            f"{self.base_url}{endpoint}",
             headers={**self._headers(), "X-DashScope-Async": "enable"},
             json={"model": request.model, "input": input_payload, "parameters": parameters},
         )
@@ -391,6 +598,8 @@ class ZhipuVideoProvider:
 
     @staticmethod
     def _size(request: VideoGenerationRequest) -> str:
+        if request.model.startswith("viduq1-"):
+            return "1920x1080"
         base = {"720P": 720, "1080P": 1080, "2K": 2048, "4K": 3840}[request.resolution]
         if request.ratio == "16:9":
             return f"{round(base * 16 / 9)}x{base}"
@@ -404,15 +613,31 @@ class ZhipuVideoProvider:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
 
     async def submit(self, request: VideoGenerationRequest) -> ProviderSubmission:
-        body = {
-            "model": request.model,
-            "prompt": request.prompt,
-            "quality": request.quality,
-            "with_audio": request.audio if request.audio is not None else True,
-            "size": self._size(request),
-            "duration": request.duration,
-            "fps": request.fps,
-        }
+        if request.model.startswith("viduq1-"):
+            body: dict[str, Any] = {
+                "model": request.model,
+                "prompt": request.prompt,
+                "duration": 5,
+                "size": "1920x1080",
+                "movement_amplitude": "auto",
+            }
+            if request.model == "viduq1-image":
+                body["image_url"] = request.first_frame_url
+            elif request.model == "viduq1-start-end":
+                body["image_url"] = [request.first_frame_url, request.last_frame_url]
+            elif request.model == "viduq1-text":
+                body["aspect_ratio"] = request.ratio
+                body["style"] = "general"
+        else:
+            body = {
+                "model": request.model,
+                "prompt": request.prompt,
+                "quality": request.quality,
+                "with_audio": request.audio if request.audio is not None else True,
+                "size": self._size(request),
+                "duration": request.duration,
+                "fps": request.fps,
+            }
         response = await self.client.post(f"{self.base_url}/videos/generations", headers=self._headers(), json=body)
         payload = _json_or_none(response)
         if response.is_error:
@@ -526,12 +751,48 @@ class VideoJobRepository:
                     sha256 TEXT NOT NULL,
                     created_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS video_reference_assets (
+                    id TEXT PRIMARY KEY,
+                    object_key TEXT NOT NULL UNIQUE,
+                    normalized_object_key TEXT,
+                    original_name TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    status TEXT NOT NULL,
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    uploaded_at REAL,
+                    probed_at REAL,
+                    duration_seconds REAL,
+                    width INTEGER,
+                    height INTEGER,
+                    error_code TEXT,
+                    error_message TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_video_reference_assets_status
+                    ON video_reference_assets(status, expires_at);
                 CREATE INDEX IF NOT EXISTS idx_video_tasks_status_poll
                     ON video_generation_tasks(status, next_poll_at);
                 CREATE INDEX IF NOT EXISTS idx_video_events_task_sequence
                     ON video_generation_events(task_id, sequence);
                 """
             )
+            self._ensure_reference_asset_columns(connection)
+
+    @staticmethod
+    def _ensure_reference_asset_columns(connection: sqlite3.Connection) -> None:
+        existing = {row[1] for row in connection.execute("PRAGMA table_info(video_reference_assets)").fetchall()}
+        additions = {
+            "progress": "INTEGER NOT NULL DEFAULT 0",
+            "updated_at": "REAL NOT NULL DEFAULT 0",
+            "normalized_object_key": "TEXT",
+        }
+        for column, definition in additions.items():
+            if column not in existing:
+                connection.execute(f"ALTER TABLE video_reference_assets ADD COLUMN {column} {definition}")
+        connection.execute("UPDATE video_reference_assets SET updated_at = created_at WHERE updated_at = 0")
 
     def create_task(self, request: VideoGenerationRequest, *, client_request_id: str | None = None) -> dict[str, Any]:
         now = time.time()
@@ -706,6 +967,65 @@ class VideoJobRepository:
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM video_generation_assets WHERE id = ?", (asset_id,)).fetchone()
             return dict(row) if row else None
+
+    def create_reference_asset(
+        self,
+        *,
+        asset_id: str,
+        object_key: str,
+        original_name: str,
+        mime_type: str,
+        size_bytes: int,
+        expires_at: float,
+        status: str = "UPLOADING",
+    ) -> dict[str, Any]:
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO video_reference_assets
+                (id, object_key, original_name, mime_type, size_bytes, status, progress, created_at, updated_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (asset_id, object_key, original_name, mime_type, size_bytes, status, 0, time.time(), time.time(), expires_at),
+            )
+            row = connection.execute("SELECT * FROM video_reference_assets WHERE id = ?", (asset_id,)).fetchone()
+            return dict(row)
+
+    def get_reference_asset(self, asset_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM video_reference_assets WHERE id = ?", (asset_id,)).fetchone()
+            return dict(row) if row else None
+
+    def mark_reference_asset_uploaded(self, asset_id: str, *, uploaded_at: float | None = None) -> dict[str, Any] | None:
+        now = time.time() if uploaded_at is None else uploaded_at
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE video_reference_assets SET status = ?, progress = ?, uploaded_at = ?, updated_at = ? WHERE id = ? AND status = ?",
+                ("UPLOADED", 5, now, now, asset_id, "UPLOADING"),
+            )
+            row = connection.execute("SELECT * FROM video_reference_assets WHERE id = ?", (asset_id,)).fetchone()
+            return dict(row) if row else None
+
+    def update_reference_asset(self, asset_id: str, **fields: Any) -> dict[str, Any] | None:
+        allowed = {
+            "status", "progress", "probed_at", "duration_seconds", "width", "height",
+            "error_code", "error_message", "updated_at", "uploaded_at", "normalized_object_key",
+        }
+        updates = {key: value for key, value in fields.items() if key in allowed}
+        if not updates:
+            return self.get_reference_asset(asset_id)
+        updates["updated_at"] = time.time()
+        assignments = ", ".join(f"{key} = ?" for key in updates)
+        with self._connect() as connection:
+            connection.execute(f"UPDATE video_reference_assets SET {assignments} WHERE id = ?", [*updates.values(), asset_id])
+            row = connection.execute("SELECT * FROM video_reference_assets WHERE id = ?", (asset_id,)).fetchone()
+            return dict(row) if row else None
+
+    def delete_reference_asset(self, asset_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM video_reference_assets WHERE id = ?", (asset_id,)).fetchone()
+            if row is None:
+                return None
+            connection.execute("DELETE FROM video_reference_assets WHERE id = ?", (asset_id,))
+            return dict(row)
 
     def _append_event(self, connection: sqlite3.Connection, task_id: str, event_type: str, status: VideoTaskStatus, progress: int, message: str, payload: dict[str, Any]) -> None:
         last = connection.execute("SELECT COALESCE(MAX(sequence), 0) FROM video_generation_events WHERE task_id = ?", (task_id,)).fetchone()[0]

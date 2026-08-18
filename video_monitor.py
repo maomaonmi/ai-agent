@@ -30,6 +30,7 @@ class VideoTaskMonitor:
         providers: Mapping[str, VideoProvider],
         *,
         asset_store: object | None = None,
+        reference_assets: object | None = None,
         poll_interval_seconds: float = 15.0,
         max_concurrency: int = 4,
         max_task_age_seconds: float = 15 * 60,
@@ -37,6 +38,7 @@ class VideoTaskMonitor:
         self.repository = repository
         self.providers = dict(providers)
         self.asset_store = asset_store
+        self.reference_assets = reference_assets
         self.poll_interval_seconds = max(1.0, poll_interval_seconds)
         self.max_task_age_seconds = max(60.0, max_task_age_seconds)
         self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
@@ -72,8 +74,32 @@ class VideoTaskMonitor:
             ) or {}
         self.submitting_task_ids.add(task_id)
         try:
+            provider_request = request
+            if request.mode == "reference_to_video":
+                if self.reference_assets is None:
+                    return self.repository.update_task(
+                        task_id,
+                        status=VideoTaskStatus.FAILED,
+                        error_code="REFERENCE_STORAGE_NOT_CONFIGURED",
+                        error_message="参考视频存储未配置",
+                    ) or {}
+                try:
+                    provider_request = request.model_copy(update={
+                        "references": [
+                            reference.model_copy(update={"url": self.reference_assets.get_reference_url(reference.asset_id)})  # type: ignore[attr-defined]
+                            for reference in request.references
+                        ],
+                    })
+                except Exception as exc:
+                    code = getattr(exc, "code", "ASSET_NOT_READY")
+                    return self.repository.update_task(
+                        task_id,
+                        status=VideoTaskStatus.FAILED,
+                        error_code=code,
+                        error_message=str(exc),
+                    ) or {}
             try:
-                submission = await provider.submit(request)
+                submission = await provider.submit(provider_request)
             except VideoProviderError as exc:
                 return self.repository.update_task(
                     task_id,

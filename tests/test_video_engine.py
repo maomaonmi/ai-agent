@@ -28,6 +28,17 @@ def test_video_capabilities_expose_official_models_and_limits():
         "wan2.7-t2v-2026-06-12",
         "wan2.6-t2v",
         "cogvideox-3",
+        "wan2.7-i2v",
+        "wan2.6-i2v-flash",
+        "wan2.6-i2v",
+        "wan2.2-kf2v-flash",
+        "viduq1-text",
+        "viduq1-image",
+        "viduq1-start-end",
+        "wan2.7-r2v",
+        "wan2.7-r2v-2026-06-12",
+        "wan2.6-r2v-flash",
+        "wan2.6-r2v",
     }
     assert models["wan3.0-video"]["future_modes"] == [
         "image_to_video",

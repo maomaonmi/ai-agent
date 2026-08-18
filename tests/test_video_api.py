@@ -71,6 +71,26 @@ def test_video_api_is_idempotent_for_client_request_id(tmp_path):
     assert len(repository.list_tasks()) == 1
 
 
+def test_video_api_persists_and_returns_image_to_video_inputs(tmp_path):
+    app, _, _ = _app(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/video/create_task", json={
+            "mode": "start_end_video", "prompt": "从清晨过渡到黄昏", "model": "wan2.7-i2v",
+            "ratio": "auto", "duration": 7, "resolution": "1080P",
+            "first_frame_url": "https://cdn.example.com/first.png",
+            "last_frame_url": "https://cdn.example.com/last.png",
+            "negative_prompt": "模糊", "seed": 9, "watermark": True,
+        })
+        listed = client.get("/api/video/tasks").json()["tasks"][0]
+
+    assert created.status_code == 202
+    assert listed["mode"] == "start_end_video"
+    assert listed["parameters"]["first_frame_url"].endswith("first.png")
+    assert listed["parameters"]["last_frame_url"].endswith("last.png")
+    assert listed["parameters"]["negative_prompt"] == "模糊"
+    assert listed["parameters"]["seed"] == 9
+
+
 def test_video_api_status_and_reconnectable_sse(tmp_path):
     app, repository, monitor = _app(tmp_path)
     payload = {

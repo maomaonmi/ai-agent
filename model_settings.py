@@ -19,6 +19,10 @@ def ensure_direct_connection(base_url: str) -> None:
     Why: httpx/openai 客户端默认读取 HTTP_PROXY/HTTPS_PROXY 环境变量；在代理环境下
     国内端点（dashscope/bigmodel/deepseek）被错误代理会抛 ConnectError。客户端均为
     按请求新建，此处幂等更新环境变量后即刻生效，用户无需手工配置。
+
+    Deprecated for request handling: this mutates the whole Python process and can
+    break unrelated requests when the machine's system proxy is required. Runtime
+    code should leave proxy selection to the client's normal environment handling.
     """
     host = urlparse((base_url or "").strip()).hostname
     if not host:
@@ -259,6 +263,11 @@ DeepResearchEngine = Literal["firecrawl", "native"]
 
 
 class ServiceSettings(BaseModel):
+    # --- 应用级 HTTP/HTTPS 代理 ---
+    # OpenAI-compatible、DashScope、智谱及搜索请求共用该代理。
+    proxy_enabled: bool = False
+    proxy_url: str = ""
+
     # --- 搜索服务选择 ---
     # DeepSeek 无原生联网，走独立搜索服务。Tavily 需绑支付（额度有限），
     # Firecrawl 免费档 500 credits/月且无需绑卡，作为默认兜底。
@@ -280,6 +289,20 @@ class ServiceSettings(BaseModel):
     # 深度调研引擎：Firecrawl /v1/research 是官方异步 Job，端到端产出报告；
     # "native" 保留原自研 day32+day33 链路（子查询→抓取→切片→Reranker→Day33 推理）。
     deep_research_engine: DeepResearchEngine = "firecrawl"
+
+    @field_validator("proxy_url")
+    @classmethod
+    def normalize_proxy_url(cls, value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            return ""
+        # 允许用户直接填写 127.0.0.1:7897，减少代理配置门槛。
+        if "://" not in value:
+            value = f"http://{value}"
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.path not in {"", "/"}:
+            raise ValueError("代理地址必须是 HTTP/HTTPS URL，例如 http://127.0.0.1:7897")
+        return value.rstrip("/")
 
     @field_validator("tavily_api_key", "firecrawl_api_key", "rerank_api_key")
     @classmethod
@@ -362,4 +385,49 @@ class ServiceSettingsStore:
             "firecrawl_scrape_top_n": s.firecrawl_scrape_top_n,
             "firecrawl_markdown_max_chars": s.firecrawl_markdown_max_chars,
             "deep_research_engine": s.deep_research_engine,
+            # 代理地址可能携带用户名/密码，GET 只返回状态和主机，不回传原值。
+            "proxy_enabled": s.proxy_enabled,
+            "has_proxy": bool(s.proxy_url),
+            "proxy_host": urlparse(s.proxy_url).hostname if s.proxy_url else "",
         }
+
+
+_PROVIDER_HOSTS = {"dashscope.aliyuncs.com", "open.bigmodel.cn", "api.deepseek.com"}
+_PROXY_ENV_KEYS = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+_ORIGINAL_PROXY_ENV = {key: os.environ.get(key) for key in _PROXY_ENV_KEYS}
+
+
+def _without_provider_hosts(raw: str) -> str:
+    entries = [item.strip() for item in (raw or "").split(",") if item.strip()]
+    kept = [item for item in entries if item.lower().lstrip(".") not in _PROVIDER_HOSTS]
+    return ",".join(kept)
+
+
+def apply_network_proxy(settings: ServiceSettings) -> None:
+    """Apply the user-selected proxy without leaking it through the public API.
+
+    httpx/openai read these variables when each client is created. The helper is
+    intentionally called only at startup and after an explicit settings save;
+    request code must not mutate NO_PROXY per request.
+    """
+    proxy = settings.proxy_url.strip() if settings.proxy_enabled else ""
+    if proxy:
+        for key in _PROXY_ENV_KEYS:
+            os.environ[key] = proxy
+        # A previous runtime (or an old version) may have forced provider hosts
+        # into NO_PROXY. Remove only those entries so the configured proxy wins.
+        for key in ("NO_PROXY", "no_proxy"):
+            if key in os.environ:
+                cleaned = _without_provider_hosts(os.environ.get(key, ""))
+                if cleaned:
+                    os.environ[key] = cleaned
+                else:
+                    os.environ.pop(key, None)
+        return
+
+    # Restore the process environment that existed before app-level proxy config.
+    for key, value in _ORIGINAL_PROXY_ENV.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
