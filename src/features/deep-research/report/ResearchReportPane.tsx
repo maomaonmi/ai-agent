@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Copy, Download, FileDown, Maximize2, Minimize2, PanelRightOpen, Printer, X } from 'lucide-react';
-import type { ResearchChunk } from '../../../lib/api';
+import type { ResearchChunk, ResearchFigure, ResearchFigureBatch } from '../../../lib/api';
 import DeepResearchDocument from './DeepResearchDocument';
 import RawResearchReport from './RawResearchReport';
 import { createResearchReportDocument } from './researchReportAdapter';
@@ -16,6 +16,10 @@ interface ResearchReportPaneProps {
   report: string;
   sources?: ResearchChunk[];
   loading?: boolean;
+  researchFigures?: ResearchFigure[];
+  figureBatches?: ResearchFigureBatch[];
+  onFigureLoadError?: (figureId: string) => void;
+  onFigureRetry?: (figureId: string) => void;
   onClose?: () => void;
 }
 
@@ -28,7 +32,7 @@ function saveBlob(content: BlobPart, type: string, fileName: string) {
   URL.revokeObjectURL(url);
 }
 
-export default function ResearchReportPane({ title, report, sources = [], loading = false, onClose }: ResearchReportPaneProps) {
+export default function ResearchReportPane({ title, report, sources = [], loading = false, researchFigures = [], figureBatches = [], onFigureLoadError, onFigureRetry, onClose }: ResearchReportPaneProps) {
   const [view, setView] = useState<ReportView>('deep');
   const [copied, setCopied] = useState(false);
   const [actionError, setActionError] = useState('');
@@ -95,8 +99,23 @@ export default function ResearchReportPane({ title, report, sources = [], loadin
         </div>
       </header>
       {actionError && <p role="alert" className="border-b border-rose-100 bg-rose-50 px-5 py-2 text-xs text-rose-700">{actionError}</p>}
+      {figureBatches.length > 0 && <div role="status" aria-live="polite" className="flex items-center justify-between border-b border-blue-100 bg-blue-50/70 px-5 py-2 text-xs text-blue-700"><span>配图按章节分批生成</span><span>{figureBatches.filter((batch) => batch.status === 'succeeded' || batch.status === 'failed').length}/{figureBatches.length} 章已处理</span></div>}
       <div className="min-h-0 flex-1 overflow-y-auto bg-white">
-        {!report.trim() ? <div role="status" aria-busy={loading} className="flex min-h-full items-center justify-center px-8 text-center"><div><div className="mx-auto h-10 w-10 rounded-full border border-slate-200 bg-slate-50 p-2">{loading ? <span className="block h-full w-full animate-spin rounded-full border-2 border-slate-200 border-t-blue-600"/> : <FileDown size={20} className="text-slate-400"/>}</div><h3 className="mt-4 text-sm font-medium text-slate-800">{loading ? '正在生成调研报告' : '报告将在调研完成后显示'}</h3><p className="mt-2 text-xs leading-5 text-slate-400">左侧对话和调研链路会持续保留。</p></div></div> : view === 'deep' ? <DeepResearchDocument document={reportDocument}/> : <RawResearchReport title={reportDocument.title} report={report}/>} 
+        {!report.trim() ? (
+          <div role="status" aria-busy={loading} className="flex min-h-full items-center justify-center px-8 text-center">
+            <div>
+              <div className="mx-auto h-10 w-10 rounded-full border border-slate-200 bg-slate-50 p-2">
+                {loading ? <span className="block h-full w-full animate-spin rounded-full border-2 border-slate-200 border-t-blue-600"/> : <FileDown size={20} className="text-slate-400"/>}
+              </div>
+              <h3 className="mt-4 text-sm font-medium text-slate-800">{loading ? '正在生成调研报告' : '报告将在调研完成后显示'}</h3>
+              <p className="mt-2 text-xs leading-5 text-slate-400">左侧对话和调研链路会持续保留。</p>
+            </div>
+          </div>
+        ) : view === 'deep' ? (
+          <DeepResearchDocument document={reportDocument} figures={researchFigures} onFigureLoadError={onFigureLoadError} onFigureRetry={onFigureRetry}/>
+        ) : (
+          <RawResearchReport title={reportDocument.title} report={report}/>
+        )}
       </div>
       <ResearchNavigationPanel open={navigationOpen} outline={reportDocument.outline} sources={sources} onClose={() => setNavigationOpen(false)} onNavigate={navigateTo}/>
     </section>

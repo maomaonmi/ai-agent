@@ -483,7 +483,11 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
   const [downloadMenuOpen, setDownloadMenuOpen] = useState(false);
   const [textSelection, setTextSelection] = useState<WritingTextSelection | null>(null);
   const [revisionSuggestion, setRevisionSuggestion] = useState<WritingRevisionSuggestion | null>(null);
-  const [thesisOutline, dispatchThesisOutline] = useReducer(thesisOutlineReducer, initialThesisOutline, (value) => value ?? readThesisOutline());
+  const [thesisOutline, dispatchThesisOutline] = useReducer(
+    thesisOutlineReducer,
+    initialThesisOutline,
+    (value) => value ?? (restoreFromSession ? EMPTY_THESIS_OUTLINE : readThesisOutline()),
+  );
   const layoutTocSections = useMemo(() => draft.scene === 'thesis' ? buildThesisTocSections(thesisOutline) : undefined, [draft.scene, thesisOutline]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const referenceSearchKeyRef = useRef<Set<string>>(createRestoredReferenceSearchKeys(thesisOutline));
@@ -587,9 +591,10 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
     return () => window.clearTimeout(timeout);
   }, [writingDoc, restoreFromSession]);
   useEffect(() => {
+    if (restoreFromSession) return;
     const timeout = window.setTimeout(() => localStorage.setItem(THESIS_OUTLINE_STORAGE_KEY, JSON.stringify(thesisOutline)), 250);
     return () => window.clearTimeout(timeout);
-  }, [thesisOutline]);
+  }, [restoreFromSession, thesisOutline]);
   useEffect(() => {
     if (writingDoc.generatedLength > 0 || writingDoc.researchStatus !== 'idle') setWorkspaceStarted(true);
   }, [writingDoc.generatedLength, writingDoc.researchStatus]);
@@ -606,8 +611,8 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
     // 大纲节点是流式到达的；每个新章节立即启动自己的检索，参考资料无需等待整篇大纲完成。
     const instruction = submittedInstruction || draft.instruction || thesisOutline.title;
     for (const chapter of thesisOutline.chapters) {
-      // 会话快照已经持久化 references/searchStatus；恢复页面时不得重复消耗检索额度。
-      if (chapter.searchStatus === 'complete' || chapter.references.length > 0) {
+      // 只有已保存的参考资料才表示检索完成；空资料章节需要在恢复后重试。
+      if (chapter.references.length > 0) {
         referenceSearchKeyRef.current.add(chapter.id);
         continue;
       }

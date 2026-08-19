@@ -6,6 +6,279 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const ACCEPTANCE_REQUEST_TIMEOUT_MS = 50_000;
 
+// Visual workflow contracts are intentionally kept close to the API layer so
+// the canvas, persistence controls, and future run panel share one wire shape.
+export type WorkflowPortDataType =
+  | 'prompt.text'
+  | 'image.asset'
+  | 'video.asset'
+  | 'media.asset'
+  | 'audio.url'
+  | 'image.asset[]'
+  | 'video.asset[]';
+
+export interface VisualWorkflowPosition { x: number; y: number; }
+export interface VisualWorkflowViewport { x: number; y: number; zoom: number; }
+export interface VisualWorkflowPort {
+  id: string;
+  direction: 'input' | 'output';
+  dataType: WorkflowPortDataType;
+  required: boolean;
+  cardinality: 'one' | 'many';
+  maxConnections?: number;
+}
+export interface VisualWorkflowNode {
+  id: string;
+  kind: string;
+  definitionVersion: number;
+  position: VisualWorkflowPosition;
+  label?: string | null;
+  config: Record<string, unknown>;
+  isDisabled: boolean;
+}
+export interface VisualWorkflowEdge {
+  id: string;
+  sourceNodeId: string;
+  sourcePortId: string;
+  targetNodeId: string;
+  targetPortId: string;
+}
+export interface VisualWorkflowDocument {
+  schemaVersion: 1;
+  workflowId: string;
+  revision: number;
+  name: string;
+  nodes: VisualWorkflowNode[];
+  edges: VisualWorkflowEdge[];
+  viewport: VisualWorkflowViewport;
+}
+export interface VisualWorkflow {
+  id: string;
+  name: string;
+  description?: string | null;
+  currentRevision: number;
+  createdAt: string;
+  updatedAt: string;
+  document: VisualWorkflowDocument;
+}
+export interface VisualWorkflowNodeDefinition {
+  kind: string;
+  version: number;
+  category: string;
+  inputs: VisualWorkflowPort[];
+  outputs: VisualWorkflowPort[];
+  configSchema: Record<string, unknown>;
+  cachePolicy: 'pure' | 'ttl' | 'none' | string;
+  executorKey: string;
+}
+export interface VisualWorkflowValidationIssue {
+  code: string;
+  message: string;
+  nodeId?: string;
+  portId?: string;
+  edgeId?: string;
+}
+
+export interface VisualWorkflowCompilePlan {
+  workflowId: string;
+  revision: number;
+  nodeIds: string[];
+  requestedNodeIds?: string[] | null;
+  predecessors: Record<string, string[]>;
+  successors: Record<string, string[]>;
+  batches: string[][];
+}
+
+export interface VisualWorkflowRun {
+  id: string;
+  workflowId: string;
+  revision: number;
+  status: 'PLANNED' | 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | string;
+  mode: 'dry-run' | 'execute' | string;
+  progress: number;
+  requestedNodeIds: string[];
+  clientRequestId?: string | null;
+  createdAt: number;
+  startedAt?: number | null;
+  completedAt?: number | null;
+  plan: VisualWorkflowCompilePlan;
+  nodeRuns: VisualWorkflowNodeRun[];
+}
+
+export interface VisualWorkflowNodeRun {
+  id: string;
+  run_id: string;
+  node_id: string;
+  attempt: number;
+  status: 'PENDING' | 'READY' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'SKIPPED' | 'CANCELLED' | string;
+  provider?: string | null;
+  provider_task_id?: string | null;
+  input_artifacts: Array<Record<string, unknown>>;
+  output_artifacts: Array<Record<string, unknown>>;
+  error_code?: string | null;
+  error_message?: string | null;
+  started_at?: number | null;
+  completed_at?: number | null;
+}
+
+export async function getVisualWorkflowNodeDefinitions(): Promise<VisualWorkflowNodeDefinition[]> {
+  const response = await fetch(`${API_BASE_URL}/api/visual-workflow-node-definitions`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const payload = await response.json() as { definitions?: VisualWorkflowNodeDefinition[] };
+  return payload.definitions ?? [];
+}
+
+export async function createVisualWorkflow(name: string, description?: string): Promise<VisualWorkflow> {
+  const response = await fetch(`${API_BASE_URL}/api/visual-workflows`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, description }),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<VisualWorkflow>;
+}
+
+export async function listVisualWorkflows(page = 1, pageSize = 20): Promise<{
+  workflows: VisualWorkflow[];
+  pagination: { page: number; pageSize: number; totalItems: number; totalPages: number };
+}> {
+  const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
+  const response = await fetch(`${API_BASE_URL}/api/visual-workflows?${params.toString()}`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json();
+}
+
+export async function getVisualWorkflow(workflowId: string): Promise<VisualWorkflow> {
+  const response = await fetch(`${API_BASE_URL}/api/visual-workflows/${encodeURIComponent(workflowId)}`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<VisualWorkflow>;
+}
+
+export async function saveVisualWorkflowRevision(
+  workflowId: string,
+  baseRevision: number,
+  document: VisualWorkflowDocument,
+): Promise<VisualWorkflow> {
+  const response = await fetch(`${API_BASE_URL}/api/visual-workflows/${encodeURIComponent(workflowId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ baseRevision, document }),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<VisualWorkflow>;
+}
+
+export async function validateVisualWorkflow(
+  workflowId: string,
+  document: VisualWorkflowDocument,
+  requireInputs = false,
+): Promise<{ valid: boolean; issues: VisualWorkflowValidationIssue[] }> {
+  const response = await fetch(`${API_BASE_URL}/api/visual-workflows/${encodeURIComponent(workflowId)}/validate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ document, requireInputs }),
+  });
+  if (response.ok) return response.json() as Promise<{ valid: boolean; issues: VisualWorkflowValidationIssue[] }>;
+  const payload = await response.json().catch(() => null) as { error?: { details?: { issues?: VisualWorkflowValidationIssue[] } } } | null;
+  if (payload?.error?.details?.issues) return { valid: false, issues: payload.error.details.issues };
+  throw new Error(await parseApiError(response));
+}
+
+export async function compileVisualWorkflow(input: {
+  workflowId: string;
+  revision?: number;
+  requestedNodeIds?: string[];
+  requireInputs?: boolean;
+}): Promise<VisualWorkflowCompilePlan> {
+  const response = await fetch(`${API_BASE_URL}/api/visual-workflows/${encodeURIComponent(input.workflowId)}/compile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      revision: input.revision,
+      requestedNodeIds: input.requestedNodeIds,
+      requireInputs: input.requireInputs ?? false,
+    }),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const payload = await response.json() as { plan: VisualWorkflowCompilePlan };
+  return payload.plan;
+}
+
+export async function createVisualWorkflowDryRun(input: {
+  workflowId: string;
+  revision?: number;
+  requestedNodeIds?: string[];
+  requireInputs?: boolean;
+  clientRequestId?: string;
+}): Promise<VisualWorkflowRun> {
+  return createVisualWorkflowRun({ ...input, mode: 'dry-run' });
+}
+
+export async function createVisualWorkflowRun(input: {
+  workflowId: string;
+  mode: 'dry-run' | 'execute';
+  revision?: number;
+  requestedNodeIds?: string[];
+  requireInputs?: boolean;
+  clientRequestId?: string;
+}): Promise<VisualWorkflowRun> {
+  const response = await fetch(`${API_BASE_URL}/api/visual-workflows/${encodeURIComponent(input.workflowId)}/runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      mode: input.mode,
+      revision: input.revision,
+      requestedNodeIds: input.requestedNodeIds,
+      requireInputs: input.requireInputs ?? false,
+      clientRequestId: input.clientRequestId,
+    }),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<VisualWorkflowRun>;
+}
+
+export async function getVisualWorkflowRun(workflowId: string, runId: string): Promise<VisualWorkflowRun> {
+  const response = await fetch(`${API_BASE_URL}/api/visual-workflows/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(runId)}`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<VisualWorkflowRun>;
+}
+
+export type VisualWorkflowRunEvent = {
+  sequence?: number;
+  eventType?: string;
+  nodeId?: string | null;
+  payload?: Record<string, unknown>;
+};
+
+export function subscribeVisualWorkflowRun(
+  workflowId: string,
+  runId: string,
+  onEvent: (event: VisualWorkflowRunEvent) => void,
+  onError?: () => void,
+): () => void {
+  const source = new EventSource(`${API_BASE_URL}/api/visual-workflows/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(runId)}/stream`);
+  const handle = (event: MessageEvent<string>) => {
+    try { onEvent(JSON.parse(event.data) as VisualWorkflowRunEvent); } catch { onError?.(); }
+  };
+  source.onmessage = handle;
+  source.addEventListener('snapshot', handle);
+  source.addEventListener('node_started', handle);
+  source.addEventListener('node_succeeded', handle);
+  source.addEventListener('node_failed', handle);
+  source.addEventListener('run_succeeded', handle);
+  source.addEventListener('run_failed', handle);
+  source.onerror = () => onError?.();
+  return () => source.close();
+}
+
+export async function cancelVisualWorkflowRun(workflowId: string, runId: string): Promise<VisualWorkflowRun> {
+  const response = await fetch(`${API_BASE_URL}/api/visual-workflows/${encodeURIComponent(workflowId)}/runs/${encodeURIComponent(runId)}/cancel`, {
+    method: 'POST',
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<VisualWorkflowRun>;
+}
+
 export interface ImageModelCapability {
   id: string;
   name: string;
@@ -780,9 +1053,15 @@ export interface ChatMessage {
   researchChunks?: ResearchChunk[];
   researchReasoning?: string;
   researchReasoningTime?: number;
+  /** 研究报告异步配图任务结果；随 assistant 消息写入会话快照。 */
+  researchFigures?: ResearchFigure[];
   // Plan-and-Execute progress belongs to the assistant turn that produced it.
   // Keeping it on the message preserves chronological order across rounds.
   planProgress?: PlanProgressEvent;
+  /** 自主规划最终报告的异步配图结果；与任务进度绑定持久化。 */
+  planFigures?: PlanFigure[];
+  /** MCP tool calls belong to the assistant turn that triggered them. */
+  mcpTrace?: McpTraceItem[];
   // Why: 千问深度调研反问卡片——type='qwen_feedback' 时渲染为带输入框的内嵌卡片，
   //   feedbackQuestion 存储模型反问内容，feedbackAnswer 存储用户回答（提交后填充）。
   type?: 'qwen_feedback';
@@ -873,6 +1152,60 @@ export interface TokenUsage {
 export interface ErrorEvent {
   message: string;
 }
+
+export interface PlanFigure {
+  id: string;
+  job_id?: string;
+  ordinal?: number;
+  image_url?: string;
+  caption?: string;
+  alt?: string;
+  status?: 'queued' | 'processing' | 'generating' | 'completed' | 'succeeded' | 'failed';
+  error_message?: string | null;
+  task_id?: string;
+  section_title?: string;
+}
+
+export interface PlanFigureJob {
+  id: string;
+  status: 'queued' | 'generating' | 'succeeded' | 'failed' | 'cancelled';
+  progress: number;
+  figures: PlanFigure[];
+  error_message?: string | null;
+}
+
+export async function createPlanFigureJob(input: {
+  session_id?: string;
+  report_version: string;
+  report: string;
+  max_images?: number;
+  policy?: 'economy' | 'balanced' | 'quality';
+  context_mode?: 'preceding' | 'mixed';
+}): Promise<PlanFigureJob> {
+  const response = await fetch(`${API_BASE_URL}/api/plan/figures/jobs`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<PlanFigureJob>;
+}
+
+export async function getPlanFigureJob(jobId: string): Promise<PlanFigureJob> {
+  const response = await fetch(`${API_BASE_URL}/api/plan/figures/jobs/${encodeURIComponent(jobId)}`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<PlanFigureJob>;
+}
+
+export async function retryPlanFigure(figureId: string): Promise<PlanFigureJob> {
+  const response = await fetch(`${API_BASE_URL}/api/plan/figures/${encodeURIComponent(figureId)}/retry`, { method: 'POST' });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<PlanFigureJob>;
+}
+
+export type McpTraceItem = {
+  tool_name: string;
+  status: 'calling' | 'ok' | 'error';
+  preview?: string;
+};
 
 export type McpPhase = 'start' | 'tool_call' | 'tool_result' | 'done' | 'error';
 
@@ -1331,6 +1664,86 @@ export interface ResearchChunk {
   text: string;
 }
 
+export type ResearchFigureStatus = 'queued' | 'generating' | 'succeeded' | 'failed';
+export type ResearchFigurePolicy = 'economy' | 'balanced' | 'quality';
+
+export interface ResearchFigure {
+  id: string;
+  job_id: string;
+  ordinal: number;
+  batch_index?: number;
+  batch_title?: string | null;
+  section_title: string;
+  figure_type: string;
+  caption: string;
+  context_before?: string;
+  context_after?: string | null;
+  status: ResearchFigureStatus;
+  model?: string | null;
+  asset_id?: string | null;
+  image_url?: string | null;
+  error_message?: string | null;
+}
+
+export interface ResearchFigureBatch {
+  batch_index: number;
+  title: string;
+  total: number;
+  completed: number;
+  succeeded: number;
+  failed: number;
+  status: 'queued' | 'generating' | 'succeeded' | 'failed';
+}
+
+export interface ResearchFigureJob {
+  id: string;
+  session_id?: string | null;
+  report_version: string;
+  policy: ResearchFigurePolicy;
+  max_images: number;
+  context_mode: 'preceding' | 'mixed';
+  status: 'queued' | 'generating' | 'succeeded' | 'failed' | 'cancelled';
+  progress: number;
+  completed_batches?: number;
+  total_batches?: number;
+  batches?: ResearchFigureBatch[];
+  error_message?: string | null;
+  figures: ResearchFigure[];
+}
+
+export async function createResearchFigureJob(input: {
+  session_id?: string;
+  report_version: string;
+  report: string;
+  max_images?: number;
+  policy?: ResearchFigurePolicy;
+  context_mode?: 'preceding' | 'mixed';
+}): Promise<ResearchFigureJob> {
+  const response = await fetch(`${API_BASE_URL}/api/research/figures/jobs`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<ResearchFigureJob>;
+}
+
+export async function getResearchFigureJob(jobId: string): Promise<ResearchFigureJob> {
+  const response = await fetch(`${API_BASE_URL}/api/research/figures/jobs/${encodeURIComponent(jobId)}`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<ResearchFigureJob>;
+}
+
+export async function cancelResearchFigureJob(jobId: string): Promise<ResearchFigureJob> {
+  const response = await fetch(`${API_BASE_URL}/api/research/figures/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<ResearchFigureJob>;
+}
+
+export async function retryResearchFigure(figureId: string): Promise<ResearchFigureJob> {
+  const response = await fetch(`${API_BASE_URL}/api/research/figures/${encodeURIComponent(figureId)}/retry`, { method: 'POST' });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<ResearchFigureJob>;
+}
+
 // ==========================================
 // 回调类型
 // ==========================================
@@ -1357,6 +1770,8 @@ type ChatHandlers = {
 
 type ResearchHandlers = {
   onUsage?: (usage: TokenUsage) => void;
+  // Why: 千问原生调研 answer 阶段后端逐 chunk 推 token，此前解析层无分支静默丢弃。
+  onToken?: (token: string) => void;
   onResearchProcess?: (event: ResearchProcessEvent) => void;
   onResearchReasonDone?: (event: ResearchReasonDoneEvent) => void;
   onResearchDone?: (event: ResearchDoneEvent) => void;
@@ -1448,10 +1863,10 @@ export async function sendChatMessage(
         try {
           const parsed = JSON.parse(data) as Record<string, unknown>;
 
-          if (parsed.usage && typeof parsed.usage === 'object') {
-            handlers.onUsage?.(parsed.usage as TokenUsage);
-            if (parsed.type === 'token_usage' || parsed.stage === undefined) continue;
-          }
+          // Why: usage 消费统一由下方第二个 usage 块负责（其 continue 条件为
+          // parsed.answer === undefined，不会吞掉携带答案的 done 事件）。
+          // 此处曾有一个重复的 usage 守卫，条件 stage === undefined 会把
+          // DeepSeek 链路带 usage 的 done 事件整个跳过，导致答案不渲染。
 
           // Why: skill_matched 事件字段（type/skill_name/skill_type/confidence/standard_steps/done）
           // 不与聊天流其它事件字段冲突，但放最前用 type 显式判断更清晰、防误匹配。
@@ -1816,6 +2231,10 @@ export async function sendDeepResearch(
               count: parsed.count !== undefined ? Number(parsed.count) : parsed.docs.length,
             });
           }
+          // 千问原生调研报告流式 token（answer 阶段逐 chunk）。
+          else if (typeof parsed.token === 'string') {
+            handlers.onToken?.(parsed.token);
+          }
           // R1 推理完成事件
           else if (parsed.reasoning !== undefined) {
             const reasoningText = String(parsed.reasoning);
@@ -2109,8 +2528,8 @@ export async function checkHealth(): Promise<boolean> {
 
 async function parseApiError(response: Response): Promise<string> {
   try {
-    const payload = await response.json() as { detail?: string };
-    return payload.detail || `请求失败（${response.status}）`;
+    const payload = await response.json() as { detail?: string; error?: { message?: string } };
+    return payload.error?.message || payload.detail || `请求失败（${response.status}）`;
   } catch {
     return `请求失败（${response.status}）`;
   }

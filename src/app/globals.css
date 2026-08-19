@@ -2,6 +2,54 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --workflow-canvas-bg: #f8fafc;
+}
+
+.dark {
+  --workflow-canvas-bg: #0b1016;
+}
+
+/* Visual workflow v2: keep the canvas controls and typed edges in the same
+   quiet surface language as the rest of the workspace. */
+.visual-workflow-canvas .react-flow__edge-path {
+  stroke: rgb(34 211 238 / 0.72);
+  stroke-width: 2;
+}
+
+.visual-workflow-canvas .react-flow__edge.selected .react-flow__edge-path,
+.visual-workflow-canvas .react-flow__edge:hover .react-flow__edge-path {
+  stroke: rgb(8 145 178 / 0.95);
+  stroke-width: 2.5;
+}
+
+.dark .visual-workflow-canvas .react-flow__edge-path {
+  stroke: rgb(34 211 238 / 0.78);
+}
+
+.visual-workflow-canvas .react-flow__handle {
+  width: 9px;
+  height: 9px;
+  border: 2px solid white;
+  background: #22d3ee;
+  box-shadow: 0 0 0 2px rgb(34 211 238 / 0.18);
+}
+
+.dark .visual-workflow-canvas .react-flow__handle {
+  border-color: #151b23;
+}
+
+.visual-workflow-canvas .react-flow__controls button,
+.visual-workflow-canvas .react-flow__minimap {
+  color: rgb(71 85 105);
+}
+
+.dark .visual-workflow-canvas .react-flow__controls button {
+  color: rgb(203 213 225);
+  background: #111820;
+  border-bottom-color: rgb(255 255 255 / 0.08);
+}
+
 .scrollbar-none { scrollbar-width: none; -ms-overflow-style: none; }
 .scrollbar-none::-webkit-scrollbar { display: none; }
 
@@ -54,6 +102,217 @@
   .image-plaza-waterfall-track {
     animation: none !important;
     transform: none !important;
+  }
+}
+
+.video-market-ambient {
+  background-color: #f8fafc;
+  background-image:
+    linear-gradient(rgb(15 23 42 / 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(15 23 42 / 0.045) 1px, transparent 1px),
+    radial-gradient(circle at 50% 58%, rgb(6 182 212 / 0.11), transparent 42%);
+  background-size: 34px 34px, 34px 34px, 100% 100%;
+}
+
+.dark .video-market-ambient {
+  background-color: #0f1013;
+  background-image:
+    linear-gradient(rgb(255 255 255 / 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(255 255 255 / 0.035) 1px, transparent 1px),
+    radial-gradient(circle at 50% 58%, rgb(34 211 238 / 0.1), transparent 42%);
+}
+
+.video-market-stage {
+  z-index: 10;
+  perspective: 1050px;
+  perspective-origin: 50% 48%;
+  transform-style: preserve-3d;
+}
+
+.video-market-spine {
+  position: absolute;
+  left: 50%;
+  top: 27%;
+  bottom: 7%;
+  width: 1px;
+  background: rgb(8 145 178 / 0.42);
+  box-shadow: 0 0 30px rgb(6 182 212 / 0.35);
+}
+
+.video-market-orbit-line {
+  position: absolute;
+  left: 50%;
+  top: 58%;
+  width: min(72vw, 980px);
+  aspect-ratio: 3 / 1;
+  border: 1px solid rgb(34 211 238 / 0.38);
+  border-radius: 50%;
+  transform-style: preserve-3d;
+  pointer-events: none;
+}
+
+.video-market-orbit-line-a {
+  transform: translate(-50%, -50%) rotateX(76deg) translateZ(-20px);
+}
+
+.video-market-orbit-line-b {
+  transform: translate(-50%, calc(-50% - 150px)) rotateX(76deg) scale(0.78) translateZ(-80px);
+  opacity: 0.72;
+}
+
+.video-market-orbit-line-c {
+  transform: translate(-50%, calc(-50% + 170px)) rotateX(76deg) scale(0.86) translateZ(-50px);
+  opacity: 0.58;
+}
+
+.video-market-trace {
+  position: absolute;
+  left: 50%;
+  top: 58%;
+  width: min(60vw, 820px);
+  aspect-ratio: 4 / 1;
+  border: 1px solid rgb(103 232 249 / 0.42);
+  border-radius: 50%;
+  pointer-events: none;
+  transform-style: preserve-3d;
+  filter: drop-shadow(0 0 7px rgb(34 211 238 / 0.24));
+  opacity: 0.8;
+}
+
+.video-market-trace-d {
+  transform: translate(-50%, -50%) rotateX(67deg) rotateZ(-9deg) translateZ(90px);
+  border-style: dashed;
+  animation: video-market-trace-drift 12s linear infinite;
+}
+
+.video-market-trace-e {
+  transform: translate(-50%, calc(-50% + 8px)) rotateX(67deg) rotateZ(9deg) translateZ(-110px) scale(0.9);
+  border-color: rgb(14 165 233 / 0.26);
+  animation: video-market-trace-drift-reverse 16s linear infinite;
+}
+
+.video-market-trajectory {
+  position: absolute;
+  inset: 8% 4% 4%;
+  width: 92%;
+  height: 88%;
+  overflow: visible;
+  pointer-events: none;
+  transform: translateZ(-5px);
+}
+
+.video-market-trajectory-main,
+.video-market-trajectory-secondary,
+.video-market-trajectory-dash,
+.video-market-trajectory-glow {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.video-market-trajectory-main {
+  stroke: url(#video-market-trajectory-gradient);
+  stroke-width: 2.8;
+  opacity: 0.9;
+  filter: drop-shadow(0 0 5px rgb(34 211 238 / 0.5));
+  stroke-dasharray: 18 12;
+  animation: video-market-trajectory-flow 13s linear infinite;
+}
+
+.video-market-trajectory-secondary {
+  stroke: rgb(56 189 248 / 0.5);
+  stroke-width: 1.8;
+  stroke-dasharray: 8 14;
+  opacity: 0.78;
+  animation: video-market-trajectory-flow-reverse 17s linear infinite;
+}
+
+.video-market-trajectory-dash {
+  stroke: rgb(103 232 249 / 0.58);
+  stroke-width: 1.4;
+  stroke-dasharray: 3 16;
+  opacity: 0.72;
+  animation: video-market-trajectory-flow 9s linear infinite;
+}
+
+.video-market-trajectory-glow {
+  stroke: rgb(34 211 238 / 0.38);
+  stroke-width: 10;
+  opacity: 0.3;
+  filter: url(#video-market-trajectory-glow);
+}
+
+@keyframes video-market-trajectory-flow {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: -180; }
+}
+
+@keyframes video-market-trajectory-flow-reverse {
+  from { stroke-dashoffset: 0; }
+  to { stroke-dashoffset: 180; }
+}
+
+@keyframes video-market-trace-drift {
+  from { transform: translate(-50%, -50%) rotateX(67deg) rotateZ(-9deg) translateZ(90px) rotateZ(0deg); }
+  to { transform: translate(-50%, -50%) rotateX(67deg) rotateZ(-9deg) translateZ(90px) rotateZ(360deg); }
+}
+
+@keyframes video-market-trace-drift-reverse {
+  from { transform: translate(-50%, calc(-50% + 8px)) rotateX(67deg) rotateZ(9deg) translateZ(-110px) scale(0.9) rotateZ(360deg); }
+  to { transform: translate(-50%, calc(-50% + 8px)) rotateX(67deg) rotateZ(9deg) translateZ(-110px) scale(0.9) rotateZ(0deg); }
+}
+
+.video-market-spiral-card {
+  position: absolute;
+  left: 50%;
+  top: 58%;
+  width: var(--spiral-card-width);
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 0.16);
+  border-radius: 0.75rem;
+  background: #020617;
+  box-shadow: 0 18px 45px rgb(15 23 42 / 0.24);
+  transform-style: preserve-3d;
+  transform:
+    translate(-50%, -50%)
+    translateY(var(--spiral-lift))
+    rotateY(var(--spiral-angle))
+    translateZ(var(--spiral-radius))
+    rotateY(calc(var(--spiral-angle) * -1))
+    scale(var(--spiral-depth-scale));
+  opacity: var(--spiral-depth-opacity);
+  filter: brightness(var(--spiral-depth-brightness)) saturate(0.92);
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+  will-change: transform;
+}
+
+.video-market-spiral-card:hover,
+.video-market-spiral-card:focus-visible {
+  z-index: 5;
+  border-color: rgb(103 232 249 / 0.8);
+  box-shadow: 0 22px 55px rgb(8 145 178 / 0.25);
+  filter: brightness(1.06) saturate(1.04);
+  opacity: 1;
+  outline: none;
+}
+
+@media (max-width: 639px) {
+  .video-market-spiral-card {
+    top: 61%;
+    border-radius: 0.625rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .video-market-spiral-card,
+  .video-market-spiral-card video,
+  .video-market-trace,
+  .video-market-trajectory-main,
+  .video-market-trajectory-secondary,
+  .video-market-trajectory-dash {
+    animation: none !important;
+    transition: none !important;
   }
 }
 

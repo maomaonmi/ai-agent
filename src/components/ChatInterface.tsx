@@ -8,12 +8,15 @@ import {
   WebDoc,
   ResearchProcessEvent,
   ResearchChunk,
+  ResearchFigure,
+  PlanFigure,
   AgentTalkEvent,
   PlanProgressEvent,
   DiscussionLength,
   CapabilityMode,
   McpMode,
   McpEvent,
+  McpTraceItem,
   SkillMatchedEvent,
   RuntimeSettings,
   SessionSummary,
@@ -46,7 +49,6 @@ import {
 import { Image as ImageIcon, Paperclip, X, Bot, ArrowUp, Sparkles, SlidersHorizontal, Plus, FileText, Video, Menu, Code2, Languages, WandSparkles, Telescope, Presentation } from 'lucide-react';
 import ResearchProgressPanel from './ResearchProgressPanel';
 import MarkdownMessage from './MarkdownMessage';
-import TaskExecutionPanel from './TaskExecutionPanel';
 import NodeProgressPanel from './NodeProgressPanel';
 import ModeSelector, { ModeType } from './ModeSelector';
 import AgentDrawer from './AgentDrawer';
@@ -67,9 +69,12 @@ import WritingWorkspace from '../features/ai-writing/WritingWorkspace';
 import ImagePlazaWorkspace from '../features/picture/ImagePlazaWorkspace';
 import ImageStudioWorkspace from '../features/picture/ImageStudioWorkspace';
 import VideoStudioWorkspace from '../features/video/VideoStudioWorkspace';
+import VideoMarketWorkspace from '../features/video/VideoMarketWorkspace';
 import ResearchWorkspace from '../features/deep-research/ResearchWorkspace';
+import PlanWorkspace from '../features/autonomous-plan/PlanWorkspace';
 import ResearchDocumentCard from '../features/deep-research/ResearchDocumentCard';
 import { deriveReportTitle } from '../features/deep-research/report/researchReportAdapter';
+import { useTypewriterPacing } from '../lib/useTypewriterPacing';
 import type { CompiledWritingPrompt } from '../features/ai-writing/writingTypes';
 import type { WritingDraft } from '../features/ai-writing/writingTypes';
 import type { WritingDocumentState } from '../features/ai-writing/writingDocumentTypes';
@@ -121,6 +126,26 @@ function researchChunksFromWebDocs(docs: WebDoc[]): ResearchChunk[] {
     score: Number.isFinite(doc.score) ? doc.score : 0,
     text: doc.content || '',
   }));
+}
+
+function buildHistoricalResearchChain(sourceCount: number): NodeEvent[] {
+  const now = Date.now();
+  const fallback = { history_fallback: true };
+  return [
+    { id: 1001, node_name: 'research_plan', status: 'completed', message: '历史会话已完成研究规划', timestamp_ms: now - 3000, extras: fallback },
+    { id: 1002, node_name: 'web_search', status: 'completed', message: `历史会话已完成深度搜索，归档 ${sourceCount} 条来源`, timestamp_ms: now - 2000, kept_count: sourceCount, extras: fallback },
+    { id: 1003, node_name: 'analysis', status: 'completed', message: '历史会话已完成分析整合', timestamp_ms: now - 1000, extras: fallback },
+    { id: 1004, node_name: 'final_answer', status: 'completed', message: '历史调研报告已生成', timestamp_ms: now, extras: fallback },
+  ];
+}
+
+function isPendingResearchFigure(figure: ResearchFigure): boolean {
+  return figure.job_id === 'pending' || figure.id.startsWith('placeholder-');
+}
+
+function containsOnlyPendingResearchFigures(messages: ChatMessage[]): boolean {
+  const figures = messages.flatMap((message) => message.researchFigures ?? []);
+  return figures.length > 0 && figures.every(isPendingResearchFigure);
 }
 
 function mergeResearchSources(current: ResearchChunk[], incoming: ResearchChunk[]): ResearchChunk[] {
@@ -212,8 +237,11 @@ export default function ChatInterface() {
   const perRoundResearchChunksRef = useRef<ResearchChunk[]>([]);
   const perRoundPlanProgressRef = useRef<PlanProgressEvent | null>(null);
   const perRoundTokenUsageRef = useRef<TokenUsage | null>(null);
+  const perRoundMcpTraceRef = useRef<McpTraceItem[]>([]);
   const perRoundCurrentNodeRef = useRef<string | null>(null);
   const perRoundPanelOpenRef = useRef<boolean>(true);
+  // Invalidate late SSE frames when a new request or conversation becomes active.
+  const activeRequestTokenRef = useRef(0);
 
   // 消息级的「是否展开过程面板」：用消息 content 哈希作 key，避免多轮复用同一 toggle。
   const [msgPanelOpenKeys, setMsgPanelOpenKeys] = useState<Record<string, boolean>>({});
@@ -246,6 +274,7 @@ export default function ChatInterface() {
       if (perRoundWebDocsRef.current.length > 0) msg.webDocs = perRoundWebDocsRef.current;
       if (perRoundResearchChunksRef.current.length > 0) msg.researchChunks = perRoundResearchChunksRef.current;
       if (perRoundTokenUsageRef.current) msg.tokenUsage = perRoundTokenUsageRef.current;
+      if (perRoundMcpTraceRef.current.length > 0) msg.mcpTrace = perRoundMcpTraceRef.current;
       updated[lastAi] = msg;
       messagesRef.current = updated;
       return updated;
@@ -347,11 +376,7 @@ export default function ChatInterface() {
   const [qwenNativeSearchOptions, setQwenNativeSearchOptions] = useState<QwenNativeSearchOptions>(DEFAULT_QWEN_NATIVE_SEARCH_OPTIONS);
   // Why: 本轮对话 MCP 工具调用轨迹，实时在 UI 显示"正在调用 / 调用结果"，
   //   回答完成后保留 5s 再清空，让用户确认"MCP 真的被调用了"。
-  const [mcpTrace, setMcpTrace] = useState<Array<{
-    tool_name: string;
-    status: 'calling' | 'ok' | 'error';
-    preview?: string;
-  }>>([]);
+  const [mcpTrace, setMcpTrace] = useState<McpTraceItem[]>([]);
   const [mcpActive, setMcpActive] = useState(false);
   // Why: 本轮 Skill 匹配命中的手册，回答开始前清空，收到 skill_matched SSE 追加，
   //   让用户在对话区顶部看到"🧠 已加载技能：xxx"，与 MCP trace 同源反馈。
@@ -359,7 +384,7 @@ export default function ChatInterface() {
   const [isRuntimeSettingsOpen, setIsRuntimeSettingsOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   // Why: SPA 全屏视图切换（计划书 §1 D1）——'chat' 正常聊天 / 'marketplace' 市场全屏页。
-  const [view, setView] = useState<'chat' | 'marketplace' | 'hooks' | 'code-showcase' | 'writing' | 'image-studio' | 'image-plaza' | 'video-studio'>('chat');
+  const [view, setView] = useState<'chat' | 'marketplace' | 'hooks' | 'code-showcase' | 'writing' | 'image-studio' | 'image-plaza' | 'video-market' | 'video-studio'>('chat');
   const [directoryTab, setDirectoryTab] = useState<'skills' | 'connectors' | 'plugins'>('connectors');
   // Why: SettingsDialog 深链——市场页齿轮点击后打开设置并定位到 directory section + 子页签。
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | null>(null);
@@ -378,6 +403,7 @@ export default function ChatInterface() {
   const [currentModelSettings, setCurrentModelSettings] = useState<ModelSettings | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [selectedResearchMessageIndex, setSelectedResearchMessageIndex] = useState<number | null>(null);
   const [writingSessionRestore, setWritingSessionRestore] = useState<{
     sessionId: string;
     revision: number;
@@ -631,8 +657,19 @@ export default function ChatInterface() {
     });
   };
 
+  const persistPlanMessages = (sessionId: string | null | undefined, nextMessages: ChatMessage[]) => {
+    messagesRef.current = nextMessages;
+    setMessages(nextMessages);
+    if (!sessionId) return;
+    void saveSessionSnapshot(sessionId, buildSnapshot(nextMessages), false).catch((requestError) => {
+      setError(requestError instanceof Error ? requestError.message : '保存自主规划进度失败');
+    });
+  };
+
   const resetConversation = () => {
     setMessages([]);
+    messagesRef.current = [];
+    setSelectedResearchMessageIndex(null);
     setReasoningSteps([]);
     setWebDocs([]);
     setResearchChunks([]);
@@ -647,9 +684,13 @@ export default function ChatInterface() {
     perRoundResearchChunksRef.current = [];
     perRoundPlanProgressRef.current = null;
     perRoundTokenUsageRef.current = null;
+    perRoundMcpTraceRef.current = [];
     perRoundCurrentNodeRef.current = null;
     perRoundPanelOpenRef.current = true;
     nodeProgressCounter.current = 0;
+    activeRequestTokenRef.current += 1;
+    setMcpTrace([]);
+    setMcpActive(false);
     setMsgPanelOpenKeys({});
     resetCode();
     setCodeVersions([]);
@@ -695,7 +736,9 @@ export default function ChatInterface() {
         }
       }
     }
+    messagesRef.current = normalizedMessages;
     setMessages(normalizedMessages);
+    setSelectedResearchMessageIndex(null);
     setReasoningSteps(snapshot.reasoningSteps ?? []);
     setWebDocs(snapshot.webDocs ?? []);
     setResearchChunks(snapshot.researchChunks ?? []);
@@ -710,6 +753,9 @@ export default function ChatInterface() {
     perRoundResearchChunksRef.current = finalLastAi >= 0
       ? (normalizedMessages[finalLastAi].researchChunks ?? [])
       : (snapshot.researchChunks ?? []);
+    perRoundMcpTraceRef.current = finalLastAi >= 0
+      ? (normalizedMessages[finalLastAi].mcpTrace ?? [])
+      : [];
     perRoundPlanProgressRef.current = finalLastAi >= 0
       ? (normalizedMessages[finalLastAi].planProgress ?? snapshot.planProgress ?? null)
       : (snapshot.planProgress ?? null);
@@ -750,6 +796,8 @@ export default function ChatInterface() {
     setMsgPanelOpenKeys({});
     setError(null);
     setSelectedElement(null);
+    setMcpTrace(perRoundMcpTraceRef.current);
+    setMcpActive(false);
   };
 
   // Why: 作为 useEffect dep 注入到 CodeWorkspace（L462、L482）。未包 useCallback → 每轮
@@ -785,6 +833,10 @@ export default function ChatInterface() {
 
   const openSession = async (session: SessionSummary) => {
     setIsSessionReady(false);
+    activeRequestTokenRef.current += 1;
+    perRoundMcpTraceRef.current = [];
+    setMcpTrace([]);
+    setMcpActive(false);
     try {
       const history = await getSessionHistory(session.session_id);
       const historyMessages = history.snapshot.messages ?? [];
@@ -964,16 +1016,38 @@ export default function ChatInterface() {
   const persistCurrentSession = async () => {
     if (!activeSessionId || !isSessionReady) return;
     // AI writing persists atomically when generation completes. Its workspace
-    // owns richer local document state, so the generic chat autosave must not
-    // overwrite a valid writing snapshot with transient/empty React messages.
-    if (mode === 'writing') return;
+    // owns richer local document state. Flush that structured state explicitly
+    // before switching sessions; otherwise a pending 500ms autosave can leave
+    // the latest chapter search status out of the server snapshot.
+    if (mode === 'writing') {
+      if (!writingWorkspaceState) return;
+      const updated = await saveSessionSnapshot(activeSessionId, {
+        ...buildSnapshot(),
+        writingDraft: writingWorkspaceState.draft,
+        writingDocument: writingWorkspaceState.document,
+        thesisOutline: writingWorkspaceState.thesisOutline,
+      }, false);
+      setSessions((previous) => [
+        updated,
+        ...previous.filter((item) => item.session_id !== updated.session_id),
+      ]);
+      return;
+    }
+    const snapshotMessages = messages.length > 0 ? messages : messagesRef.current;
+    // Never let a stale render overwrite a completed research session with an
+    // empty message array while switching sessions or hydrating history.
+    if (mode === 'research' && snapshotMessages.length === 0) return;
+    // Client-side figure placeholders are not durable task state. Saving them
+    // during hydration can race the real job response and overwrite succeeded
+    // images with queued placeholders.
+    if (mode === 'research' && containsOnlyPendingResearchFigures(snapshotMessages)) return;
     const shouldGenerateTitle =
-      messages.some((message) => message.role === 'user') &&
+      snapshotMessages.some((message) => message.role === 'user') &&
       !titleRequestedRef.current.has(activeSessionId);
     if (shouldGenerateTitle) titleRequestedRef.current.add(activeSessionId);
     const updated = await saveSessionSnapshot(
       activeSessionId,
-      buildSnapshot(),
+      buildSnapshot(snapshotMessages),
       shouldGenerateTitle,
     );
     setSessions((previous) => [
@@ -1184,6 +1258,13 @@ export default function ChatInterface() {
     setInput(draftPrompt);
     setView('video-studio');
   }, []);
+  const openVideoMarket = useCallback((draftPrompt = '') => {
+    setInput(draftPrompt);
+    setView('video-market');
+  }, []);
+  const openVisualWorkflow = useCallback(() => {
+    window.location.assign('/visual-workflow');
+  }, []);
 
   // Why: Create with agent（计划书 §3.1 D4）——关市场→新建会话→输入框预填随机提示词（不发送）。
   const handleCreateWithAgent = useCallback(async (prompt: string) => {
@@ -1242,13 +1323,12 @@ export default function ChatInterface() {
     const originalQuery = messages[msgIndex - 1]?.content ?? '';  // 用户原始问题
 
     // 同一原子更新中标记反问已回答并追加用户回答，供随后流式回调可靠读取。
-    setMessages((prev) => {
-      const updated = [...prev];
-      updated[msgIndex] = { ...updated[msgIndex], feedbackAnswer: answer };
-      const next = [...updated, { role: 'user' as const, content: answer }];
-      messagesRef.current = next;
-      return next;
-    });
+    // 通过统一持久化入口立即保存，避免刷新/切换会话时反问卡片消失。
+    const currentMessages = messagesRef.current;
+    const updated = [...currentMessages];
+    updated[msgIndex] = { ...updated[msgIndex], feedbackAnswer: answer };
+    const nextMessages = [...updated, { role: 'user' as const, content: answer }];
+    persistResearchMessages(activeSessionId, nextMessages);
 
     setIsLoading(true);
     setError(null);
@@ -1335,10 +1415,16 @@ export default function ChatInterface() {
 
     const userMessage = input.trim();
     const requestAttachments = attachments;
+    if (mode === 'research') setSelectedResearchMessageIndex(null);
+    // Why: 新一轮发送前强制上屏上一轮 pacing 残留，避免旧答案继续展开干扰新轮。
+    answerPacing.flush();
+    reasoningPacing.flush();
     setIsLoading(true);
     setError(null);
     setMcpTrace([]);
     setMcpActive(false);
+    perRoundMcpTraceRef.current = [];
+    const requestToken = ++activeRequestTokenRef.current;
     // Why: 每轮发送前清空上一轮的 Skill 命中提示，避免与新一轮匹配结果混淆。
     setMatchedSkills([]);
     let requestSessionId = activeSessionId;
@@ -1454,9 +1540,17 @@ export default function ChatInterface() {
           onResearchProcess: (event) => {
             setResearchProgress(event);
           },
+          // Why: 千问原生调研后端已逐 chunk 推 token（answer 阶段），此前前端丢弃；
+          //   现接入 pacing 实现报告真流式打字机。
+          onToken: (token) => {
+            answerPacing.push(token);
+          },
           onWebDocs: handleResearchWebDocs,
           onResearchDone: (event) => {
             setResearchProgress(null);
+            // Why: 仅整块引擎（firecrawl/agent-loop/self-built）的 done 携带 report，走 commit 伪打字机；
+            //   千问引擎 done 无 report（占位文案），总量已由 onToken push 累积，不能 commit 回卷。
+            if (event.report) answerPacing.commit(event.report);
             // 1. 写入本轮 per-round ref（会被随后的 syncRoundStateToLastMessage 覆写到消息）
             perRoundResearchChunksRef.current = mergeResearchSources(perRoundResearchChunksRef.current, (event.top_chunks as ResearchChunk[]) ?? []);
             setResearchChunks(perRoundResearchChunksRef.current);
@@ -1474,6 +1568,7 @@ export default function ChatInterface() {
             ]);
           },
           onResearchReasonDone: (event) => {
+              answerPacing.commit(event.report);
               const updated = [...messagesRef.current];
               const last = updated[updated.length - 1];
               if (last && last.role === 'assistant') {
@@ -1496,15 +1591,27 @@ export default function ChatInterface() {
           // Why: 千问深度调研 Step 1 反问确认——后端推送 qwen_feedback 事件后连接关闭，
           //   前端在对话流中插入内嵌卡片，用户回答后发起 Step 2 请求继续研究。
           onQwenFeedback: (event) => {
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: 'assistant',
-                content: '',
-                type: 'qwen_feedback',
-                feedbackQuestion: event.question,
-              },
-            ]);
+            const currentMessages = messagesRef.current;
+            const alreadyShown = currentMessages.some(
+              (message) => message.type === 'qwen_feedback'
+                && message.feedbackQuestion === event.question
+                && !message.feedbackAnswer,
+            );
+            const nextMessages = alreadyShown
+              ? currentMessages
+              : [
+                  ...currentMessages,
+                  {
+                    role: 'assistant' as const,
+                    content: '',
+                    type: 'qwen_feedback' as const,
+                    feedbackQuestion: event.question,
+                  },
+                ];
+            // Persist the feedback card and all node/source refs accumulated
+            // before the stream paused. Previously this existed only in React
+            // state, so reopening the session silently dropped the chain.
+            persistResearchMessages(requestSessionId, nextMessages);
             setIsLoading(false);
             sealOffProcessingNodes();
           },
@@ -1529,19 +1636,30 @@ export default function ChatInterface() {
             perRoundPlanProgressRef.current = event;
             setPlanProgress(event);
             setAgentStatus('');
+            const current = messagesRef.current;
+            const existingIndex = [...current].map((message, index) => ({ message, index })).reverse()
+              .find(({ message }) => message.role === 'assistant' && message.planProgress)?.index ?? -1;
+            const nextMessages = existingIndex >= 0
+              ? current.map((message, index) => index === existingIndex ? { ...message, planProgress: event } : message)
+              : [...current, { role: 'assistant' as const, content: '', planProgress: event }];
+            persistPlanMessages(requestSessionId, nextMessages);
           },
           onSkillMatched: (event) => {
             setMatchedSkills((prev) => [...prev, event]);
           },
           onDone: (event) => {
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: 'assistant',
+            answerPacing.commit(event.answer);
+            const current = messagesRef.current;
+            const existingIndex = [...current].map((message, index) => ({ message, index })).reverse()
+              .find(({ message }) => message.role === 'assistant' && message.planProgress)?.index ?? -1;
+            const nextMessages = existingIndex >= 0
+              ? current.map((message, index) => index === existingIndex ? {
+                ...message,
                 content: event.answer,
-                planProgress: perRoundPlanProgressRef.current ?? undefined,
-              },
-            ]);
+                planProgress: perRoundPlanProgressRef.current ?? message.planProgress,
+              } : message)
+              : [...current, { role: 'assistant' as const, content: event.answer, planProgress: perRoundPlanProgressRef.current ?? undefined }];
+            persistPlanMessages(requestSessionId, nextMessages);
             setAgentStatus('');
           },
           onError: (event) => {
@@ -1569,6 +1687,7 @@ export default function ChatInterface() {
             setAgentTalks((prev) => [...prev, event]);
           },
           onAgentFinalAnswer: (event) => {
+            answerPacing.commit(event.answer);
             setMessages((prev) => [...prev, { role: 'assistant', content: event.answer }]);
           },
           onSkillMatched: (event) => {
@@ -1605,14 +1724,17 @@ export default function ChatInterface() {
         await sendChatMessage(userMessage, mode, {
           onNode: handleNodeEvent,
           onReasoning: (event) => {
+            reasoningPacing.commit(event.reasoning);
             setReasoningSteps((prev) => [...prev, event.reasoning]);
           },
           onReasoningDelta: (token) => {
             streamedReasoning += token;
+            reasoningPacing.push(token);
             setReasoningSteps([streamedReasoning]);
           },
           onToken: (token) => {
             streamedAnswer += token;
+            answerPacing.push(token);
             setMessages((prev) => {
               const next = [...prev];
               const last = next[next.length - 1];
@@ -1632,27 +1754,35 @@ export default function ChatInterface() {
             syncRoundStateToLastMessage();
           },
           onMcpEvent: (event: McpEvent) => {
+            if (requestToken !== activeRequestTokenRef.current) return;
             if (event.phase === 'start') {
               setMcpActive(true);
             } else if (event.phase === 'tool_call') {
               setMcpActive(true);
-              setMcpTrace((prev) => [...prev, { tool_name: event.tool_name, status: 'calling' }]);
+              const next = [...perRoundMcpTraceRef.current, { tool_name: event.tool_name, status: 'calling' as const }];
+              perRoundMcpTraceRef.current = next;
+              setMcpTrace(next);
+              syncRoundStateToLastMessage();
             } else if (event.phase === 'tool_result') {
-              setMcpTrace((prev) => {
+              const next = (() => {
+                const prev = perRoundMcpTraceRef.current;
                 const idx = prev.findIndex(
                   (t) => t.tool_name === event.tool_name && t.status === 'calling',
                 );
                 if (idx === -1) {
-                  return [...prev, { tool_name: event.tool_name, status: event.ok ? 'ok' : 'error', preview: event.preview }];
+                  return [...prev, { tool_name: event.tool_name, status: (event.ok ? 'ok' : 'error') as McpTraceItem['status'], preview: event.preview }];
                 }
                 const next = [...prev];
-                next[idx] = { ...next[idx], status: event.ok ? 'ok' : 'error', preview: event.preview };
+                next[idx] = { ...next[idx], status: (event.ok ? 'ok' : 'error') as McpTraceItem['status'], preview: event.preview };
                 return next;
-              });
+              })();
+              perRoundMcpTraceRef.current = next;
+              setMcpTrace(next);
+              syncRoundStateToLastMessage();
             } else if (event.phase === 'done' || event.phase === 'error') {
               // 保留显示 5s 后清空
               setTimeout(() => {
-                setMcpActive(false);
+                if (requestToken === activeRequestTokenRef.current) setMcpActive(false);
               }, 5000);
             }
           },
@@ -1669,10 +1799,16 @@ export default function ChatInterface() {
                 webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : undefined,
                 researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : undefined,
                 tokenUsage: event.usage ?? perRoundTokenUsageRef.current ?? undefined,
+                mcpTrace: perRoundMcpTraceRef.current.length > 0 ? perRoundMcpTraceRef.current : undefined,
               }]);
+              // Why: 整块源（DeepSeek 非流式兜底）走 commit，伪打字机匀速展开。
+              answerPacing.commit(event.answer);
             } else {
               // 流式已经写入最后一条消息，再补一次最终状态作为"快照落点"
               syncRoundStateToLastMessage();
+              // Why: done 携带的可能是服务端最终全文（含流式期间未推完的尾部），
+              //   commit 对齐总量；队列未排空部分继续匀速展开。
+              answerPacing.commit(event.answer);
             }
             if (event.web_docs && event.web_docs.length > 0) {
               perRoundWebDocsRef.current = event.web_docs;
@@ -1738,9 +1874,14 @@ export default function ChatInterface() {
     }
     try {
       await persistCurrentSession();
-      const target = sessions.find((session) => session.mode === nextMode);
-      if (target) {
-        await openSession(target);
+      const restoreExistingSessionForMode = nextMode === 'code';
+      if (restoreExistingSessionForMode) {
+        const target = sessions.find((session) => session.mode === nextMode);
+        if (target) {
+          await openSession(target);
+        } else {
+          startDraftSession(nextMode);
+        }
       } else {
         startDraftSession(nextMode);
       }
@@ -1934,14 +2075,73 @@ export default function ChatInterface() {
   const latestResearchUserMessage = mode === 'research'
     ? [...messages].reverse().find((message) => message.role === 'user')
     : undefined;
+  const latestPlanReportMessage = isPlanMode
+    ? [...messages].reverse().find((message) => message.role === 'assistant' && (message.planProgress || message.content.trim()))
+    : undefined;
   const latestResearchReportMessage = mode === 'research'
     ? [...messages].reverse().find((message) => message.role === 'assistant' && message.type !== 'qwen_feedback')
     : undefined;
+  const latestResearchReportIndex = latestResearchReportMessage
+    ? messages.lastIndexOf(latestResearchReportMessage)
+    : -1;
+  const selectedResearchReportIndex = mode === 'research'
+    && selectedResearchMessageIndex != null
+    && selectedResearchMessageIndex >= 0
+    && selectedResearchMessageIndex < messages.length
+    && messages[selectedResearchMessageIndex]?.role === 'assistant'
+    && messages[selectedResearchMessageIndex]?.type !== 'qwen_feedback'
+    && Boolean(messages[selectedResearchMessageIndex]?.content.trim())
+    ? selectedResearchMessageIndex
+    : latestResearchReportIndex;
+  const selectedResearchReportMessage = selectedResearchReportIndex >= 0
+    ? messages[selectedResearchReportIndex]
+    : undefined;
+  const selectedResearchUserMessage = selectedResearchReportIndex >= 0
+    ? [...messages.slice(0, selectedResearchReportIndex)].reverse().find((message) => message.role === 'user')
+    : latestResearchUserMessage;
+  const selectedResearchSources = researchSourcesFromMessage(selectedResearchReportMessage);
+  const handleResearchFiguresChange = (figures: ResearchFigure[]) => {
+    const fallbackReportIndex = [...messagesRef.current].map((message, index) => ({ message, index }))
+      .reverse()
+      .find(({ message }) => message.role === 'assistant' && message.type !== 'qwen_feedback' && message.content.trim().length > 0)?.index ?? -1;
+    const targetReportIndex = selectedResearchReportIndex >= 0 ? selectedResearchReportIndex : fallbackReportIndex;
+    if (targetReportIndex < 0) return;
+    const previous = messagesRef.current[targetReportIndex]?.researchFigures ?? [];
+    const previousFingerprint = previous.map((figure) => `${figure.id}:${figure.status}:${figure.image_url ?? ''}`).join('|');
+    const nextFingerprint = figures.map((figure) => `${figure.id}:${figure.status}:${figure.image_url ?? ''}`).join('|');
+    if (previousFingerprint === nextFingerprint) return;
+    const nextMessages = messagesRef.current.map((message, index) => index === targetReportIndex ? { ...message, researchFigures: figures } : message);
+    // Keep pending placeholders in React state for immediate loading UI, but
+    // do not persist them. The actual server job result is the durable source.
+    if (figures.length > 0 && figures.every(isPendingResearchFigure)) {
+      messagesRef.current = nextMessages;
+      setMessages(nextMessages);
+      return;
+    }
+    persistResearchMessages(activeSessionId, nextMessages);
+  };
+  const handlePlanFiguresChange = (figures: PlanFigure[]) => {
+    const targetIndex = [...messagesRef.current].map((message, index) => ({ message, index }))
+      .reverse().find(({ message }) => message.role === 'assistant' && message.planProgress)?.index ?? -1;
+    if (targetIndex < 0) return;
+    const previous = messagesRef.current[targetIndex]?.planFigures ?? [];
+    const previousFingerprint = previous.map((figure) => `${figure.id}:${figure.status}:${figure.image_url ?? ''}`).join('|');
+    const nextFingerprint = figures.map((figure) => `${figure.id}:${figure.status}:${figure.image_url ?? ''}`).join('|');
+    if (previousFingerprint === nextFingerprint) return;
+    persistPlanMessages(activeSessionId, messagesRef.current.map((message, index) => index === targetIndex ? { ...message, planFigures: figures } : message));
+  };
+  const rightPaneIsLiveLatestReport = selectedResearchReportIndex === latestResearchReportIndex;
+  // Why: 全模式统一打字机 pacing——答案/报告与推理过程各用一个计数实例（避免串扰），
+  //   state 始终存全文（持久化快照安全），渲染层按 displayedLength 切片上屏。
+  const { displayedLength: answerPacedLength, active: answerPacingActive, pacing: answerPacing } = useTypewriterPacing();
+  const { displayedLength: reasonPacedLength, active: reasonPacingActive, pacing: reasoningPacing } = useTypewriterPacing();
   const researchPaneWidth = researchPaneWidthPx ? `${researchPaneWidthPx}px` : isHistoryCollapsed
     ? 'calc((100vw - 3.5rem) * 0.52)'
     : 'calc((100vw - 18rem) * 0.52)';
   const researchWorkspaceStyle = mode === 'research' && messages.length > 0
     ? ({ '--research-pane-width': researchPaneWidth } as CSSProperties)
+    : isPlanMode && messages.length > 0
+      ? ({ '--plan-pane-width': researchPaneWidth } as CSSProperties)
     : undefined;
 
   return (
@@ -1965,6 +2165,7 @@ export default function ChatInterface() {
         onOpenHooks={openHooks}
         onOpenImageStudio={() => openImageWorkspace()}
         onOpenVideoStudio={() => openVideoWorkspace()}
+        onOpenVisualWorkflow={openVisualWorkflow}
       />
       <SettingsDialog
         open={isSettingsOpen}
@@ -2046,6 +2247,9 @@ export default function ChatInterface() {
       {view === 'video-studio' && (
         <VideoStudioWorkspace initialPrompt={input} onBack={() => setView('chat')} />
       )}
+      {view === 'video-market' && (
+        <VideoMarketWorkspace initialPrompt={input} onBack={() => setView('chat')} onCreate={(prompt) => openVideoWorkspace(prompt ?? '')} />
+      )}
       {isCodeWorkbenchTransitioning && (
         <div className="fixed inset-0 z-[200] flex items-end justify-center overflow-hidden bg-slate-950/10 backdrop-blur-[2px]" aria-label="正在打开 Code 工作台" role="status">
           <div className="h-[86vh] w-full rounded-t-[32px] border border-white/70 bg-white shadow-[0_-25px_80px_rgba(15,23,42,0.22)] animate-[code-workbench-rise_360ms_cubic-bezier(0.22,1,0.36,1)]" />
@@ -2078,7 +2282,7 @@ export default function ChatInterface() {
       />
       <HookMonitorPanel events={agentTrace.hookEvents ?? []} />
       <ChatNodeNavigator nodes={chatNodes} isSidebarOpen={false} />
-      <div className={`${isHistoryCollapsed ? 'lg:pl-14' : 'lg:pl-72'} ${mode === 'research' && !isNewConversation ? 'xl:mr-[var(--research-pane-width)]' : ''} ${
+      <div className={`${isHistoryCollapsed ? 'lg:pl-14' : 'lg:pl-72'} ${mode === 'research' && !isNewConversation ? 'xl:mr-[var(--research-pane-width)]' : ''} ${isPlanMode && !isNewConversation ? 'xl:mr-[var(--plan-pane-width)]' : ''} ${
         mode === 'code' ? 'h-screen overflow-hidden' : ''
       }`}>
         <div className={`p-6 transition-all duration-300 ${
@@ -2208,7 +2412,14 @@ export default function ChatInterface() {
             </div>
           )}
 
-          <div className={mode === 'code' ? 'hidden' : 'space-y-4'}>
+          <div
+            className={mode === 'code' ? 'hidden' : 'space-y-4'}
+            onClick={() => {
+              // Why: 点击消息区立即全量上屏，跳过 pacing 匀速展开。
+              if (answerPacingActive) answerPacing.flush();
+              if (reasonPacingActive) reasoningPacing.flush();
+            }}
+          >
             {visibleMessages.map((msg, index) => {
               // Why 改成「任意 assistant 消息」都可能带进度/来源：
               //   旧逻辑只显示「最后一条 assistant 消息」的面板，导致多轮历史里
@@ -2216,20 +2427,22 @@ export default function ChatInterface() {
               //   只要 msg.nodeProgress（或 ref 中正在累积的本轮状态）有内容，就渲染面板。
               const isAssistant = msg.role === 'assistant';
               const msgPlanProgress = isAssistant ? msg.planProgress : undefined;
+              // Why: 旧会话只保存了报告和来源，没有保存原始节点事件。
+              //   有来源的历史调研仍应显示一个明确的已完成链路摘要，不能退化成只有文档卡片。
+              const isQwenFeedback = msg.type === 'qwen_feedback';
+              const isResearchDocument = mode === 'research' && isAssistant && !isQwenFeedback && msg.content.trim().length > 0;
               const msgNodeProgress: NodeEvent[] =
                 (msg.nodeProgress && msg.nodeProgress.length > 0)
                   ? msg.nodeProgress
                   : (isAssistant && isLoading && perRoundNodeEventsRef.current.length > 0
                       ? perRoundNodeEventsRef.current
-                      : []);
+                      : (isResearchDocument && (msg.researchChunks?.length || msg.webDocs?.length)
+                          ? buildHistoricalResearchChain(msg.researchChunks?.length ?? msg.webDocs?.length ?? 0)
+                          : []));
               const hasProgress = msgNodeProgress.length > 0;
               const msgWebDocs = msg.webDocs?.length ? msg.webDocs : undefined;
               const msgResearchChunks = msg.researchChunks?.length ? msg.researchChunks : undefined;
               const showPanel = isAssistant && hasProgress;
-              // Why: 千问深度调研反问卡片——type='qwen_feedback' 时渲染为内嵌卡片，
-              //   显示模型反问问题 + 输入框，用户回答后触发 Step 2 继续研究。
-              const isQwenFeedback = msg.type === 'qwen_feedback';
-              const isResearchDocument = mode === 'research' && isAssistant && !isQwenFeedback && msg.content.trim().length > 0;
 
               return (
               <div
@@ -2265,14 +2478,7 @@ export default function ChatInterface() {
                   </div>
                 )}
 
-                {msgPlanProgress && (
-                  <div className="mt-0.5 w-full max-w-[90%]">
-                    <TaskExecutionPanel
-                      progress={msgPlanProgress}
-                      distributed={mode === 'distributed_plan'}
-                    />
-                  </div>
-                )}
+                {/* 自主规划任务产出统一在独立 PlanWorkspace 展示；左侧只保留对话和链路状态。 */}
 
                 {/* Why: 千问反问卡片——内嵌在对话流中，不中断对话 */}
                 {isQwenFeedback ? (
@@ -2328,6 +2534,9 @@ export default function ChatInterface() {
                   <ResearchDocumentCard
                     title={deriveReportTitle(msg.content)}
                     sourceCount={msgResearchChunks?.length ?? msgWebDocs?.length ?? 0}
+                    figureStatus={!msg.researchFigures?.length ? 'idle' : msg.researchFigures.some((figure) => figure.status === 'queued' || figure.status === 'generating') ? 'generating' : msg.researchFigures.some((figure) => figure.status === 'succeeded') ? 'ready' : 'failed'}
+                    selected={selectedResearchReportIndex === index}
+                    onSelect={() => setSelectedResearchMessageIndex(index)}
                   />
                 ) : <div className={`
                   ${showPanel ? 'mt-1' : ''}
@@ -2363,7 +2572,16 @@ export default function ChatInterface() {
                       <span className="min-w-0"><strong className="block truncate text-sm text-slate-900">{msg.writingArtifact.title}</strong><span className="mt-0.5 block text-xs text-slate-400">{msg.writingArtifact.status === 'generating' ? '正在生成中…' : msg.writingArtifact.status === 'complete' ? 'Word 文档已生成' : '生成失败，请重试'}</span></span>
                     </div>
                   )}
-                  <MarkdownMessage content={msg.content} />
+                  <MarkdownMessage
+                    content={
+                      isAssistant && index === visibleMessages.length - 1 && (answerPacingActive || answerPacedLength > 0)
+                        ? msg.content.slice(0, answerPacedLength)
+                        : msg.content
+                    }
+                  />
+                  {isAssistant && answerPacingActive && index === visibleMessages.length - 1 && (
+                    <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-blue-600 align-middle" aria-hidden="true" />
+                  )}
                   {msg.role === 'assistant' && msg.tokenUsage && (
                     <div className="mt-2 text-[11px] text-slate-400">
                       Token · 输入 {msg.tokenUsage.prompt_tokens ?? (msg.tokenUsage.models ? Object.values(msg.tokenUsage.models).reduce((sum, item) => sum + (item.prompt_tokens || 0), 0) : 0)}
@@ -2371,6 +2589,23 @@ export default function ChatInterface() {
                       {' '}· 合计 {msg.tokenUsage.total_tokens}
                       {(msg.tokenUsage.cached_tokens ?? 0) > 0 ? ` · 缓存 ${msg.tokenUsage.cached_tokens}` : ''}
                       {(msg.tokenUsage.reasoning_tokens ?? 0) > 0 ? ` · 推理 ${msg.tokenUsage.reasoning_tokens}` : ''}
+                    </div>
+                  )}
+                  {msg.role === 'assistant' && msg.mcpTrace && msg.mcpTrace.length > 0 && (
+                    <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-500">
+                      <div className="flex items-center gap-2 font-medium text-slate-600">
+                        <span aria-hidden="true">🔧</span>
+                        <span>已调用 {msg.mcpTrace.filter((trace) => trace.status === 'ok').length} 个 MCP 工具</span>
+                      </div>
+                      <ul className="mt-2 space-y-1 pl-5">
+                        {msg.mcpTrace.map((trace, traceIndex) => (
+                          <li key={`${trace.tool_name}-${traceIndex}`} className="flex items-start gap-1.5">
+                            <span aria-hidden="true">{trace.status === 'calling' ? '⏳' : trace.status === 'ok' ? '✅' : '❌'}</span>
+                            <span className="font-mono">{trace.tool_name}</span>
+                            {trace.preview && <span className="truncate text-slate-400" title={trace.preview}>— {trace.preview.slice(0, 80)}{trace.preview.length > 80 ? '…' : ''}</span>}
+                          </li>
+                        ))}
+                      </ul>
                     </div>
                   )}
 
@@ -2387,7 +2622,9 @@ export default function ChatInterface() {
                         )}
                       </summary>
                       <div className="mt-2 p-3 bg-purple-50 border border-purple-100 rounded-lg text-xs text-purple-800 whitespace-pre-wrap leading-relaxed max-h-80 overflow-y-auto">
-                        {msg.reasoning}
+                        {index === visibleMessages.length - 1
+                          ? (reasonPacingActive || reasonPacedLength > 0 ? msg.reasoning.slice(0, reasonPacedLength) : msg.reasoning)
+                          : msg.reasoning}
                       </div>
                     </details>
                   )}
@@ -2486,7 +2723,7 @@ export default function ChatInterface() {
             )}
 
             {/* MCP 工具调用轨迹 —— 实时可见，确认"MCP 真的被调用了" */}
-            {(mcpActive || mcpTrace.length > 0) && mcpMode !== 'off' && (
+            {isLoading && (mcpActive || mcpTrace.length > 0) && mcpMode !== 'off' && (
               <div className="flex justify-start">
                 <div className="max-w-[90%] rounded-2xl rounded-bl-md border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm">
                   <div className="flex items-center gap-2 text-slate-600">
@@ -2558,30 +2795,24 @@ export default function ChatInterface() {
               </div>
             )}
 
-            {isPlanMode && isLoading && (planProgress || agentStatus) && (
-              <div className="mt-4">
-                {planProgress ? (
-                  <TaskExecutionPanel
-                    progress={planProgress}
-                    distributed={mode === 'distributed_plan'}
-                  />
-                ) : (
-                  <div
-                    role="status"
-                    className="flex items-center gap-2 rounded-lg bg-cyan-50 px-4 py-3 text-sm text-cyan-700"
-                  >
-                    <span className="h-2 w-2 animate-pulse rounded-full bg-cyan-500" />
-                    {agentStatus}
-                  </div>
-                )}
-              </div>
+            {isPlanMode && isLoading && !planProgress && agentStatus && (
+              <div className="mt-4 flex items-center gap-2 rounded-lg bg-cyan-50 px-4 py-3 text-sm text-cyan-700" role="status"><span className="h-2 w-2 animate-pulse rounded-full bg-cyan-500" />{agentStatus}</div>
             )}
 
             {agentFinalMessages.map((msg, index) => (
               <div key={`agent-final-${index}`} className="flex justify-start">
                 <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-gray-100 px-5 py-3 text-gray-900">
                   <p className="mb-2 text-xs font-semibold text-indigo-700">🎙️ 主持人 · 聊天小结</p>
-                  <MarkdownMessage content={msg.content} />
+                  <MarkdownMessage
+                    content={
+                        index === agentFinalMessages.length - 1 && (answerPacingActive || answerPacedLength > 0)
+                        ? msg.content.slice(0, answerPacedLength)
+                        : msg.content
+                    }
+                  />
+                  {answerPacingActive && index === agentFinalMessages.length - 1 && (
+                    <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-blue-600 align-middle" aria-hidden="true" />
+                  )}
                 </div>
               </div>
             ))}
@@ -2601,7 +2832,9 @@ export default function ChatInterface() {
                       推理 #{index + 1}
                     </summary>
                     <div className="px-4 py-3 text-gray-700 whitespace-pre-wrap text-sm leading-relaxed">
-                      {reasoning}
+                      {index === reasoningSteps.length - 1
+                        ? (reasonPacingActive || reasonPacedLength > 0 ? reasoning.slice(0, reasonPacedLength) : reasoning)
+                        : reasoning}
                     </div>
                   </details>
                 ))}
@@ -2616,7 +2849,7 @@ export default function ChatInterface() {
         {(mode !== 'code' || (isNewConversation && !codeWorkbenchDraft)) && <div
           className={`fixed left-0 z-40 bg-gradient-to-t from-slate-100 via-slate-50/95 to-transparent pt-8 transition-[left,right,top,bottom] duration-300 ${
             isHistoryCollapsed ? 'lg:left-14' : 'lg:left-72'
-          } ${isNewConversation ? 'bottom-auto top-[43%]' : 'bottom-0 top-auto'} right-0 ${mode === 'research' && !isNewConversation ? 'xl:right-[var(--research-pane-width)]' : ''}`}
+          } ${isNewConversation ? 'bottom-auto top-[43%]' : 'bottom-0 top-auto'} right-0 ${mode === 'research' && !isNewConversation ? 'xl:right-[var(--research-pane-width)]' : ''} ${isPlanMode && !isNewConversation ? 'xl:right-[var(--plan-pane-width)]' : ''}`}
         >
           <div className="mx-auto max-w-4xl p-3 sm:p-4">
             <div className="rounded-2xl border border-slate-200/90 bg-white p-2.5 shadow-[0_12px_40px_rgba(15,23,42,0.10)]">
@@ -2786,7 +3019,7 @@ export default function ChatInterface() {
                   <Menu size={18}/><span className="hidden sm:inline">更多</span>
                 </button>
                 {moreToolsOpen && (
-                  <div role="menu" aria-label="更多工具列表" className={`absolute right-0 z-[80] w-48 rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_18px_50px_rgba(15,23,42,0.16)] ${isNewConversation ? 'top-full mt-2' : 'bottom-full mb-2'}`}>
+                  <div role="menu" aria-label="更多工具列表" className="absolute bottom-full right-0 z-[80] mb-2 max-h-[min(420px,60vh)] w-48 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_18px_50px_rgba(15,23,42,0.16)]">
                     {[
                       { label: '代码', icon: Code2 },
                       { label: '翻译', icon: Languages },
@@ -2803,6 +3036,7 @@ export default function ChatInterface() {
                         onClick={() => {
                           setMoreToolsOpen(false);
                           if (label.includes('生图')) openImagePlaza(input);
+                          if (label.includes('视频')) openVideoMarket(input);
                           if (label === '代码') setView('code-showcase');
                           if (label === 'AI 写作') void openWritingWorkspace();
                         }}
@@ -2866,13 +3100,31 @@ export default function ChatInterface() {
 
       {mode === 'research' && !isNewConversation && (
         <ResearchWorkspace
-          title={latestResearchUserMessage?.content || '深度调研报告'}
-          report={latestResearchReportMessage?.content || ''}
-          sources={researchSourcesFromMessage(latestResearchReportMessage).length > 0 ? researchSourcesFromMessage(latestResearchReportMessage) : researchChunks}
+          title={selectedResearchUserMessage?.content || '深度调研报告'}
+          report={rightPaneIsLiveLatestReport && (answerPacingActive || answerPacedLength > 0)
+            ? (selectedResearchReportMessage?.content || '').slice(0, answerPacedLength)
+            : (selectedResearchReportMessage?.content || '')}
+          sources={selectedResearchSources.length > 0 || !rightPaneIsLiveLatestReport ? selectedResearchSources : researchChunks}
           loading={isLoading}
           sidebarCollapsed={isHistoryCollapsed}
           sessionId={activeSessionId || undefined}
+          researchFigures={selectedResearchReportMessage?.researchFigures}
+          onFiguresChange={handleResearchFiguresChange}
           onWidthChange={setResearchPaneWidthPx}
+        />
+      )}
+
+      {isPlanMode && !isNewConversation && (
+        <PlanWorkspace
+          progress={latestPlanReportMessage?.planProgress ?? planProgress}
+          report={latestPlanReportMessage?.content || ''}
+          figures={(latestPlanReportMessage?.planFigures ?? []) as PlanFigure[]}
+          loading={isLoading}
+          distributed={mode === 'distributed_plan'}
+          sidebarCollapsed={isHistoryCollapsed}
+          sessionId={activeSessionId || undefined}
+          onWidthChange={setResearchPaneWidthPx}
+          onFiguresChange={handlePlanFiguresChange}
         />
       )}
 

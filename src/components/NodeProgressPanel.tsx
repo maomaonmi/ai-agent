@@ -45,6 +45,7 @@ export default function NodeProgressPanel({
     0,
     ...nodeProgress.map((e) => (e.kept_count != null ? e.kept_count : e.hit_count ?? 0)),
   );
+  const isHistoricalFallback = nodeProgress.some((event) => event.extras?.history_fallback === true);
 
   const thinkingTime = useMemo(() => {
     const start = nodeProgress[0]?.timestamp_ms;
@@ -121,8 +122,8 @@ export default function NodeProgressPanel({
             <Check className="h-3.5 w-3.5" />
           )}
         </span>
-        <span className="font-medium text-gray-700">已思考</span>
-        <span className="tabular-nums">（用时 {thinkingTime} 秒）</span>
+        <span className="font-medium text-gray-700">{isHistoricalFallback ? '历史链路摘要' : '已思考'}</span>
+        <span className="tabular-nums">{isHistoricalFallback ? '（旧会话已完成）' : `（用时 ${thinkingTime} 秒）`}</span>
         {readCount > 0 && (
           <>
             <span className="text-gray-300">·</span>
