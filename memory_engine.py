@@ -1023,6 +1023,7 @@ class MemoryEngine:
         session_id: str,
         role: str,
         content: str,
+        message_type: str | None = None,
     ) -> bool:
         """写入一轮聊天消息：内存 FIFO（主） + 事件账本（兜底，可回放重建）。
 
@@ -1041,12 +1042,26 @@ class MemoryEngine:
         if self._settings is not None:
             window_k = int(self._settings.global_memory.window_k)
         window = self._chat_windows.setdefault(session_id, deque(maxlen=window_k))
+        # Qwen's feedback flow invokes the research endpoint twice. The second
+        # request repeats the original query for model context, not as a new
+        # user turn. Avoid writing an adjacent identical user event twice;
+        # separate turns remain intact once an assistant message intervenes.
+        if (
+            role == "user"
+            and window
+            and window[-1].get("role") == "user"
+            and str(window[-1].get("content", "") or "").strip() == str(content or "").strip()
+        ):
+            return True
         window.append({"role": role, "content": content})
         # 2) 账本兜底路径（best-effort，失败不阻断）
+        event_data = {"text": content, "role": role}
+        if message_type:
+            event_data["type"] = message_type
         return self.record_event(
             session_id,
             event_type="user_input" if role == "user" else "ai_reply",
-            event_data={"text": content, "role": role},
+            event_data=event_data,
             chat_mode=True,
         )
 

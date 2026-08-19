@@ -8,6 +8,7 @@ CLI 直启 uvicorn main:app --reload 不会读取该配置，落盘 generated/ �
 import asyncio
 import ast
 import base64
+import ipaddress
 import json
 import sqlite3
 import logging
@@ -18,6 +19,7 @@ import sys
 import time
 import hashlib
 import uuid
+from urllib.parse import urlparse
 from types import SimpleNamespace
 from pathlib import Path
 from typing import Annotated, TypedDict, List, Dict, Literal, Optional, Any, NotRequired, TypeVar, Callable, Awaitable, AsyncGenerator
@@ -92,6 +94,8 @@ from video_probe import FFprobeService
 from video_runtime import load_video_runtime_config
 from video_transcode import FFmpegService
 from visual_workflow_api import create_visual_workflow_router
+from visual_workflow_executor import VisualWorkflowExecutor
+from visual_workflow_providers import HttpImageProvider, HttpVisionProvider
 from visual_workflow_repository import VisualWorkflowRepository
 
 from 全知全能.day32_deep_research_retrieval import (
@@ -277,6 +281,67 @@ def _initialize_image_store() -> None:
                 updated_at REAL NOT NULL
             )
         """)
+        # 研究配图是独立的任务域：不复用 Image Studio 的批次记录，
+        # 但生成后的二进制资产仍可由 image_generation_assets 统一托管。
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS research_figure_jobs (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                report_version TEXT NOT NULL,
+                report_hash TEXT NOT NULL,
+                report_text TEXT,
+                policy TEXT NOT NULL,
+                max_images INTEGER NOT NULL,
+                context_mode TEXT NOT NULL,
+                target_ordinal INTEGER,
+                status TEXT NOT NULL,
+                progress INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                created_at REAL NOT NULL,
+                completed_at REAL
+            )
+        """)
+        job_columns = {row[1] for row in connection.execute("PRAGMA table_info(research_figure_jobs)").fetchall()}
+        if "report_text" not in job_columns:
+            connection.execute("ALTER TABLE research_figure_jobs ADD COLUMN report_text TEXT")
+        if "target_ordinal" not in job_columns:
+            connection.execute("ALTER TABLE research_figure_jobs ADD COLUMN target_ordinal INTEGER")
+        connection.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_research_figure_job_dedupe
+            ON research_figure_jobs(session_id, report_hash, policy)
+        """)
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS research_figures (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                session_id TEXT,
+                report_version TEXT NOT NULL,
+                ordinal INTEGER NOT NULL,
+                section_title TEXT NOT NULL,
+                figure_type TEXT NOT NULL,
+                caption TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                context_before TEXT NOT NULL,
+                context_after TEXT,
+                status TEXT NOT NULL,
+                model TEXT,
+                asset_id TEXT,
+                image_url TEXT,
+                error_message TEXT,
+                created_at REAL NOT NULL,
+                completed_at REAL,
+                FOREIGN KEY(job_id) REFERENCES research_figure_jobs(id)
+            )
+        """)
+        connection.execute("""
+            CREATE INDEX IF NOT EXISTS idx_research_figures_job
+            ON research_figures(job_id, ordinal)
+        """)
+        figure_columns = {row[1] for row in connection.execute("PRAGMA table_info(research_figures)").fetchall()}
+        if "batch_index" not in figure_columns:
+            connection.execute("ALTER TABLE research_figures ADD COLUMN batch_index INTEGER NOT NULL DEFAULT 0")
+        if "batch_title" not in figure_columns:
+            connection.execute("ALTER TABLE research_figures ADD COLUMN batch_title TEXT")
         connection.commit()
 
 
@@ -331,6 +396,19 @@ video_task_monitor = VideoTaskMonitor(
     video_job_repository,
     _build_video_providers(),
     asset_store=video_asset_store,
+    reference_assets=video_reference_assets,
+)
+visual_workflow_executor = VisualWorkflowExecutor(
+    visual_workflow_repository,
+    video_task_monitor.providers,
+    image_provider=HttpImageProvider({
+        "qwen": model_settings_store.load("qwen").api_key or os.getenv("DASHSCOPE_API_KEY", ""),
+        "zhipu": model_settings_store.load("glm").api_key or os.getenv("ZHIPU_API_KEY", ""),
+    }, qwen_base_url=os.getenv("DASHSCOPE_IMAGE_BASE_URL", "https://dashscope.aliyuncs.com"), zhipu_base_url=os.getenv("ZHIPU_IMAGE_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")),
+    vision_provider=HttpVisionProvider({
+        "qwen": {"api_key": model_settings_store.load("qwen").api_key or os.getenv("DASHSCOPE_API_KEY", ""), "base_url": model_settings_store.load("qwen").base_url, "model": "qwen3.7-flash"},
+        "zhipu": {"api_key": model_settings_store.load("glm").api_key or os.getenv("ZHIPU_API_KEY", ""), "base_url": model_settings_store.load("glm").base_url, "model": "glm-5v-turbo"},
+    }),
     reference_assets=video_reference_assets,
 )
 code_project_store = CodeProjectStore(SESSION_DB_PATH)
@@ -1757,16 +1835,100 @@ def resolve_plan_agent(
     return DEFAULT_PLAN_AGENT
 
 
+def _json_object_candidates(text: str) -> List[str]:
+    """Return balanced object candidates while ignoring braces inside strings."""
+    candidates: List[str] = []
+    starts: List[int] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if char == "\\" and in_string and not escaped:
+            escaped = True
+            continue
+        if char == '"' and not escaped:
+            in_string = not in_string
+        escaped = False
+        if in_string:
+            continue
+        if char == "{":
+            starts.append(index)
+        elif char == "}" and starts:
+            start = starts.pop()
+            candidates.append(text[start:index + 1])
+    # Prefer the largest candidate: it is normally the complete plan object.
+    return sorted(candidates, key=len, reverse=True)
+
+
+def _repair_json_string_quotes(value: str) -> str:
+    """Escape likely inner quotes emitted by GLM inside a JSON string value.
+
+    A quote followed by JSON punctuation closes a string; other quotes are
+    treated as prose and escaped. Existing backslash escapes are preserved.
+    """
+    output: List[str] = []
+    in_string = False
+    escaped = False
+    for index, char in enumerate(value):
+        if char == "\\" and in_string and not escaped:
+            output.append(char)
+            escaped = True
+            continue
+        if char == '"' and not escaped:
+            if not in_string:
+                in_string = True
+                output.append(char)
+            else:
+                next_index = index + 1
+                while next_index < len(value) and value[next_index].isspace():
+                    next_index += 1
+                next_char = value[next_index] if next_index < len(value) else ""
+                if next_char in {",", "}", "]", ":"}:
+                    in_string = False
+                    output.append(char)
+                else:
+                    output.append("\\\"")
+            escaped = False
+            continue
+        output.append(char)
+        escaped = False
+    return "".join(output)
+
+
+def _parse_json_candidate(candidate: str) -> Dict[str, Any]:
+    normalized = candidate.strip().replace("\ufeff", "")
+    normalized = re.sub(r",\s*([}\]])", r"\1", normalized)
+    attempts = [normalized, _repair_json_string_quotes(normalized)]
+    last_error: Optional[Exception] = None
+    for attempt in attempts:
+        try:
+            parsed = json.loads(attempt)
+            if isinstance(parsed, dict):
+                return parsed
+            raise ValueError("模型响应必须是 JSON 对象")
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+    raise ValueError(str(last_error) if last_error else "JSON 解析失败")
+
+
 def extract_json_object(text: str) -> Dict[str, Any]:
-    """Extract one JSON object from an LLM response, including fenced output."""
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError("模型响应中未找到 JSON 对象")
-    parsed = json.loads(text[start:end + 1])
-    if not isinstance(parsed, dict):
-        raise ValueError("模型响应必须是 JSON 对象")
-    return parsed
+    """Extract one JSON object from noisy/fenced, mildly malformed LLM output."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("模型响应为空，未找到 JSON 对象")
+    cleaned = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("```", "").strip()
+    candidates = _json_object_candidates(cleaned)
+    if not candidates:
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end >= start:
+            candidates = [cleaned[start:end + 1]]
+    errors: List[str] = []
+    for candidate in candidates:
+        try:
+            return _parse_json_candidate(candidate)
+        except ValueError as exc:
+            errors.append(str(exc))
+    raise ValueError(f"模型响应中的 JSON 无法解析: {errors[-1] if errors else '未找到 JSON 对象'}")
 
 
 def normalize_plan_tasks(
@@ -4765,7 +4927,7 @@ app.include_router(create_video_router(
     asset_root=str(VIDEO_ASSET_DIR),
     reference_assets=video_reference_assets,
 ))
-app.include_router(create_visual_workflow_router(visual_workflow_repository))
+app.include_router(create_visual_workflow_router(visual_workflow_repository, executor=visual_workflow_executor))
 
 
 # Image Studio foundation: keep model capability metadata and director routing
@@ -4862,8 +5024,16 @@ def _dashscope_image_size_for_ratio(ratio: str) -> str:
 
 
 async def _download_image(url: str, asset_id: str, batch_id: str) -> dict[str, Any]:
-    if not url.startswith("https://"):
+    parsed_url = urlparse(url)
+    hostname = (parsed_url.hostname or "").lower()
+    if parsed_url.scheme != "https" or not hostname or hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".local"):
         raise ValueError("供应商返回了不安全的图片地址")
+    try:
+        if ipaddress.ip_address(hostname).is_private or ipaddress.ip_address(hostname).is_loopback or ipaddress.ip_address(hostname).is_link_local:
+            raise ValueError("供应商返回了不安全的图片地址")
+    except ValueError as exc:
+        if "不安全" in str(exc):
+            raise
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
         response = await client.get(url)
         response.raise_for_status()
@@ -4987,6 +5157,295 @@ async def create_image_generation(request: ImageDirectRequest):
         with sqlite3.connect(SESSION_DB_PATH) as connection:
             connection.execute("UPDATE image_generation_batches SET status = ?, error_message = ? WHERE id = ?", ("failed", str(exc), batch_id)); connection.commit()
         raise HTTPException(status_code=502, detail="图片下载或供应商响应处理失败")
+
+
+# Research figure generation intentionally has a separate contract from Image Studio.
+# The report is planned locally (no extra LLM call), then small, bounded image calls
+# run in the background so the research SSE/report path never waits for media.
+class ResearchFigureJobRequest(BaseModel):
+    session_id: Optional[str] = Field(default=None, max_length=160)
+    report_version: str = Field(min_length=1, max_length=160)
+    report: str = Field(min_length=20, max_length=500_000)
+    max_images: int = Field(default=4, ge=2, le=10)
+    policy: Literal["economy", "balanced", "quality"] = "economy"
+    context_mode: Literal["preceding", "mixed"] = "mixed"
+
+
+RESEARCH_FIGURE_TASKS: dict[str, asyncio.Task] = {}
+RESEARCH_FIGURE_SEMAPHORE = asyncio.Semaphore(2)
+RESEARCH_FIGURE_MAX_IN_FLIGHT = 8
+
+
+def _research_report_hash(report: str) -> str:
+    return hashlib.sha256(report.encode("utf-8")).hexdigest()[:32]
+
+
+def _research_context(value: str, limit: int) -> str:
+    normalized = re.sub(r"\s+", " ", value).strip()
+    normalized = re.sub(r"\[\[?\d+(?:[,\-]\d+)*\]?\]", "", normalized).strip()
+    return normalized[:limit]
+
+
+def _research_figure_type(section: str, index: int) -> str:
+    if re.search(r"流程|步骤|路径|阶段|演进|架构|机制", section):
+        return "process"
+    if re.search(r"趋势|增长|变化|历年|时间|预测", section):
+        return "timeline"
+    if re.search(r"对比|差异|比较|份额|占比", section):
+        return "comparison"
+    return ("concept", "editorial", "scene")[index % 3]
+
+
+def plan_research_figures(report: str, max_images: int, context_mode: str = "mixed") -> list[dict[str, Any]]:
+    """Create 2-10 spread-out figure slots without spending a planner-model call."""
+    cleaned = re.sub(r"```[\s\S]*?```", " ", report)
+    cleaned = re.sub(r"\|[^\n]+\|", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return []
+    # Roughly one figure per 1.8k report characters, with a hard 2-10 boundary.
+    count = max(2, min(10, (len(cleaned) + 1799) // 1800, max_images))
+    raw_sections = re.split(r"(?=(?:^|\s)(?:#{1,3}\s+|第[一二三四五六七八九十百]+[章节部分]|\d+[、.]))", report, flags=re.M)
+    sections = [item.strip() for item in raw_sections if len(re.sub(r"\s+", " ", item).strip()) >= 80]
+    if not sections:
+        sections = [cleaned[i:i + 1800] for i in range(0, len(cleaned), 1800)] or [cleaned]
+    slots: list[dict[str, Any]] = []
+    for index in range(count):
+        section_index = min(len(sections) - 1, round(((index + 0.5) * len(sections)) / count - 0.5))
+        section = sections[section_index]
+        compact_section = re.sub(r"\s+", " ", section).strip()
+        heading_match = re.match(r"(?:#{1,3}\s+|第[一二三四五六七八九十百]+[章节部分]|\d+[、.])\s*([^。；\n]{2,48})", compact_section)
+        section_title = _research_context(heading_match.group(1) if heading_match else f"研究重点 {index + 1}", 48)
+        body = re.sub(r"^(?:#{1,3}\s+[^\n]+|第[一二三四五六七八九十百]+[章节部分][^\n]*|\d+[、.][^\n]*)", "", section, count=1).strip()
+        if not body:
+            body = compact_section
+        before = _research_context(body, 200)
+        after = _research_context(body[200:], 110) if context_mode == "mixed" and len(body) > 200 else ""
+        figure_type = _research_figure_type(section, index)
+        caption = f"{section_title}：{['概念关系示意', '关键场景插图', '研究过程图解'][index % 3]}"
+        prompt = (
+            f"为一篇中文研究报告生成配图，主题是“{section_title}”。"
+            f"配图类型：{figure_type}。画面用于正文插图，不要生成大段文字、数字、logo或水印；"
+            f"风格简洁、专业、信息层次清晰，适合白底报告页面。上下文：{before}"
+            + (f" 补充上下文：{after}" if after else "")
+        )
+        slots.append({
+            "ordinal": index,
+            "batch_index": section_index,
+            "batch_title": section_title,
+            "section_title": section_title,
+            "figure_type": figure_type,
+            "caption": caption,
+            "prompt": prompt,
+            "context_before": before,
+            "context_after": after or None,
+        })
+    return slots
+
+
+def _research_figure_model(policy: str) -> str:
+    # Economy defaults to the turbo endpoint; quality is opt-in and still uses the
+    # existing configured provider adapters rather than a second image API surface.
+    return {"economy": "z-image-turbo", "balanced": "qwen-image-3.0", "quality": "qwen-image-3.0-pro"}[policy]
+
+
+def _research_job_payload(job_id: str) -> dict[str, Any] | None:
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        job = connection.execute("SELECT * FROM research_figure_jobs WHERE id = ?", (job_id,)).fetchone()
+        if not job:
+            return None
+        figures = connection.execute("SELECT * FROM research_figures WHERE job_id = ? ORDER BY ordinal", (job_id,)).fetchall()
+    job_data = dict(job)
+    job_data.pop("report_text", None)
+    figure_data = [dict(figure) for figure in figures]
+    batches: dict[int, dict[str, Any]] = {}
+    for figure in figure_data:
+        batch_index = int(figure.get("batch_index") or 0)
+        batch = batches.setdefault(batch_index, {
+            "batch_index": batch_index,
+            "title": figure.get("batch_title") or figure.get("section_title") or f"研究章节 {batch_index + 1}",
+            "total": 0,
+            "completed": 0,
+            "succeeded": 0,
+            "failed": 0,
+            "status": "queued",
+        })
+        batch["total"] += 1
+        if figure.get("status") in {"succeeded", "failed"}:
+            batch["completed"] += 1
+        if figure.get("status") == "succeeded":
+            batch["succeeded"] += 1
+        elif figure.get("status") == "failed":
+            batch["failed"] += 1
+    for batch in batches.values():
+        if batch["completed"] == batch["total"]:
+            batch["status"] = "failed" if batch["failed"] == batch["total"] else "succeeded"
+        elif batch["completed"] > 0 or any(
+            figure.get("batch_index") == batch["batch_index"] and figure.get("status") == "generating"
+            for figure in figure_data
+        ):
+            batch["status"] = "generating"
+    job_data["figures"] = figure_data
+    job_data["batches"] = [batches[index] for index in sorted(batches)]
+    job_data["completed_batches"] = sum(1 for batch in batches.values() if batch["status"] in {"succeeded", "failed"})
+    job_data["total_batches"] = len(batches)
+    return job_data
+
+
+def _resume_research_figure_task(job_id: str) -> None:
+    """Requeue a persisted task after a dev-server/process restart."""
+    if job_id in RESEARCH_FIGURE_TASKS:
+        return
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        row = connection.execute("SELECT status, report_text, policy FROM research_figure_jobs WHERE id = ?", (job_id,)).fetchone()
+    if not row or row[0] not in {"queued", "generating"} or not row[1]:
+        return
+    RESEARCH_FIGURE_TASKS[job_id] = asyncio.create_task(_run_research_figure_job(job_id, row[1], row[2]))
+
+
+async def _run_research_figure_job(job_id: str, report: str, policy: str) -> None:
+    try:
+        with sqlite3.connect(SESSION_DB_PATH) as connection:
+            row = connection.execute("SELECT session_id, report_version, max_images, context_mode, target_ordinal FROM research_figure_jobs WHERE id = ?", (job_id,)).fetchone()
+        if not row:
+            return
+        session_id, report_version, max_images, context_mode, target_ordinal = row
+        slots = plan_research_figures(report, int(max_images), str(context_mode))
+        if target_ordinal is not None:
+            slots = [slot for slot in slots if slot["ordinal"] == int(target_ordinal)]
+        model = _research_figure_model(policy)
+        now = time.time()
+        with sqlite3.connect(SESSION_DB_PATH) as connection:
+            for slot in slots:
+                connection.execute(
+                    "INSERT OR IGNORE INTO research_figures (id, job_id, session_id, report_version, ordinal, batch_index, batch_title, section_title, figure_type, caption, prompt, context_before, context_after, status, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), job_id, session_id, report_version, slot["ordinal"], slot["batch_index"], slot["batch_title"], slot["section_title"], slot["figure_type"], slot["caption"], slot["prompt"], slot["context_before"], slot["context_after"], "queued", model, now),
+                )
+            connection.execute("UPDATE research_figure_jobs SET status = ?, progress = ? WHERE id = ?", ("generating", 0, job_id))
+            connection.commit()
+        async def generate_one(index: int, slot: dict[str, Any]) -> None:
+            with sqlite3.connect(SESSION_DB_PATH) as connection:
+                current = connection.execute("SELECT id, status FROM research_figures WHERE job_id = ? AND ordinal = ?", (job_id, slot["ordinal"])).fetchone()
+                job_status = connection.execute("SELECT status FROM research_figure_jobs WHERE id = ?", (job_id,)).fetchone()
+            if not current or (job_status and job_status[0] == "cancelled"):
+                return
+            figure_id, current_status = current
+            if current_status == "succeeded":
+                return
+            with sqlite3.connect(SESSION_DB_PATH) as connection:
+                connection.execute("UPDATE research_figures SET status = ? WHERE id = ?", ("generating", figure_id)); connection.commit()
+            try:
+                async with RESEARCH_FIGURE_SEMAPHORE:
+                    if model == "z-image-turbo":
+                        remote_urls = await _call_dashscope_multimodal_image(model, slot["prompt"][:900], 1, "4:3", prompt_extend=False)
+                    else:
+                        remote_urls = await _call_qwen_image(model, slot["prompt"], 1, "4:3")
+                if not remote_urls:
+                    raise RuntimeError("图片模型未返回图片地址")
+                asset_id = str(uuid.uuid4())
+                asset = await _download_image(remote_urls[0], asset_id, f"research-{job_id}")
+                with sqlite3.connect(SESSION_DB_PATH) as connection:
+                    connection.execute("INSERT INTO image_generation_assets (id, batch_id, local_path, mime_type, created_at) VALUES (?, ?, ?, ?, ?)", (asset_id, job_id, asset["local_path"], asset["mime_type"], time.time()))
+                    connection.execute("UPDATE research_figures SET status = ?, asset_id = ?, image_url = ?, completed_at = ? WHERE id = ?", ("succeeded", asset_id, asset["url"], time.time(), figure_id))
+                    connection.execute("UPDATE research_figure_jobs SET progress = progress + 1 WHERE id = ?", (job_id,)); connection.commit()
+            except Exception as exc:
+                logger.warning("研究配图 %s 失败: %s", figure_id, exc)
+                with sqlite3.connect(SESSION_DB_PATH) as connection:
+                    connection.execute("UPDATE research_figures SET status = ?, error_message = ?, completed_at = ? WHERE id = ?", ("failed", str(getattr(exc, "detail", exc)), time.time(), figure_id)); connection.execute("UPDATE research_figure_jobs SET progress = progress + 1 WHERE id = ?", (job_id,)); connection.commit()
+
+        # Run chapter batches as independent units. The global semaphore still
+        # limits provider pressure, while each completed chapter becomes
+        # visible through the job payload immediately instead of waiting for
+        # every chapter in the report.
+        grouped_slots: dict[int, list[dict[str, Any]]] = {}
+        for slot in slots:
+            grouped_slots.setdefault(int(slot["batch_index"]), []).append(slot)
+
+        async def generate_batch(batch_slots: list[dict[str, Any]]) -> None:
+            await asyncio.gather(*(generate_one(index, slot) for index, slot in enumerate(batch_slots)))
+
+        await asyncio.gather(*(generate_batch(batch_slots) for batch_slots in grouped_slots.values()))
+        with sqlite3.connect(SESSION_DB_PATH) as connection:
+            success_count = connection.execute("SELECT COUNT(*) FROM research_figures WHERE job_id = ? AND status = 'succeeded'", (job_id,)).fetchone()[0]
+            cancelled = connection.execute("SELECT status FROM research_figure_jobs WHERE id = ?", (job_id,)).fetchone()
+            final_status = "cancelled" if cancelled and cancelled[0] == "cancelled" else ("succeeded" if success_count else "failed")
+            connection.execute("UPDATE research_figure_jobs SET status = ?, completed_at = ?, error_message = ? WHERE id = ?", (final_status, time.time(), None if success_count else "没有图片生成成功", job_id)); connection.commit()
+    except Exception as exc:
+        logger.exception("研究配图任务 %s 崩溃", job_id)
+        with sqlite3.connect(SESSION_DB_PATH) as connection:
+            connection.execute("UPDATE research_figure_jobs SET status = ?, error_message = ?, completed_at = ? WHERE id = ?", ("failed", str(exc), time.time(), job_id)); connection.commit()
+    finally:
+        RESEARCH_FIGURE_TASKS.pop(job_id, None)
+
+
+@app.post("/api/research/figures/jobs")
+@app.post("/api/plan/figures/jobs")
+async def create_research_figure_job(request: ResearchFigureJobRequest):
+    report_hash = _research_report_hash(request.report)
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        connection.row_factory = sqlite3.Row
+        existing = connection.execute("SELECT id FROM research_figure_jobs WHERE session_id IS ? AND report_hash = ? AND policy = ? ORDER BY created_at DESC LIMIT 1", (request.session_id, report_hash, request.policy)).fetchone()
+    if existing:
+        payload = _research_job_payload(existing["id"])
+        if payload and payload["status"] in {"queued", "generating", "succeeded"}:
+            return payload
+    job_id = str(uuid.uuid4())
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        connection.execute("INSERT INTO research_figure_jobs (id, session_id, report_version, report_hash, report_text, policy, max_images, context_mode, target_ordinal, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (job_id, request.session_id, request.report_version, report_hash, request.report, request.policy, request.max_images, request.context_mode, None, "queued", time.time())); connection.commit()
+    if len(RESEARCH_FIGURE_TASKS) >= RESEARCH_FIGURE_MAX_IN_FLIGHT:
+        with sqlite3.connect(SESSION_DB_PATH) as connection:
+            connection.execute("UPDATE research_figure_jobs SET status = ?, error_message = ?, completed_at = ? WHERE id = ?", ("failed", "当前研究配图任务较多，请稍后重试", time.time(), job_id)); connection.commit()
+        raise HTTPException(status_code=429, detail="当前研究配图任务较多，请稍后重试")
+    RESEARCH_FIGURE_TASKS[job_id] = asyncio.create_task(_run_research_figure_job(job_id, request.report, request.policy))
+    return _research_job_payload(job_id)
+
+
+@app.get("/api/research/figures/jobs/{job_id}")
+@app.get("/api/plan/figures/jobs/{job_id}")
+async def get_research_figure_job(job_id: str):
+    payload = _research_job_payload(job_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="研究配图任务不存在")
+    if payload["status"] in {"queued", "generating"}:
+        _resume_research_figure_task(job_id)
+    return payload
+
+
+@app.post("/api/research/figures/jobs/{job_id}/cancel")
+async def cancel_research_figure_job(job_id: str):
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        changed = connection.execute("UPDATE research_figure_jobs SET status = ?, completed_at = ? WHERE id = ? AND status IN ('queued', 'generating')", ("cancelled", time.time(), job_id)).rowcount; connection.commit()
+    if not changed and not _research_job_payload(job_id):
+        raise HTTPException(status_code=404, detail="研究配图任务不存在")
+    return _research_job_payload(job_id)
+
+
+@app.post("/api/research/figures/{figure_id}/retry")
+@app.post("/api/plan/figures/{figure_id}/retry")
+async def retry_research_figure(figure_id: str):
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        row = connection.execute(
+            "SELECT f.ordinal, j.session_id, j.report_version, j.report_hash, j.report_text, j.policy, j.max_images, j.context_mode "
+            "FROM research_figures f JOIN research_figure_jobs j ON j.id = f.job_id WHERE f.id = ?",
+            (figure_id,),
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="研究配图不存在")
+    ordinal, session_id, report_version, report_hash, report_text, policy, max_images, context_mode = row
+    if not report_text:
+        raise HTTPException(status_code=409, detail="该配图任务没有可恢复的报告正文")
+    if len(RESEARCH_FIGURE_TASKS) >= RESEARCH_FIGURE_MAX_IN_FLIGHT:
+        raise HTTPException(status_code=429, detail="当前研究配图任务较多，请稍后重试")
+    job_id = str(uuid.uuid4())
+    with sqlite3.connect(SESSION_DB_PATH) as connection:
+        connection.execute(
+            "INSERT INTO research_figure_jobs (id, session_id, report_version, report_hash, report_text, policy, max_images, context_mode, target_ordinal, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (job_id, session_id, f"{report_version}:retry:{ordinal}:{job_id[:8]}", report_hash, report_text, policy, max_images, context_mode, ordinal, "queued", time.time()),
+        )
+        connection.commit()
+    RESEARCH_FIGURE_TASKS[job_id] = asyncio.create_task(_run_research_figure_job(job_id, report_text, policy))
+    return _research_job_payload(job_id)
 
 
 @app.get("/api/image/assets/{asset_id}")
@@ -5938,7 +6397,41 @@ async def create_session(request: CreateSessionRequest):
 @app.get("/api/sessions/{session_id}/history")
 async def get_session_history(session_id: str):
     try:
-        return session_store.get_history(session_id)
+        history = session_store.get_history(session_id)
+        snapshot = history.get("snapshot") or {}
+        # Repair snapshots written by the old Qwen feedback flow. That flow
+        # appended the original query again when submitting the feedback
+        # answer, so an already-recovered snapshot may contain two adjacent
+        # identical user cards even though only one turn was submitted.
+        snapshot_messages = snapshot.get("messages")
+        if isinstance(snapshot_messages, list):
+            normalized_messages = session_store.dedupe_consecutive_user_messages(snapshot_messages)
+            if len(normalized_messages) != len(snapshot_messages):
+                snapshot = {**snapshot, "messages": normalized_messages}
+                session_store.save_snapshot(session_id, snapshot)
+                history["snapshot"] = snapshot
+        # Older research sessions could persist webDocs/researchChunks while
+        # racing the message snapshot, leaving messages empty. Rehydrate from
+        # the append-only ledger and repair the snapshot for future opens.
+        if not snapshot.get("messages"):
+            recovered_messages = session_store.recover_messages_from_ledger(session_id)
+            if recovered_messages:
+                # Migrate all legacy top-level research state onto the
+                # recovered assistant turn so the process/source timeline is
+                # not lost when the old client saved fields separately.
+                legacy_fields = {
+                    field: snapshot[field]
+                    for field in ("nodeProgress", "webDocs", "researchChunks", "planProgress")
+                    if snapshot.get(field)
+                }
+                if legacy_fields:
+                    last_assistant = next((index for index in range(len(recovered_messages) - 1, -1, -1) if recovered_messages[index].get("role") == "assistant"), -1)
+                    if last_assistant >= 0:
+                        recovered_messages[last_assistant].update(legacy_fields)
+                snapshot = {**snapshot, "messages": recovered_messages}
+                session_store.save_snapshot(session_id, snapshot)
+                history["snapshot"] = snapshot
+        return history
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail="会话不存在。")
 
@@ -6942,10 +7435,14 @@ async def generate_qwen_deep_research_events(
     def sse_format(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
-    # ---- 统一记忆：记录用户调研任务（best-effort）----
+    # ---- 统一记忆：记录本次新增的用户消息（best-effort）----
+    # Step 2 carries the original query again for the model's multi-turn
+    # context, but it is not a new user turn. Persist only the feedback answer
+    # on that call; otherwise history recovery renders the original question
+    # twice.
     if session_id:
         try:
-            memory_engine.push_chat_turn(session_id, "user", query)
+            memory_engine.push_chat_turn(session_id, "user", feedback_answer or query)
         except Exception:
             logger.exception("[memory] qwen research user 落账失败 sid=%s", session_id)
 
@@ -6997,6 +7494,17 @@ async def generate_qwen_deep_research_events(
         feedback_content = ""
         async for chunk in _call_dashscope(messages, enable_fb=True):
             feedback_content += chunk.get("content", "")
+
+        if session_id and feedback_content.strip():
+            try:
+                memory_engine.push_chat_turn(
+                    session_id,
+                    "assistant",
+                    feedback_content,
+                    message_type="qwen_feedback",
+                )
+            except Exception:
+                logger.exception("[memory] qwen feedback 落账失败 sid=%s", session_id)
 
         # Why: 反问内容作为内嵌卡片渲染，不推送 token 事件（避免被当作普通消息显示）。
         # 前端收到 qwen_feedback 后在对话流中插入一条带输入框的 assistant 消息。

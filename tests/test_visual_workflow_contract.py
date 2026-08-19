@@ -29,6 +29,9 @@ def test_registry_exposes_initial_multimodal_node_contracts():
     }
     assert get_node_definition("image_to_video").input_port("first_frame").data_type == "image.asset"
     assert get_node_definition("reference_to_video").input_port("references").cardinality == "many"
+    assert get_node_definition("reference_to_video").input_port("references").data_type == "media.asset"
+    assert get_node_definition("image_generate").input_port("references").cardinality == "many"
+    assert get_node_definition("text_to_video").input_port("references").data_type == "media.asset"
 
 
 def test_document_accepts_camel_case_wire_fields_and_round_trips_them():
@@ -67,6 +70,26 @@ def test_validator_allows_same_type_connection_but_rejects_mismatched_types():
 
     assert validate_workflow(valid) == []
     assert any(issue.code == "PORT_TYPE_MISMATCH" for issue in validate_workflow(invalid))
+
+
+def test_validator_allows_images_and_videos_to_feed_media_reference_port():
+    document = WorkflowDocument(
+        workflow_id="wf-1",
+        name="mixed-reference",
+        nodes=[
+            node("image", "image_input"),
+            node("video", "video_input"),
+            node("prompt", "prompt_input"),
+            node("generate", "reference_to_video"),
+        ],
+        edges=[
+            edge("image-ref", "image", "image", "generate", "references"),
+            edge("video-ref", "video", "video", "generate", "references"),
+            edge("prompt-ref", "prompt", "prompt", "generate", "prompt"),
+        ],
+    )
+
+    assert validate_workflow(document) == []
 
 
 def test_validator_rejects_duplicate_edges_and_cycles():

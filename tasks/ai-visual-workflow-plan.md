@@ -138,6 +138,7 @@ type PortDataType =
   | 'prompt.text'
   | 'image.asset'
   | 'video.asset'
+  | 'media.asset'
   | 'audio.url'
   | 'image.asset[]'
   | 'video.asset[]';
@@ -155,8 +156,9 @@ interface PortSchema {
 
 - `image.asset → image.asset`：允许。
 - `prompt.text → prompt.text`：允许。
+- `image.asset/video.asset → media.asset`：允许，用于混合参考媒体输入。
 - `image.asset → video.asset`：禁止。
-- 多个 `image.asset` 连接到 `image.asset[]`：允许，但受端口 `maxConnections` 限制。
+- 任意同类型端口支持多条连接，输入端和输出端都允许 fan-in/fan-out；只禁止重复边、自连、类型不匹配和成环。
 
 ### 5.2 工作流文档
 
@@ -225,7 +227,7 @@ interface NodeDefinition {
 
 ### 图片节点
 
-- `image_generate`：文本生成图片，复用现有图片模型矩阵。
+- `image_generate`：文本生成图片，复用现有图片模型矩阵；支持必需提示词与多张可选参考图。
 - `image_edit`：提示词 + 参考图生成编辑结果。
 - `image_compare`：接收多个图片资产，在 UI 中并排预览，不调用模型。
 
@@ -234,7 +236,7 @@ interface NodeDefinition {
 - `text_to_video`：提示词 → 视频。
 - `image_to_video`：提示词 + 首帧图片 + 可选音频 URL → 视频。
 - `start_end_video`：提示词 + 首帧 + 尾帧 → 视频。
-- `reference_to_video`：提示词 + 参考视频数组 → 视频。
+- `reference_to_video`：提示词 + 图片/视频混合参考数组 → 视频；每个参考输入都可通过 `referencePurpose` 指定动作、主体或风格意图。
 
 视频节点必须调用已有 `VideoGenerationRequest`、`VideoJobRepository` 和 `VideoTaskMonitor`，不能复制一套供应商轮询代码。
 

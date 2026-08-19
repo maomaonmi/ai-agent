@@ -6,7 +6,7 @@ import json
 import httpx
 import pytest
 
-from video_engine import QwenVideoProvider, VideoGenerationRequest
+from video_engine import QwenVideoProvider, VideoGenerationRequest, ZhipuVideoProvider
 from video_engine import ProviderSubmission, VideoJobRepository, VideoTaskStatus
 from video_monitor import VideoTaskMonitor
 from video_reference import ReferenceAssetService, ReferenceAssetUploadRequest
@@ -78,6 +78,37 @@ def test_qwen_wan27_reference_payload_uses_media_alias_contract():
     assert body["parameters"]["ratio"] == "16:9"
 
 
+def test_wan30_reference_payload_accepts_mixed_image_and_video_media():
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content)
+        return httpx.Response(200, json={"request_id": "r2v-30", "output": {"task_id": "q-r2v-30", "task_status": "PENDING"}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = QwenVideoProvider(api_key="test-key", client=client, base_url="https://dashscope.test/api/v1")
+    request = VideoGenerationRequest(
+        mode="reference_to_video",
+        prompt="保留动作并替换场景",
+        model="wan3.0-video",
+        ratio="16:9",
+        duration=5,
+        resolution="720P",
+        references=[
+            {"assetId": "image-1", "mediaKind": "reference_image", "purpose": "subject", "url": "https://oss.test/a.png"},
+            {"assetId": "video-1", "mediaKind": "reference_video", "purpose": "motion", "url": "https://oss.test/b.mp4"},
+        ],
+    )
+    asyncio.run(provider.submit(request))
+    asyncio.run(client.aclose())
+
+    assert captured["json"]["model"] == "wan3.0-video"
+    assert captured["json"]["input"]["media"] == [
+        {"type": "reference_image", "url": "https://oss.test/a.png"},
+        {"type": "reference_video", "url": "https://oss.test/b.mp4"},
+    ]
+
+
 def test_qwen_wan26_reference_payload_uses_reference_urls_and_size():
     captured = {}
 
@@ -103,6 +134,36 @@ def test_qwen_wan26_reference_payload_uses_reference_urls_and_size():
 def test_wan26_r2v_regular_rejects_silent_output():
     with pytest.raises(ValueError, match="静音"):
         _request("wan2.6-r2v", audio=False)
+
+
+def test_vidu2_reference_payload_uses_image_url_array():
+    captured = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content)
+        return httpx.Response(200, json={"id": "vidu-r2v-1", "task_status": "PROCESSING"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = ZhipuVideoProvider(api_key="test-key", client=client, base_url="https://zhipu.test/api/paas/v4")
+    request = VideoGenerationRequest(
+        mode="reference_to_video",
+        prompt="参考图片中的角色在咖啡店里走动",
+        model="vidu2-reference",
+        ratio="16:9",
+        duration=4,
+        resolution="720P",
+        references=[
+            {"assetId": "image-1", "mediaKind": "reference_image", "purpose": "subject", "url": "https://oss.test/a.png"},
+            {"assetId": "image-2", "mediaKind": "reference_image", "purpose": "style", "url": "https://oss.test/b.png"},
+        ],
+    )
+    asyncio.run(provider.submit(request))
+    asyncio.run(client.aclose())
+
+    assert captured["json"]["model"] == "vidu2-reference"
+    assert captured["json"]["image_url"] == ["https://oss.test/a.png", "https://oss.test/b.png"]
+    assert captured["json"]["duration"] == 4
+    assert captured["json"]["aspect_ratio"] == "16:9"
 
 
 def test_monitor_resolves_ready_asset_to_short_lived_provider_url(tmp_path):

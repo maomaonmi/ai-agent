@@ -285,6 +285,59 @@ class SessionStore:
         snapshot = json.loads(row["snapshot_json"]) if row else {}
         return {"session": session.to_dict(), "snapshot": snapshot}
 
+    def recover_messages_from_ledger(self, session_id: str) -> list[dict[str, Any]]:
+        """Recover chat turns when an older client saved only top-level state."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT event_type, event_data FROM raw_event_ledger WHERE session_id = ? ORDER BY event_id",
+                (session_id,),
+            ).fetchall()
+        messages: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                payload = json.loads(row["event_data"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if row["event_type"] == "user_input" and str(payload.get("text", "")).strip():
+                messages.append({"role": "user", "content": str(payload["text"])})
+            elif row["event_type"] == "ai_reply" and str(payload.get("text", "")).strip():
+                if payload.get("type") == "qwen_feedback":
+                    messages.append({
+                        "role": "assistant",
+                        "content": "",
+                        "type": "qwen_feedback",
+                        "feedbackQuestion": str(payload["text"]),
+                    })
+                else:
+                    messages.append({"role": "assistant", "content": str(payload["text"])})
+        return self.dedupe_consecutive_user_messages(messages)
+
+    @staticmethod
+    def dedupe_consecutive_user_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop an accidental repeated user turn without merging real turns.
+
+        Some research engines call their streaming endpoint twice (the second
+        call carries the feedback answer). Older versions wrote the original
+        query to the memory ledger on both calls. Only identical user turns
+        with no assistant message between them are safe to collapse; repeated
+        questions in separate turns remain intact.
+        """
+        normalized: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            content = str(message.get("content", "") or "")
+            if (
+                role == "user"
+                and normalized
+                and normalized[-1].get("role") == "user"
+                and str(normalized[-1].get("content", "") or "").strip() == content.strip()
+            ):
+                continue
+            normalized.append(message)
+        return normalized
+
     def delete(self, session_id: str) -> None:
         with self._connection() as connection:
             cursor = connection.execute(

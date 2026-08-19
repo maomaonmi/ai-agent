@@ -11,6 +11,7 @@ PortDataType = Literal[
     "prompt.text",
     "image.asset",
     "video.asset",
+    "media.asset",
     "audio.url",
     "image.asset[]",
     "video.asset[]",
@@ -39,7 +40,7 @@ class PortSchema(BaseModel):
     direction: Literal["input", "output"]
     data_type: PortDataType = Field(alias="dataType")
     required: bool = False
-    cardinality: Literal["one", "many"] = "one"
+    cardinality: Literal["one", "many"] = "many"
     max_connections: int | None = Field(default=None, alias="maxConnections", ge=1, le=32)
 
 
@@ -87,4 +88,3 @@ class ValidationIssue(BaseModel):
     node_id: str | None = Field(default=None, alias="nodeId")
     port_id: str | None = Field(default=None, alias="portId")
     edge_id: str | None = Field(default=None, alias="edgeId")
-

@@ -24,6 +24,21 @@ class PlanExecuteContractTests(unittest.TestCase):
         parsed = extract_json_object('```json\n{"tasks": [{"title": "调研市场"}]}\n```')
         self.assertEqual(parsed["tasks"][0]["title"], "调研市场")
 
+    def test_extracts_json_after_glm_preface_and_trailing_comma(self):
+        parsed = extract_json_object(
+            '这是结构化计划：\n```json\n'
+            '{"tasks": [{"title": "梳理目标", "description": "明确约束",}],}\n'
+            '```\n以上。'
+        )
+        self.assertEqual(parsed["tasks"][0]["title"], "梳理目标")
+
+    def test_repairs_common_glm_unescaped_quotes_inside_string_values(self):
+        parsed = extract_json_object(
+            '{"tasks":[{"title":"讨论光速不变","description":"解释 "光速不变" '
+            '与因果律的关系"}]}'
+        )
+        self.assertIn('光速不变', parsed["tasks"][0]["description"])
+
     def test_normalizes_and_limits_untrusted_tasks(self):
         raw_tasks = [
             {

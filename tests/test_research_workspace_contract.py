@@ -182,3 +182,72 @@ def test_research_chat_renders_a_document_card_without_discarding_report_state()
     assert "isResearchDocument" in chat
     assert "persistResearchMessages" in chat
     assert "researchChunks" in chat
+
+
+def test_research_figures_have_a_dedicated_backend_job_contract():
+    backend = Path("main.py").read_text(encoding="utf-8")
+    assert "research_figure_jobs" in backend
+    assert "research_figures" in backend
+    assert "/api/research/figures/jobs" in backend
+    assert "/cancel" in backend
+    assert "/retry" in backend
+    assert "target_ordinal" in backend
+    assert "max_images" in backend
+    assert "context_before" in backend
+    assert "RESEARCH_FIGURE_SEMAPHORE" in backend
+    assert "report_text" in backend
+    assert "batch_index" in backend
+    assert "batch_title" in backend
+    assert 'job_data["batches"]' in backend
+    assert "generate_batch" in backend
+
+
+def test_research_figures_are_persisted_on_the_report_message_and_rendered():
+    api = Path("frontend/ai-agent/src/lib/api.ts").read_text(encoding="utf-8")
+    chat = CHAT.read_text(encoding="utf-8")
+    workspace = (ROOT / "ResearchWorkspace.tsx").read_text(encoding="utf-8")
+    document = (ROOT / "report/DeepResearchDocument.tsx").read_text(encoding="utf-8")
+    assert "ResearchFigure" in api
+    assert "createResearchFigureJob" in api
+    assert "researchFigures" in api
+    assert "researchFigures" in chat
+    assert "researchFigures" in workspace
+    assert "data-research-figure" in document
+    assert "createFigurePlaceholders" in workspace
+    assert "正在生成研究配图" in (ROOT / "ResearchDocumentCard.tsx").read_text(encoding="utf-8")
+    assert "animate-spin" in document
+    assert "onError" in document
+    assert "retryResearchFigure" in workspace
+    assert "allImagesReady" in workspace
+    assert "figureBatches" in workspace
+    assert "配图按章节分批生成" in (ROOT / "report/ResearchReportPane.tsx").read_text(encoding="utf-8")
+    assert "isUsableJobId" in workspace
+    assert "job_id: 'pending'" in workspace
+    assert "containsOnlyPendingResearchFigures" in chat
+    assert "buildHistoricalResearchChain" in chat
+    assert "历史链路摘要" in (Path("frontend/ai-agent/src/components/NodeProgressPanel.tsx")).read_text(encoding="utf-8")
+
+
+def test_research_figures_have_a_deadline_and_user_retry_path():
+    workspace = (ROOT / "ResearchWorkspace.tsx").read_text(encoding="utf-8")
+    document = (ROOT / "report/DeepResearchDocument.tsx").read_text(encoding="utf-8")
+    pane = (ROOT / "report/ResearchReportPane.tsx").read_text(encoding="utf-8")
+    assert "FIGURE_TIMEOUT_MS = 30_000" in workspace
+    assert "图片生成超过 30 秒，可点击重试" in workspace
+    assert "重试配图" in document
+    assert "onFigureRetry" in document
+    assert "onFigureRetry" in pane
+
+
+def test_research_figure_planner_keeps_count_and_context_bounds():
+    backend = Path("main.py").read_text(encoding="utf-8")
+    module = ast.parse(backend)
+    names = {"plan_research_figures", "_research_context", "_research_figure_type"}
+    functions = [node for node in module.body if isinstance(node, ast.FunctionDef) and node.name in names]
+    namespace = {"re": __import__("re"), "Any": object}
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "main.py", "exec"), namespace)
+    plan = namespace["plan_research_figures"]("\n".join(["# 研究章节", "这是一段用于验证研究配图上下文裁剪和布局分散的正文。" * 80]), 10)
+    assert 2 <= len(plan) <= 10
+    assert all(0 < len(item["context_before"]) <= 200 for item in plan)
+    assert all(len(item["context_after"] or "") <= 110 for item in plan)
+    assert all("batch_index" in item and "batch_title" in item for item in plan)

@@ -1,5 +1,5 @@
 {
-  "active_provider": "deepseek",
+  "active_provider": "glm",
   "profiles": {
     "glm": {
       "provider": "glm",
@@ -17,7 +17,7 @@
       "text_model_id": "glm-5",
       "vision_model_id": "glm-5v-turbo",
       "thinking_enabled": true,
-      "reasoning_effort": "low",
+      "reasoning_effort": "high",
       "thinking_budget": null,
       "temperature": 1.0,
       "max_tokens": 16000
@@ -47,9 +47,9 @@
       "provider": "qwen",
       "api_format": "openai_chat_completions",
       "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-      "model_id": "qwen3.7-flash",
+      "model_id": "qwen3.7-plus",
       "api_key": "sk-ws-H.ERHXXRD.DOTL.MEUCIQCnaGvFLd41q4_rgFNsw1JOHsv1zaD1JVnVV8IWUL4lhQIgPSFrKlP9tnesvFR_IvUcwE4_xVKAFmPAs8XIYz3jGO0",
-      "display_name": "千问 Qwen3.7 Flash · 性价比",
+      "display_name": "千问 Qwen3.7 Plus · 均衡",
       "model_family": "default",
       "input_context": 256000,
       "output_context": 16000,
@@ -60,7 +60,7 @@
       "vision_model_id": "glm-5v-turbo",
       "thinking_enabled": true,
       "reasoning_effort": "high",
-      "thinking_budget": 2000,
+      "thinking_budget": 8000,
       "temperature": 1.0,
       "max_tokens": 16000
     }

@@ -8,6 +8,14 @@ from visual_workflow_models import ValidationIssue, WorkflowDocument
 from visual_workflow_registry import NodeDefinition, get_node_definition
 
 
+def _ports_compatible(source_type: str, target_type: str) -> bool:
+    """Allow image/video artifacts to enter a union media port only."""
+
+    return source_type == target_type or (
+        target_type == "media.asset" and source_type in {"image.asset", "video.asset"}
+    )
+
+
 def validate_workflow(document: WorkflowDocument, *, require_inputs: bool = False) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     nodes_by_id: dict[str, object] = {}
@@ -33,7 +41,7 @@ def validate_workflow(document: WorkflowDocument, *, require_inputs: bool = Fals
     predecessor_map: dict[str, set[str]] = {node_id: set() for node_id in nodes_by_id}
     edge_ids: set[str] = set()
     edge_keys: set[tuple[str, str, str, str]] = set()
-    incoming_counts: dict[tuple[str, str], int] = {}
+    connected_input_ports: set[tuple[str, str]] = set()
 
     for edge in document.edges:
         if edge.id in edge_ids:
@@ -64,7 +72,7 @@ def validate_workflow(document: WorkflowDocument, *, require_inputs: bool = Fals
         except KeyError:
             issues.append(ValidationIssue(code="TARGET_PORT_NOT_FOUND", message="目标输入端口不存在", nodeId=edge.target_node_id, portId=edge.target_port_id, edgeId=edge.id))
             continue
-        if source_port.data_type != target_port.data_type:
+        if not _ports_compatible(source_port.data_type, target_port.data_type):
             issues.append(ValidationIssue(
                 code="PORT_TYPE_MISMATCH",
                 message=f"{source_port.data_type} 不能连接到 {target_port.data_type}",
@@ -72,17 +80,7 @@ def validate_workflow(document: WorkflowDocument, *, require_inputs: bool = Fals
                 portId=edge.target_port_id,
                 edgeId=edge.id,
             ))
-        incoming_key = (edge.target_node_id, edge.target_port_id)
-        incoming_counts[incoming_key] = incoming_counts.get(incoming_key, 0) + 1
-        maximum = target_port.max_connections or (1 if target_port.cardinality == "one" else 32)
-        if incoming_counts[incoming_key] > maximum:
-            issues.append(ValidationIssue(
-                code="PORT_CARDINALITY_EXCEEDED",
-                message=f"端口最多接受 {maximum} 条连线",
-                nodeId=edge.target_node_id,
-                portId=edge.target_port_id,
-                edgeId=edge.id,
-            ))
+        connected_input_ports.add((edge.target_node_id, edge.target_port_id))
 
     try:
         sorter = TopologicalSorter(predecessor_map)
@@ -96,7 +94,7 @@ def validate_workflow(document: WorkflowDocument, *, require_inputs: bool = Fals
             if getattr(nodes_by_id[node_id], "is_disabled", False):
                 continue
             for port in definition.inputs:
-                if port.required and incoming_counts.get((node_id, port.id), 0) == 0:
+                if port.required and (node_id, port.id) not in connected_input_ports:
                     issues.append(ValidationIssue(
                         code="REQUIRED_INPUT_MISSING",
                         message="缺少必需输入",
@@ -105,4 +103,3 @@ def validate_workflow(document: WorkflowDocument, *, require_inputs: bool = Fals
                     ))
 
     return issues
-

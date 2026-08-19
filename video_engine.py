@@ -82,7 +82,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "name": "Wan 3.0 Video",
         "provider": "qianwen",
         "description": "文生、图生、首尾帧与全能参考视频",
-        "modes": ["text_to_video"],
+        "modes": ["text_to_video", "reference_to_video"],
         "future_modes": ["image_to_video", "first_last_frame", "reference_to_video"],
         "ratios": ["auto", "16:9", "9:16", "1:1", "4:3", "3:4"],
         "resolutions": ["480P", "720P", "1080P"],
@@ -91,6 +91,8 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "durations": [],
         "supports_audio": True,
         "supports_audio_input": True,
+        "max_reference_videos": 3,
+        "max_references": 5,
         "enabled": True,
         "docs_url": "https://platform.qianwenai.com/docs/developer-guides/getting-started/video-models",
     },
@@ -217,7 +219,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "description": "参考视频驱动的主体、动作与风格生成",
         "modes": ["reference_to_video"], "future_modes": [],
         "ratios": ["auto", "16:9", "9:16", "1:1", "4:3", "3:4"],
-        "resolutions": ["720P", "1080P"], "duration_min": 2, "duration_max": 10,
+        "resolutions": ["720P", "1080P"], "duration_min": 2, "duration_max": 15,
         "durations": [], "supports_audio": True, "supports_audio_input": False, "enabled": True,
         "max_reference_videos": 3, "max_references": 5,
         "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan27-reference-to-video/create-task",
@@ -227,7 +229,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "description": "固定版本的参考视频生成",
         "modes": ["reference_to_video"], "future_modes": [],
         "ratios": ["auto", "16:9", "9:16", "1:1", "4:3", "3:4"],
-        "resolutions": ["720P", "1080P"], "duration_min": 2, "duration_max": 10,
+        "resolutions": ["720P", "1080P"], "duration_min": 2, "duration_max": 15,
         "durations": [], "supports_audio": True, "supports_audio_input": False, "enabled": True,
         "max_reference_videos": 3, "max_references": 5,
         "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan27-reference-to-video/create-task",
@@ -251,6 +253,16 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "durations": [], "supports_audio": True, "supports_audio_input": False, "enabled": True,
         "max_reference_videos": 3, "max_references": 5,
         "docs_url": "https://platform.qianwenai.com/docs/api-reference/video-generation/wan-reference-to-video/create-task",
+    },
+    {
+        "id": "vidu2-reference", "name": "Vidu 2 Reference", "provider": "zhipu",
+        "description": "多参考图一致性生视频",
+        "modes": ["reference_to_video"], "future_modes": [],
+        "ratios": ["16:9", "9:16", "1:1"], "resolutions": ["720P"],
+        "duration_min": 4, "duration_max": 4, "durations": [4],
+        "supports_audio": True, "supports_audio_input": False, "enabled": True,
+        "max_reference_videos": 0, "max_references": 3,
+        "docs_url": "https://docs.bigmodel.cn/cn/guide/models/video-generation/vidu2",
     },
 )
 
@@ -358,7 +370,7 @@ class VideoGenerationRequest(BaseModel):
             raise ValueError("尾帧 URL 仅用于首尾帧模式")
         if self.model == "wan2.7-i2v" and not self.prompt:
             raise ValueError("wan2.7-i2v 的 prompt 不能为空")
-        prompt_limit = 800 if self.model == "wan2.2-kf2v-flash" else 1500 if self.model.startswith("wan2.6-i2v") else 5000
+        prompt_limit = 800 if self.model == "wan2.2-kf2v-flash" else 1500 if self.model.startswith("wan2.6-i2v") else 512 if self.model.startswith("vidu2-") else 5000
         if len(self.prompt) > prompt_limit:
             raise ValueError(f"{self.model} 的 prompt 不能超过 {prompt_limit} 个字符")
         if self.shot_type and not self.model.startswith("wan2.6-i2v"):
@@ -384,6 +396,8 @@ class VideoGenerationRequest(BaseModel):
                 raise ValueError(f"{self.model} 最多支持 {max_videos} 个参考视频")
             if self.model.startswith("wan2.6-r2v") and any(item.media_kind != "reference_video" for item in self.references):
                 raise ValueError("Wan 2.6 R2V 当前仅支持参考视频")
+            if self.model == "vidu2-reference" and any(item.media_kind != "reference_image" for item in self.references):
+                raise ValueError("Vidu 2 Reference 当前仅支持参考图片")
             if self.model.startswith("wan2.6-r2v") and self.audio is False and self.model != "wan2.6-r2v-flash":
                 raise ValueError("wan2.6-r2v 不支持静音输出")
         if self.audio is not None and not capability["supports_audio"]:
@@ -509,6 +523,8 @@ class QwenVideoProvider:
             }
         if request.mode != "reference_to_video" and request.mode == "text_to_video" and request.ratio != "auto":
             parameters["ratio"] = request.ratio
+        if request.model in {"wan3.0-video"} and request.mode == "reference_to_video" and request.ratio != "auto":
+            parameters["ratio"] = request.ratio
         if request.model.startswith("wan2.7-r2v") and request.ratio != "auto":
             parameters["ratio"] = request.ratio
         if request.audio is not None:
@@ -525,7 +541,7 @@ class QwenVideoProvider:
         input_payload: dict[str, Any] = {"prompt": request.prompt}
         if request.negative_prompt:
             input_payload["negative_prompt"] = request.negative_prompt
-        if request.model.startswith("wan2.7-r2v"):
+        if (request.model.startswith("wan2.7-r2v") or request.model == "wan3.0-video") and request.mode == "reference_to_video":
             input_payload["media"] = [
                 {"type": reference.media_kind, "url": reference.url}
                 for reference in request.references
@@ -628,6 +644,17 @@ class ZhipuVideoProvider:
             elif request.model == "viduq1-text":
                 body["aspect_ratio"] = request.ratio
                 body["style"] = "general"
+        elif request.model == "vidu2-reference":
+            body = {
+                "model": request.model,
+                "image_url": [reference.url for reference in request.references],
+                "prompt": request.prompt,
+                "duration": 4,
+                "aspect_ratio": request.ratio,
+                "size": self._size(request),
+                "movement_amplitude": "auto",
+                "with_audio": request.audio if request.audio is not None else True,
+            }
         else:
             body = {
                 "model": request.model,

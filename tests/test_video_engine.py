@@ -38,8 +38,9 @@ def test_video_capabilities_expose_official_models_and_limits():
         "wan2.7-r2v",
         "wan2.7-r2v-2026-06-12",
         "wan2.6-r2v-flash",
-        "wan2.6-r2v",
-    }
+            "wan2.6-r2v",
+            "vidu2-reference",
+        }
     assert models["wan3.0-video"]["future_modes"] == [
         "image_to_video",
         "first_last_frame",

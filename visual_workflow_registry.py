@@ -38,7 +38,9 @@ def _port(
     data_type: PortDataType,
     *,
     required: bool = False,
-    cardinality: str = "one",
+    # Every port supports fan-in/fan-out. `required` only means that at least
+    # one connection is needed for execution; it is not a single-edge limit.
+    cardinality: str = "many",
     max_connections: int | None = None,
 ) -> PortSchema:
     return PortSchema(
@@ -85,13 +87,17 @@ _NODE_DEFINITIONS: tuple[NodeDefinition, ...] = (
     ),
     _definition(
         "prompt_template", "transform",
-        inputs=(_port("prompt_in", "input", "prompt.text", cardinality="many", max_connections=8),),
+        inputs=(_port("prompt_in", "input", "prompt.text", cardinality="many"),),
         outputs=(_port("prompt", "output", "prompt.text"),),
         executor_key="prompt_template",
     ),
     _definition(
         "image_generate", "image",
-        inputs=(_port("prompt", "input", "prompt.text", required=True),),
+        inputs=(
+            _port("prompt", "input", "prompt.text", required=True),
+            _port("reference_image", "input", "image.asset"),
+            _port("references", "input", "image.asset", cardinality="many"),
+        ),
         outputs=(_port("image", "output", "image.asset"),),
         executor_key="image_generate",
     ),
@@ -99,21 +105,25 @@ _NODE_DEFINITIONS: tuple[NodeDefinition, ...] = (
         "image_edit", "image",
         inputs=(
             _port("prompt", "input", "prompt.text", required=True),
-            _port("reference_image", "input", "image.asset", required=True),
+            _port("reference_image", "input", "image.asset"),
+            _port("references", "input", "image.asset", cardinality="many"),
         ),
         outputs=(_port("image", "output", "image.asset"),),
         executor_key="image_edit",
     ),
     _definition(
         "image_compare", "output",
-        inputs=(_port("images", "input", "image.asset", cardinality="many", max_connections=8),),
+        inputs=(_port("images", "input", "image.asset", cardinality="many"),),
         outputs=(_port("images", "output", "image.asset[]"),),
         cache_policy="never",
         executor_key="image_compare",
     ),
     _definition(
         "text_to_video", "video",
-        inputs=(_port("prompt", "input", "prompt.text", required=True),),
+        inputs=(
+            _port("prompt", "input", "prompt.text", required=True),
+            _port("references", "input", "media.asset", cardinality="many"),
+        ),
         outputs=(_port("video", "output", "video.asset"),),
         executor_key="text_to_video",
     ),
@@ -141,7 +151,7 @@ _NODE_DEFINITIONS: tuple[NodeDefinition, ...] = (
         "reference_to_video", "video",
         inputs=(
             _port("prompt", "input", "prompt.text", required=True),
-            _port("references", "input", "video.asset", required=True, cardinality="many", max_connections=3),
+            _port("references", "input", "media.asset", required=True, cardinality="many"),
         ),
         outputs=(_port("video", "output", "video.asset"),),
         executor_key="reference_to_video",
@@ -159,8 +169,8 @@ _NODE_DEFINITIONS: tuple[NodeDefinition, ...] = (
     _definition(
         "gallery_output", "output",
         inputs=(
-            _port("images", "input", "image.asset[]", cardinality="many", max_connections=8),
-            _port("videos", "input", "video.asset[]", cardinality="many", max_connections=8),
+            _port("images", "input", "image.asset[]", cardinality="many"),
+            _port("videos", "input", "video.asset[]", cardinality="many"),
         ),
         outputs=(),
         cache_policy="never",
@@ -180,4 +190,3 @@ def get_node_definition(kind: str) -> NodeDefinition:
         return _BY_KIND[kind]
     except KeyError as exc:
         raise KeyError(f"unknown workflow node kind: {kind}") from exc
-
