@@ -106,9 +106,9 @@
 
 **Acceptance criteria:**
 
-- [ ] 列表支持分页、场景、来源和关键字过滤。
-- [ ] 私有模板越权访问返回 404。
-- [ ] 删除幂等且不暴露磁盘路径。
+- [x] 列表支持分页、场景、来源和关键字过滤。
+- [x] 私有模板越权访问返回 404。
+- [x] 删除幂等且不暴露磁盘路径。
 
 **Verification:** `python -m pytest -q tests/test_ppt_template_api.py`
 

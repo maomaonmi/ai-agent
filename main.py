@@ -87,6 +87,8 @@ from mcp_marketplace import (
 )
 from terminal_service import TERMINAL_POOL, handle_terminal_websocket
 from plugins_registry import PluginsStore
+from ppt_api import create_ppt_router
+from ppt_repository import PptRepository
 from video_api import create_video_router
 from video_assets import VideoAssetStore
 from video_engine import QwenVideoProvider, VideoJobRepository, ZhipuVideoProvider
@@ -359,6 +361,7 @@ _initialize_image_store()
 session_store = SessionStore(SESSION_DB_PATH)
 video_job_repository = VideoJobRepository(SESSION_DB_PATH)
 visual_workflow_repository = VisualWorkflowRepository(SESSION_DB_PATH)
+ppt_repository = PptRepository(SESSION_DB_PATH)
 video_asset_store = VideoAssetStore(VIDEO_ASSET_DIR, video_job_repository)
 video_runtime_config = load_video_runtime_config()
 video_reference_assets = None
@@ -5322,6 +5325,7 @@ app.include_router(create_video_router(
     reference_assets=video_reference_assets,
 ))
 app.include_router(create_visual_workflow_router(visual_workflow_repository, executor=visual_workflow_executor))
+app.include_router(create_ppt_router(ppt_repository))
 
 
 # Image Studio foundation: keep model capability metadata and director routing

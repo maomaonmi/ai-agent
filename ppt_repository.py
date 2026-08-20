@@ -23,6 +23,7 @@ class TemplateRecord:
     id: str
     owner_scope: str
     name: str
+    description: str | None
     scene: str
     source: str
     status: str
@@ -285,6 +286,7 @@ class PptRepository:
             id=row["id"],
             owner_scope=row["owner_scope"],
             name=row["name"],
+            description=row["description"],
             scene=row["scene"],
             source=row["source"],
             status=row["status"],
@@ -394,6 +396,43 @@ class PptRepository:
                 (timestamp, timestamp, template_id, owner_scope),
             )
         return cursor.rowcount == 1
+
+    def update_template(
+        self,
+        template_id: str,
+        *,
+        owner_scope: str,
+        name: str | None = None,
+        description: str | None = None,
+        scene: str | None = None,
+    ) -> TemplateRecord | None:
+        assignments: list[str] = []
+        parameters: list[Any] = []
+        if name is not None:
+            assignments.append("name = ?")
+            parameters.append(name)
+        if description is not None:
+            assignments.append("description = ?")
+            parameters.append(description)
+        if scene is not None:
+            assignments.append("scene = ?")
+            parameters.append(scene)
+        if not assignments:
+            return self.get_template(template_id, owner_scope=owner_scope)
+        assignments.append("updated_at = ?")
+        parameters.append(_now())
+        parameters.extend([template_id, owner_scope])
+        with self._connection(immediate=True) as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE ppt_templates SET {', '.join(assignments)}
+                WHERE id = ? AND owner_scope = ? AND source = 'PRIVATE' AND deleted_at IS NULL
+                """,
+                parameters,
+            )
+        if cursor.rowcount != 1:
+            return None
+        return self.get_template(template_id, owner_scope=owner_scope)
 
     def upsert_template_page(
         self,
