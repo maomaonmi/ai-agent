@@ -684,6 +684,10 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         }
         if (event.type === "run.failed") {
           setRunning(false);
+          if (phaseStep !== null) {
+            setWorkflowStep(phaseStep);
+            setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: "失败 · 请重试" }));
+          }
           const message = typeof event.data.message === "string" ? event.data.message : "实时生成失败，请检查服务配置后重试。";
           setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: message }]);
         }
