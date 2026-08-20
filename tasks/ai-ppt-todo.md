@@ -82,9 +82,9 @@
 
 **Acceptance criteria:**
 
-- [ ] 初始化可重复执行。
-- [ ] Run 事件 `(runId, sequence)` 唯一且 append-only。
-- [ ] 模板与资产 owner 过滤生效。
+- [x] 初始化可重复执行。
+- [x] Run 事件 `(runId, sequence)` 唯一且 append-only。
+- [x] 模板与资产 owner 过滤生效。
 
 **Verification:** `python -m pytest -q tests/test_ppt_repository.py`
 
@@ -94,8 +94,8 @@
 
 ## Checkpoint B：数据基础
 
-- [ ] 模型、操作和 Repository 测试通过。
-- [ ] 不修改现有会话表语义。
+- [x] 模型、操作和 Repository 测试通过。
+- [x] 不修改现有会话表语义。
 - [ ] `python -m pytest -q` 无回归。
 
 ## Phase 2：模板市场纵向切片
