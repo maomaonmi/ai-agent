@@ -334,6 +334,70 @@ function workflowStepForPhase(phase: string): number {
   return index < 0 ? 0 : index;
 }
 
+function imageUrlsFromRunState(value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  const assets = (value as Record<string, unknown>).assets;
+  if (!Array.isArray(assets)) return [];
+  return assets.flatMap((asset) => {
+    if (!asset || typeof asset !== "object") return [];
+    const imageUrl = (asset as Record<string, unknown>).imageUrl;
+    return typeof imageUrl === "string" && /^https?:\/\//.test(imageUrl) ? [imageUrl] : [];
+  });
+}
+
+function searchSourcesFromRunState(value: unknown): Record<string, SearchSource[]> {
+  if (!Array.isArray(value)) return {};
+  const sources: Record<string, SearchSource[]> = {};
+  value.forEach((round, index) => {
+    if (!round || typeof round !== "object") return;
+    const state = round as Record<string, unknown>;
+    const results = Array.isArray(state.results) ? state.results : [];
+    const normalized = results.flatMap((result) => {
+      if (!result || typeof result !== "object") return [];
+      const item = result as Record<string, unknown>;
+      const url = typeof item.url === "string" ? item.url : "";
+      if (!/^https?:\/\//.test(url)) return [];
+      return [{
+        title: typeof item.title === "string" ? item.title : "未命名来源",
+        url,
+        ...(typeof item.imageUrl === "string" ? { imageUrl: item.imageUrl } : {}),
+        ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}),
+      }];
+    });
+    if (normalized.length > 0) sources[`search-${index + 1}`] = normalized;
+  });
+  return sources;
+}
+
+function runDetailsFromState(state: Record<string, unknown>): Record<string, string> {
+  const details: Record<string, string> = {};
+  const rounds = Array.isArray(state.searchRounds) ? state.searchRounds : [];
+  rounds.forEach((round, index) => {
+    if (!round || typeof round !== "object") return;
+    const item = round as Record<string, unknown>;
+    const count = typeof item.resultCount === "number" ? item.resultCount : 0;
+    const mode = item.mode === "provider-fallback"
+      ? `Firecrawl fallback${typeof item.fallbackReason === "string" ? ` · ${item.fallbackReason}` : ""}`
+      : item.mode === "provider" ? `实时 ${typeof item.provider === "string" ? item.provider : "provider"}` : "未配置 provider";
+    details[`search-${index + 1}`] = `${count} 条 · ${mode}`;
+  });
+  const webImages = state.webImages && typeof state.webImages === "object" ? state.webImages as Record<string, unknown> : null;
+  if (webImages) {
+    const candidateCount = typeof webImages.candidateCount === "number" ? webImages.candidateCount : 0;
+    const selectedCount = typeof webImages.selectedCount === "number" ? webImages.selectedCount : 0;
+    const downloadedCount = typeof webImages.downloadedCount === "number" ? webImages.downloadedCount : 0;
+    const roundCount = typeof webImages.selectionRoundCount === "number" ? webImages.selectionRoundCount : 0;
+    details["web-assets"] = `${candidateCount} 张候选 · ${roundCount} 轮采用 · ${selectedCount} 张采用 · 已下载 ${downloadedCount}`;
+  }
+  const aiImages = state.aiImages && typeof state.aiImages === "object" ? state.aiImages as Record<string, unknown> : null;
+  if (aiImages) {
+    const generatedCount = typeof aiImages.generatedCount === "number" ? aiImages.generatedCount : 0;
+    const requiredCount = typeof aiImages.requiredCount === "number" ? aiImages.requiredCount : 3;
+    details["ai-assets"] = `${generatedCount} / ${requiredCount} 张${aiImages.mode === "provider" ? " · 实时 provider" : ""}`;
+  }
+  return details;
+}
+
 
 async function imageUrlToDataUrl(src: string): Promise<string> {
   const response = await fetch(src);
@@ -366,7 +430,7 @@ function SlideSurface({
   const mutedClass = dark ? "text-white/65" : "text-slate-500";
   return (
     <div className={`relative aspect-video w-full overflow-hidden bg-[#111827] ${dark ? "" : "bg-[#f4efe8]"}`}>
-      <Image src={slide.image} alt="演示文稿视觉素材" fill priority sizes={compact ? "220px" : "(max-width: 1024px) 100vw, 65vw"} className={`object-cover ${dark ? "opacity-75" : "opacity-55"}`} />
+      <Image src={slide.image} alt="演示文稿视觉素材" fill priority={!compact} sizes={compact ? "220px" : "(max-width: 1024px) 100vw, 65vw"} className={`object-cover ${dark ? "opacity-75" : "opacity-55"}`} />
       <div className={`absolute inset-0 ${dark ? "bg-slate-950/45" : "bg-white/35"}`} />
       <div className={`absolute inset-y-0 left-0 ${compact ? "w-[76%] p-[7%]" : "w-[72%] p-[7.5%]"}`}>
         <p className={`${mutedClass} ${compact ? "text-[5px]" : "text-[clamp(8px,0.72vw,12px)]"} font-semibold tracking-[0.22em]`}>{slide.eyebrow}</p>
@@ -469,7 +533,12 @@ function WorkflowPanel({
   const progress = started ? Math.min(100, ((step + 1) / workflow.length) * 100) : 0;
   const webAssetsMeta = details["web-assets"] ?? "等待事件";
   const aiAssetsMeta = details["ai-assets"] ?? "等待事件";
-  const materialPreviews = [...(assetSources["web-assets"] ?? []), ...(assetSources["ai-assets"] ?? [])].slice(0, 3);
+  const materialPreviews = [...(assetSources["web-assets"] ?? []), ...(assetSources["ai-assets"] ?? [])].slice(0, 6);
+  const renderAssetThumbnails = (stepId: string, label: string) => {
+    const assets = assetSources[stepId] ?? [];
+    if (assets.length === 0) return <div className="mt-2 rounded-lg bg-slate-50 px-3 py-3 text-[10px] text-slate-400">{label}完成后会在这里显示缩略图</div>;
+    return <div className="mt-2 grid grid-cols-3 gap-1.5">{assets.slice(0, 6).map((asset, index) => <img key={`${asset}-${index}`} src={asset} alt={`${label} ${index + 1}`} loading="lazy" className="aspect-video w-full rounded-md border border-slate-100 bg-slate-100 object-cover" />)}</div>;
+  };
   return (
     <aside aria-label="AI 工作流" className="flex min-h-0 w-full flex-col border-r border-slate-200 bg-white">
       <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4">
@@ -503,7 +572,7 @@ function WorkflowPanel({
                       <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border ${complete ? "border-violet-600 bg-violet-600 text-white" : active ? "border-violet-300 bg-violet-50 text-violet-700" : "border-slate-200 text-slate-300"}`}>{complete ? <Check size={12} /> : active ? <LoaderCircle size={12} className={running ? "animate-spin" : ""} /> : <Circle size={7} />}</span>
                       <span className={`min-w-0 flex-1 truncate text-xs font-semibold ${complete || active ? "text-slate-900" : "text-slate-400"}`}>{item.label}</span><span className="shrink-0 text-[10px] text-slate-400">{details[item.id] ?? item.meta}</span><ChevronDown size={12} className={`shrink-0 text-slate-300 transition ${expanded ? "rotate-180" : ""}`} />
                     </button>
-                    {expanded && <div className="ml-10 mr-2 pb-2 text-[11px] leading-5 text-slate-500"><p>{item.description}</p>{item.id.startsWith("search") && <div className="mt-2 space-y-1.5">{(searchSources[item.id] ?? []).length > 0 ? <ol className="space-y-1.5 text-slate-600">{searchSources[item.id].map((source, sourceIndex) => <li key={`${source.url}-${sourceIndex}`} className="flex min-w-0 items-start gap-1.5"><span className="shrink-0 text-[10px] text-slate-400">{sourceIndex + 1}.</span><a href={source.url} target="_blank" rel="noreferrer" className="min-w-0 truncate text-violet-700 hover:underline" title={source.title}>{source.title}<span className="ml-1 text-[10px] text-slate-400">{source.url}</span></a></li>)}</ol> : <div className="flex items-center gap-1.5 text-slate-400"><Search size={10} />{active ? "等待 provider 返回来源…" : "暂无来源记录"}</div>}</div>}</div>}
+                    {expanded && <div className="ml-10 mr-2 pb-2 text-[11px] leading-5 text-slate-500"><p>{item.description}</p>{item.id.startsWith("search") && <div className="mt-2 space-y-1.5">{(searchSources[item.id] ?? []).length > 0 ? <ol className="space-y-1.5 text-slate-600">{searchSources[item.id].map((source, sourceIndex) => <li key={`${source.url}-${sourceIndex}`} className="flex min-w-0 items-center gap-1.5"><span className="shrink-0 text-[10px] text-slate-400">{sourceIndex + 1}.</span>{source.imageUrl && <img src={source.imageUrl} alt="" loading="lazy" className="h-6 w-8 shrink-0 rounded object-cover" /> }<a href={source.url} target="_blank" rel="noreferrer" className="min-w-0 truncate text-violet-700 hover:underline" title={source.title}>{source.title}<span className="ml-1 text-[10px] text-slate-400">{source.url}</span></a></li>)}</ol> : <div className="flex items-center gap-1.5 text-slate-400"><Search size={10} />{active ? "等待 provider 返回来源…" : "暂无来源记录"}</div>}</div>}{item.id === "web-assets" && renderAssetThumbnails(item.id, "网页图片素材")}{item.id === "ai-assets" && renderAssetThumbnails(item.id, "AI 图片素材")}</div>}
                   </div>;
                 })}
               </div>
@@ -699,15 +768,17 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           const candidateCount = typeof event.data.candidateCount === "number" ? event.data.candidateCount : null;
           const selectedCount = typeof event.data.selectedCount === "number" ? event.data.selectedCount : null;
           const downloadedCount = typeof event.data.downloadedCount === "number" ? event.data.downloadedCount : null;
+          const selectionRoundCount = typeof event.data.selectionRoundCount === "number" ? event.data.selectionRoundCount : null;
           const generatedCount = typeof event.data.generatedCount === "number" ? event.data.generatedCount : null;
           const requiredCount = typeof event.data.requiredCount === "number" ? event.data.requiredCount : null;
           const slideCount = typeof event.data.slideCount === "number" ? event.data.slideCount : null;
           const mode = event.data.mode === "provider" ? "实时 provider" : event.data.mode === "provider-fallback" ? "Firecrawl fallback" : event.data.mode === "demo-fallback" ? "未配置 provider" : null;
+          const fallbackReason = typeof event.data.fallbackReason === "string" ? event.data.fallbackReason : null;
           const meta = resultCount !== null ? `${resultCount} 条${mode ? ` · ${mode}` : ""}`
-            : candidateCount !== null && selectedCount !== null ? `${candidateCount} 张候选 · ${selectedCount} 张采用${downloadedCount !== null ? ` · 已下载 ${downloadedCount}` : ""}`
+            : candidateCount !== null && selectedCount !== null ? `${candidateCount} 张候选 · ${selectionRoundCount !== null ? `${selectionRoundCount} 轮采用 · ` : ""}${selectedCount} 张采用${downloadedCount !== null ? ` · 已下载 ${downloadedCount}` : ""}`
               : generatedCount !== null && requiredCount !== null ? `${generatedCount} / ${requiredCount} 张${mode ? ` · ${mode}` : ""}`
                 : slideCount !== null ? `${slideCount} 页大纲` : "已完成";
-          setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: meta }));
+          setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: `${meta}${fallbackReason ? ` · 原因 ${fallbackReason}` : ""}` }));
           if (phase.startsWith("SEARCH")) {
             const rawSources = Array.isArray(event.data.sources) ? event.data.sources : [];
             const sources = rawSources.flatMap((source) => {
@@ -734,10 +805,12 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           const candidateCount = typeof event.data.candidateCount === "number" ? event.data.candidateCount : null;
           const selectedCount = typeof event.data.selectedCount === "number" ? event.data.selectedCount : null;
           const downloadedCount = typeof event.data.downloadedCount === "number" ? event.data.downloadedCount : null;
+          const selectionRoundCount = typeof event.data.selectionRoundCount === "number" ? event.data.selectionRoundCount : null;
+          const roundSelectedCount = typeof event.data.roundSelectedCount === "number" ? event.data.roundSelectedCount : null;
           const generatedCount = typeof event.data.generatedCount === "number" ? event.data.generatedCount : null;
           const requiredCount = typeof event.data.requiredCount === "number" ? event.data.requiredCount : null;
           const progressMeta = candidateCount !== null && downloadedCount !== null
-            ? `${candidateCount} 张候选 · 已下载 ${downloadedCount}${selectedCount !== null ? ` · ${selectedCount} 张采用` : ""}`
+            ? `${candidateCount} 张候选 · ${selectionRoundCount !== null ? `${selectionRoundCount} 轮 · ` : ""}本轮 ${roundSelectedCount ?? 0} 张 · 已下载 ${downloadedCount}${selectedCount !== null ? ` · 共采用 ${selectedCount}` : ""}`
             : generatedCount !== null && requiredCount !== null ? `${generatedCount} / ${requiredCount} 张` : "执行中";
           setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: progressMeta }));
           if (phase === "WEB_ASSETS" || phase === "AI_ASSETS") {
@@ -795,6 +868,12 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         const run = await pptApi.getRun(resumeRunId);
         if (run.presentationId !== presentationId) return;
         const state = run.state;
+        setSearchSources(searchSourcesFromRunState(state.searchRounds));
+        setWorkflowDetails(runDetailsFromState(state));
+        setAssetSources({
+          "web-assets": imageUrlsFromRunState(state.webImages),
+          "ai-assets": imageUrlsFromRunState(state.aiImages),
+        });
         const nextConfig: RunConfig = {
           modelProvider: state.modelProvider === "qwen" || state.modelProvider === "glm" ? state.modelProvider : "deepseek",
           searchProvider: state.searchProvider === "firecrawl" || state.searchProvider === "qwen" || state.searchProvider === "glm" ? state.searchProvider : "auto",
