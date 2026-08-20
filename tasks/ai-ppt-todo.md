@@ -10,9 +10,9 @@
 
 **Acceptance criteria:**
 
-- [ ] Windows 默认路径和 `LIBREOFFICE_PATH` 均可解析。
-- [ ] 并发转换使用独立用户配置目录。
-- [ ] 未安装时返回结构化 `LIBREOFFICE_NOT_AVAILABLE`。
+- [x] Windows 默认路径和 `LIBREOFFICE_PATH` 均可解析。
+- [x] 并发转换使用独立用户配置目录。
+- [x] 未安装时返回结构化 `LIBREOFFICE_NOT_AVAILABLE`。
 
 **Verification:** `python -m pytest -q tests/test_ppt_runtime.py`
 
@@ -26,8 +26,8 @@
 
 **Acceptance criteria:**
 
-- [ ] 样例覆盖全部约定元素。
-- [ ] 解包关系和 XML 校验通过。
+- [x] 样例覆盖全部约定元素。
+- [x] 解包关系和 XML 校验通过。
 - [ ] LibreOffice 转 PDF 成功，真实 PowerPoint 打开无修复提示。
 
 **Verification:** `npm run build`；`python -m pytest -q tests/test_ppt_ooxml_spike.py`；人工 PowerPoint 验收记录
@@ -38,7 +38,7 @@
 
 ## Checkpoint A：高风险能力
 
-- [ ] LibreOffice 探测与转换稳定。
+- [x] LibreOffice 探测与转换稳定。
 - [ ] 全能力样例不触发 PowerPoint 修复。
 - [ ] 动画不通过时暂停后续高级编辑，先提交兼容性结论。
 
@@ -50,9 +50,9 @@
 
 **Acceptance criteria:**
 
-- [ ] 全部元素几何和样式字段有边界校验。
-- [ ] 未知字段被拒绝，旧文档可通过 schemaVersion 路由迁移。
-- [ ] TypeScript 与 Pydantic Golden JSON 一致。
+- [x] 全部元素几何和样式字段有边界校验。
+- [x] 未知字段被拒绝，旧文档可通过 schemaVersion 路由迁移。
+- [x] TypeScript 与 Pydantic Golden JSON 一致。
 
 **Verification:** `python -m pytest -q tests/test_ppt_models.py`; `npm run lint`
 
@@ -633,4 +633,3 @@
 - [ ] 真实 PPTX 不是整页截图，所有承诺元素保持结构化可编辑。
 - [ ] 模板与素材隐私、安全和来源审计通过。
 - [ ] 可以进入人工产品验收。
-
