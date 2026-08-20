@@ -19,6 +19,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
+import re
 
 from ppt_agent_loop import SearchBatch, SearchProvider
 
@@ -177,6 +178,95 @@ class NativeSearchAdapter:
         return _normalize_search_response(payload)
 
 
+class OpenAICompatibleNativeSearchAdapter:
+    """Use a configured Qwen/GLM chat endpoint with its native web search mode."""
+
+    def __init__(
+        self,
+        provider: str,
+        *,
+        base_url: str,
+        api_key: str,
+        model: str,
+        request_json: JsonRequest | None = None,
+    ) -> None:
+        if provider not in {"qwen", "glm"}:
+            raise ValueError("native search provider must be qwen or glm")
+        self.provider = provider
+        self.endpoint = base_url.rstrip("/") if base_url.rstrip("/").endswith("/chat/completions") else f"{base_url.rstrip('/')}/chat/completions"
+        self.api_key = api_key
+        self.model = model
+        self.request_json = request_json or _default_json_request
+
+    def __call__(self, query: str, limit: int) -> list[dict[str, object]]:
+        if not self.api_key or not self.endpoint:
+            raise ProviderNotConfigured(f"{self.provider} provider is not configured")
+        _validate_https_url(self.endpoint)
+        payload: dict[str, object] = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": query}],
+            "stream": False,
+        }
+        if self.provider == "qwen":
+            payload.update({
+                "enable_search": True,
+                "search_options": {
+                    "search_strategy": "turbo",
+                    "forced_search": True,
+                    "result_type": "search_result",
+                },
+            })
+        else:
+            payload.update({
+                "tools": [{
+                    "type": "web_search",
+                    "web_search": {
+                        "enable": True,
+                        "searchEngine": "search_pro",
+                        "searchResult": True,
+                        "count": min(limit, _MAX_SEARCH_RESULTS),
+                        "contentSize": "high",
+                        "searchRecencyFilter": "noLimit",
+                    },
+                }],
+                "tool_choice": "auto",
+            })
+        response = self.request_json(
+            self.endpoint,
+            {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            payload,
+        )
+        return _normalize_native_chat_response(response, query=query, limit=limit)
+
+
+def _normalize_native_chat_response(payload: Mapping[str, object], *, query: str, limit: int) -> list[dict[str, object]]:
+    """Extract citations from Qwen/GLM native-search chat responses."""
+
+    candidates: list[dict[str, object]] = []
+
+    def visit(value: object) -> None:
+        if isinstance(value, Mapping):
+            url = value.get("url") or value.get("link") or value.get("source_url")
+            if isinstance(url, str) and url.startswith("https://"):
+                item: dict[str, object] = {"title": str(value.get("title") or value.get("name") or query)[:500], "url": url}
+                image_url = value.get("imageUrl") or value.get("image_url") or value.get("thumbnail")
+                if isinstance(image_url, str): item["imageUrl"] = image_url
+                page_url = value.get("pageUrl") or value.get("page_url")
+                if isinstance(page_url, str): item["pageUrl"] = page_url
+                if not any(existing["url"] == url for existing in candidates): candidates.append(item)
+            for nested in value.values(): visit(nested)
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            for nested in value: visit(nested)
+        elif isinstance(value, str):
+            for url in re.findall(r"https://[^\s)\]}>,]+", value):
+                clean_url = url.rstrip(".,;:!?\"")
+                if not any(existing["url"] == clean_url for existing in candidates):
+                    candidates.append({"title": query[:500], "url": clean_url})
+
+    visit(payload)
+    return candidates[: min(limit, _MAX_SEARCH_RESULTS)]
+
+
 def build_default_search_adapters(
     *,
     env: Mapping[str, str] | None = None,
@@ -204,6 +294,35 @@ def build_default_search_adapters(
                 api_key=key,
                 request_json=request_json,
             )
+    return adapters
+
+
+def build_settings_search_adapters(*, request_json: JsonRequest | None = None) -> dict[str, SearchCallable]:
+    """Build PPT search adapters from the same persisted settings as the app UI."""
+
+    from model_settings import ModelSettingsStore, ServiceSettingsStore
+
+    service = ServiceSettingsStore().load()
+    models = ModelSettingsStore()
+    adapters: dict[str, SearchCallable] = {}
+    if service.firecrawl_api_key:
+        endpoint = os.getenv("FIRECRAWL_SEARCH_URL", "https://api.firecrawl.dev/v1/search")
+        adapters["firecrawl"] = FirecrawlSearchAdapter(endpoint=endpoint, api_key=service.firecrawl_api_key, request_json=request_json)
+        adapters["deepseek"] = adapters["firecrawl"]
+    for provider in ("qwen", "glm"):
+        settings = models.load(provider)
+        if settings.api_key:
+            endpoint = os.getenv(f"{provider.upper()}_SEARCH_URL")
+            if endpoint:
+                adapters[provider] = NativeSearchAdapter(provider, endpoint=endpoint, api_key=settings.api_key, request_json=request_json)
+            else:
+                adapters[provider] = OpenAICompatibleNativeSearchAdapter(
+                    provider,
+                    base_url=settings.base_url,
+                    api_key=settings.api_key,
+                    model=settings.model_id,
+                    request_json=request_json,
+                )
     return adapters
 
 
@@ -424,10 +543,57 @@ class AiImageAdapter:
         return result
 
 
+class SettingsAiImageAdapter:
+    """GLM image generation adapter backed by the persisted model settings."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        endpoint: str = "https://open.bigmodel.cn/api/paas/v4/images/generations",
+        request_json: JsonRequest | None = None,
+    ) -> None:
+        self.api_key = api_key
+        self.endpoint = endpoint
+        self.request_json = request_json or _default_json_request
+
+    def generate(self, *, role: str, prompt: str) -> dict[str, object]:
+        if role not in _AI_IMAGE_ROLES:
+            raise ValueError("AI image role must be COVER, MID_BACKGROUND, or END")
+        if not self.api_key:
+            raise ProviderNotConfigured("image provider is not configured")
+        _validate_https_url(self.endpoint)
+        payload = {"model": "glm-image", "prompt": f"{prompt}\n画面用途：{role}", "size": "1440x810"}
+        response = self.request_json(
+            self.endpoint,
+            {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            payload,
+        )
+        candidates = response.get("data", [])
+        if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes, bytearray)) or not candidates:
+            raise ProviderRequestFailed("image provider returned no image")
+        first = candidates[0]
+        if not isinstance(first, Mapping) or not isinstance(first.get("url"), str):
+            raise ProviderRequestFailed("image provider returned an invalid image")
+        asset_url = _validate_https_url(str(first["url"]))
+        return {"role": role, "assetId": str(first.get("id") or hashlib.sha256(asset_url.encode()).hexdigest()[:16]), "imageUrl": asset_url}
+
+
 def generate_required_ai_images(adapter: AiImageAdapter, *, prompt: str) -> list[dict[str, object]]:
     """Generate exactly the three visuals required before PPT build can start."""
 
     return [adapter.generate(role=role, prompt=f"{prompt}\nComposition role: {role}") for role in _AI_IMAGE_ROLES]
+
+
+def build_settings_ai_image_adapter(*, request_json: JsonRequest | None = None) -> SettingsAiImageAdapter | None:
+    """Build the image adapter from the configured GLM profile when available."""
+
+    from model_settings import ModelSettingsStore
+
+    settings = ModelSettingsStore().load("glm")
+    if not settings.api_key:
+        return None
+    return SettingsAiImageAdapter(api_key=settings.api_key, request_json=request_json)
 
 
 @dataclass(slots=True)

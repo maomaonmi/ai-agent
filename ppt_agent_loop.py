@@ -69,18 +69,22 @@ class AgentRunService:
     ) -> None:
         self.repository = repository
         self._locks: dict[str, threading.Lock] = {}
-        # Providers are optional at runtime: a local build remains usable with
-        # deterministic demo materials, while configured adapters are used for
-        # real runs and keep their credentials outside the run state.
+        # Providers are optional at runtime: use the same persisted settings as
+        # the settings UI first, then fall back to environment variables for
+        # headless deployments. Credentials never enter the durable run state.
         if search_adapters is None:
-            from ppt_materials import build_default_search_adapters
+            from ppt_materials import build_settings_search_adapters, build_default_search_adapters
 
-            search_adapters = build_default_search_adapters()
+            search_adapters = build_settings_search_adapters()
+            if not search_adapters:
+                search_adapters = build_default_search_adapters()
         self.search_adapters = dict(search_adapters)
-        if ai_image_adapter is None and os.getenv("AI_IMAGE_API_KEY") and os.getenv("AI_IMAGE_URL"):
-            from ppt_materials import AiImageAdapter
+        if ai_image_adapter is None:
+            from ppt_materials import AiImageAdapter, build_settings_ai_image_adapter
 
-            ai_image_adapter = AiImageAdapter()
+            ai_image_adapter = build_settings_ai_image_adapter()
+            if ai_image_adapter is None and os.getenv("AI_IMAGE_API_KEY") and os.getenv("AI_IMAGE_URL"):
+                ai_image_adapter = AiImageAdapter()
         if image_downloader is None:
             from ppt_materials import SafeImageDownloader
 

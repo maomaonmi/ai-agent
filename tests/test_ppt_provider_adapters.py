@@ -8,6 +8,8 @@ from ppt_materials import (
     AiImageAdapter,
     FirecrawlSearchAdapter,
     NativeSearchAdapter,
+    OpenAICompatibleNativeSearchAdapter,
+    SettingsAiImageAdapter,
     ProviderNotConfigured,
     SafeImageDownloader,
     SourceLedger,
@@ -74,6 +76,27 @@ def test_native_search_adapter_uses_qwen_or_glm_endpoint_contract() -> None:
         {"Authorization": "Bearer glm-key", "Content-Type": "application/json"},
         {"query": "native search", "limit": 20},
     )
+
+
+def test_settings_native_search_adapter_uses_glm_web_search_contract() -> None:
+    calls: list[tuple[str, dict[str, str], dict[str, object]]] = []
+
+    def request_json(endpoint: str, headers: dict[str, str], payload: dict[str, object]):
+        calls.append((endpoint, headers, payload))
+        return {"choices": [{"message": {"content": "参考 https://example.com/native-result"}}]}
+
+    adapter = OpenAICompatibleNativeSearchAdapter(
+        "glm",
+        base_url="https://open.bigmodel.cn/api/paas/v4",
+        api_key="glm-key",
+        model="glm-5.1",
+        request_json=request_json,
+    )
+
+    assert adapter("native search", 20) == [{"title": "native search", "url": "https://example.com/native-result"}]
+    assert calls[0][0] == "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+    assert calls[0][1]["Authorization"] == "Bearer glm-key"
+    assert calls[0][2]["tools"]
 
 
 def test_safe_image_downloader_rejects_private_dns_and_enforces_bytes_and_mime() -> None:
@@ -227,3 +250,20 @@ def test_ai_image_adapter_requires_credentials() -> None:
     adapter = AiImageAdapter(endpoint="https://images.example/generate", api_key=None)
     with pytest.raises(ProviderNotConfigured):
         adapter.generate(role="COVER", prompt="cover")
+
+
+def test_settings_ai_image_adapter_uses_glm_generation_contract() -> None:
+    calls: list[tuple[str, dict[str, str], dict[str, object]]] = []
+
+    def request_json(endpoint: str, headers: dict[str, str], payload: dict[str, object]):
+        calls.append((endpoint, headers, payload))
+        return {"data": [{"id": "glm-image-1", "url": "https://cdn.example/generated.png"}]}
+
+    adapter = SettingsAiImageAdapter(api_key="glm-key", request_json=request_json)
+    assert adapter.generate(role="COVER", prompt="future teams") == {
+        "role": "COVER",
+        "assetId": "glm-image-1",
+        "imageUrl": "https://cdn.example/generated.png",
+    }
+    assert calls[0][2]["model"] == "glm-image"
+    assert "画面用途：COVER" in str(calls[0][2]["prompt"])
