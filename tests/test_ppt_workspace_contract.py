@@ -53,3 +53,13 @@ def test_workspace_exposes_agent_progress_and_asset_provenance() -> None:
         '逐页搭建',
     ):
         assert contract_marker in source
+
+
+def test_workspace_resumes_durable_runs_and_does_not_claim_uncreated_ai_assets() -> None:
+    api = (FRONTEND / "features" / "ppt" / "api.ts").read_text(encoding="utf-8")
+    workspace = (FRONTEND / "features" / "ppt" / "workspace" / "PptWorkspace.tsx").read_text(encoding="utf-8")
+
+    assert "listResumableRuns" in api
+    assert "/api/ppt/runs/resumable" in api
+    assert "runId" in workspace and "listResumableRuns" in workspace
+    assert 'meta: "3 / 3 张"' not in workspace

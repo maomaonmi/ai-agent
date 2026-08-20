@@ -250,6 +250,14 @@ def create_ppt_router(
         response = JSONResponse(status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK, content=run_service.payload(run))
         return response
 
+    @router.get("/runs/resumable", response_model=None)
+    async def list_resumable_runs(
+        request: Request,
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> dict[str, Any]:
+        owner_scope = await _resolve_owner(owner_resolver, request)
+        return {"runs": [run_service.payload(run) for run in run_service.list_resumable(owner_scope=owner_scope, limit=limit)]}
+
     @router.get("/runs/{run_id}", response_model=None)
     async def get_run(run_id: str, request: Request) -> JSONResponse | dict[str, Any]:
         owner_scope = await _resolve_owner(owner_resolver, request)

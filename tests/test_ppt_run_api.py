@@ -100,3 +100,35 @@ def test_run_is_owner_scoped_and_can_be_cancelled(tmp_path: Path) -> None:
     assert cancelled.json()["status"] == "CANCELLED"
     events = client.get("/api/ppt/runs/run-cancel-001/events", headers={"x-test-owner": "owner-a"})
     assert "event: run.cancelled" in events.text
+
+
+def test_resumable_runs_are_listed_in_updated_order_and_exclude_terminal_runs(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    headers = {"x-test-owner": "owner-a"}
+    first = client.post(
+        "/api/ppt/runs",
+        headers=headers,
+        json={
+            "runId": "run-resume-001",
+            "presentationId": "presentation-run-001",
+            "prompt": "保留未完成进度",
+        },
+    )
+    second = client.post(
+        "/api/ppt/runs",
+        headers=headers,
+        json={
+            "runId": "run-resume-002",
+            "presentationId": "presentation-run-001",
+            "prompt": "另一个未完成进度",
+        },
+    )
+    assert first.status_code == 201
+    assert second.status_code == 201
+    client.post("/api/ppt/runs/run-resume-001/cancel", headers=headers)
+
+    resumable = client.get("/api/ppt/runs/resumable", headers=headers)
+
+    assert resumable.status_code == 200
+    assert [run["runId"] for run in resumable.json()["runs"]] == ["run-resume-002"]
+    assert resumable.json()["runs"][0]["state"]["prompt"] == "另一个未完成进度"

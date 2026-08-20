@@ -746,6 +746,50 @@ class PptRepository:
             updated_at=row["updated_at"],
         )
 
+    def list_runs(
+        self,
+        *,
+        owner_scope: str,
+        statuses: set[str] | frozenset[str] | None = None,
+        limit: int = 20,
+    ) -> list[RunRecord]:
+        """Return durable runs for a user, newest updates first.
+
+        The query intentionally lives in the repository so callers never need
+        to reconstruct resumable sessions from the in-memory worker registry.
+        """
+        safe_limit = max(1, min(int(limit), 100))
+        clauses = ["owner_scope = ?"]
+        params: list[Any] = [owner_scope]
+        if statuses:
+            ordered_statuses = sorted(statuses)
+            placeholders = ",".join("?" for _ in ordered_statuses)
+            clauses.append(f"status IN ({placeholders})")
+            params.extend(ordered_statuses)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM ppt_runs
+                WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT ?
+                """,
+                [*params, safe_limit],
+            ).fetchall()
+        return [
+            RunRecord(
+                id=row["id"],
+                presentation_id=row["presentation_id"],
+                owner_scope=row["owner_scope"],
+                status=row["status"],
+                phase=row["phase"],
+                state=_json_load(row["state_json"], {}),
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
     def update_run(
         self,
         run_id: str,

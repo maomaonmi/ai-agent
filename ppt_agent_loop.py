@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import uuid
 import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping
 
@@ -72,6 +73,8 @@ class AgentRunService:
     ) -> None:
         self.repository = repository
         self._locks: dict[str, threading.Lock] = {}
+        self._workers: dict[str, threading.Thread] = {}
+        self._worker_guard = threading.Lock()
         self._settings_backed = search_adapters is None
         # Providers are optional at runtime: use the same persisted settings as
         # the settings UI first, then fall back to environment variables for
@@ -121,6 +124,16 @@ class AgentRunService:
     def _lock(self, run_id: str) -> threading.Lock:
         return self._locks.setdefault(run_id, threading.Lock())
 
+    def _ensure_worker(self, run_id: str, owner_scope: str) -> None:
+        """Resume a durable non-terminal run when this process has no worker for it."""
+        with self._worker_guard:
+            worker = self._workers.get(run_id)
+            if worker is not None and worker.is_alive():
+                return
+            worker = threading.Thread(target=self._execute, args=(run_id, owner_scope), daemon=True)
+            self._workers[run_id] = worker
+            worker.start()
+
     @staticmethod
     def payload(record: RunRecord) -> dict[str, Any]:
         return {
@@ -152,6 +165,8 @@ class AgentRunService:
         if existing is not None:
             if existing.presentation_id != presentation_id or existing.state.get("prompt") != prompt:
                 raise RepositoryConflict("runId is already bound to a different task")
+            if existing.status not in TERMINAL_RUN_STATUSES:
+                self._ensure_worker(resolved_id, owner_scope)
             return existing, False
         state = {
             "prompt": prompt,
@@ -183,9 +198,10 @@ class AgentRunService:
             existing = self.repository.get_run(resolved_id, owner_scope=owner_scope)
             if existing is None:
                 raise
+            if existing.status not in TERMINAL_RUN_STATUSES:
+                self._ensure_worker(resolved_id, owner_scope)
             return existing, False
-        worker = threading.Thread(target=self._execute, args=(resolved_id, owner_scope), daemon=True)
-        worker.start()
+        self._ensure_worker(resolved_id, owner_scope)
         return record, True
 
     def _next_sequence(self, run_id: str) -> int:
@@ -302,19 +318,95 @@ class AgentRunService:
                     ]
                     real_sources: list[dict[str, Any]] = []
                     seen_images: set[str] = set()
+                    max_page_sources = 12
+                    page_sources: list[dict[str, Any]] = []
+
+                    def add_image_sources(result: dict[str, Any], image_urls: list[str]) -> None:
+                        for image_url in image_urls:
+                            if image_url in seen_images:
+                                continue
+                            seen_images.add(image_url)
+                            real_sources.append({**result, "imageUrl": image_url})
+
                     for round_state in rounds:
                         for result in round_state["results"]:
                             if not isinstance(result.get("url"), str):
                                 continue
                             image_urls = [result["imageUrl"]] if isinstance(result.get("imageUrl"), str) else []
-                            if not image_urls and self.web_image_extractor is not None:
-                                image_urls = self.web_image_extractor.extract(result["url"], limit=3)
-                            for image_url in image_urls:
-                                if image_url in seen_images:
-                                    continue
-                                seen_images.add(image_url)
-                                real_sources.append({**result, "imageUrl": image_url})
+                            if image_urls:
+                                add_image_sources(result, image_urls)
+                            elif self.web_image_extractor is not None and len(page_sources) < max_page_sources:
+                                page_sources.append(result)
+                            self._emit(
+                                run_id,
+                                owner_scope,
+                                "phase.progress",
+                                {"phase": phase, "label": label, "candidateCount": len(real_sources), "selectedCount": 0, "downloadedCount": 0},
+                                state_patch={
+                                    "webImages": {
+                                        "candidateCount": max(details["candidateCount"], len(real_sources)),
+                                        "selectedCount": 0,
+                                        "downloadedCount": 0,
+                                        "mode": "collecting",
+                                        "assets": [],
+                                    }
+                                },
+                            )
+                    if self.web_image_extractor is not None and page_sources:
+                        def extract_page(result: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+                            try:
+                                return result, self.web_image_extractor.extract(result["url"], limit=3)
+                            except Exception:
+                                return result, []
+
+                        with ThreadPoolExecutor(max_workers=4, thread_name_prefix="ppt-web-image") as executor:
+                            extracted_pages = list(executor.map(extract_page, page_sources))
+                        for result, image_urls in extracted_pages:
+                            add_image_sources(result, image_urls)
+                            self._emit(
+                                run_id,
+                                owner_scope,
+                                "phase.progress",
+                                {"phase": phase, "label": label, "candidateCount": len(real_sources), "selectedCount": 0, "downloadedCount": 0},
+                                state_patch={
+                                    "webImages": {
+                                        "candidateCount": max(details["candidateCount"], len(real_sources)),
+                                        "selectedCount": 0,
+                                        "downloadedCount": 0,
+                                        "mode": "collecting",
+                                        "assets": [],
+                                    }
+                                },
+                            )
                     downloaded_count = 0
+                    web_assets: list[dict[str, object]] = []
+
+                    def persist_web_progress(*, candidate_count: int, failed_count: int = 0) -> None:
+                        self._emit(
+                            run_id,
+                            owner_scope,
+                            "phase.progress",
+                            {
+                                "phase": phase,
+                                "label": label,
+                                "candidateCount": candidate_count,
+                                "selectedCount": len(web_assets),
+                                "downloadedCount": downloaded_count,
+                                "failedCount": failed_count,
+                                "assets": list(web_assets),
+                            },
+                            state_patch={
+                                "webImages": {
+                                    "candidateCount": max(details["candidateCount"], candidate_count),
+                                    "selectedCount": len(web_assets),
+                                    "downloadedCount": downloaded_count,
+                                    "failedCount": failed_count,
+                                    "mode": "provider" if downloaded_count >= 3 else "collecting",
+                                    "assets": list(web_assets),
+                                }
+                            },
+                        )
+
                     if self.image_downloader is not None:
                         for source in real_sources:
                             if downloaded_count >= 3:
@@ -326,9 +418,12 @@ class AgentRunService:
                                     downloader=self.image_downloader,
                                     alt=str(source.get("title", "")),
                                 )
+                                web_assets = list(material_gate.ledger.web_images)
                                 downloaded_count += 1
                             except Exception:
+                                persist_web_progress(candidate_count=len(real_sources), failed_count=max(0, len(real_sources) - downloaded_count - len(web_assets)))
                                 continue
+                            persist_web_progress(candidate_count=len(real_sources), failed_count=0)
                     if downloaded_count < 3:
                         if not self.allow_demo_materials:
                             raise RuntimeError(f"网页图片素材不足：仅成功下载 {downloaded_count} / 3 张（候选 {len(real_sources)} 个）")
@@ -336,13 +431,14 @@ class AgentRunService:
                         # deterministic fallback, explicitly marked as demo data.
                         for index in range(3 - downloaded_count):
                             material_gate.ledger.add_web_image(f"https://images.example.com/ppt/{run_id}/{index}.jpg", page_url="https://example.com/research", alt=f"网页素材 {index + 1}")
+                        web_assets = list(material_gate.ledger.web_images)
                     state_patch["searchRounds"] = rounds
                     state_patch["webImages"] = {
                         "candidateCount": max(details["candidateCount"], len(real_sources)),
                         "selectedCount": len(material_gate.ledger.web_images),
                         "downloadedCount": downloaded_count,
                         "mode": "provider" if downloaded_count >= 3 else "demo-fallback",
-                        "assets": list(material_gate.ledger.web_images),
+                        "assets": list(web_assets),
                     }
                     phase_details.update(state_patch["webImages"])
                 elif phase == "AI_ASSETS":
@@ -360,10 +456,12 @@ class AgentRunService:
                             "assets": generated,
                         }
                     else:
+                        if not self.allow_demo_materials:
+                            raise RuntimeError("AI 图片生成 provider 未配置，无法生成封面、中段背景与结尾主视觉")
                         for role in ("COVER", "MID_BACKGROUND", "END"):
                             material_gate.record_ai_image(role, f"asset-ai-{role.lower()}")
                         state_patch["aiImages"] = {
-                            "generatedCount": details["generatedCount"],
+                            "generatedCount": len(material_gate.ai_images),
                             "requiredCount": details["requiredCount"],
                             "mode": "demo-fallback",
                         }
@@ -384,6 +482,13 @@ class AgentRunService:
         if record is None:
             raise RunNotFound(run_id)
         return record
+
+    def list_resumable(self, *, owner_scope: str, limit: int = 20) -> list[RunRecord]:
+        return self.repository.list_runs(
+            owner_scope=owner_scope,
+            statuses={"QUEUED", "RUNNING", "PAUSED"},
+            limit=limit,
+        )
 
     def cancel(self, run_id: str, *, owner_scope: str) -> RunRecord:
         with self._lock(run_id):

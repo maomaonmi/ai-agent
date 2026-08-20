@@ -208,3 +208,99 @@ def test_agent_run_deduplicates_sources_across_search_rounds(tmp_path: Path) -> 
     urls = [url for event in completed for url in [source["url"] for source in event.payload["sources"]]]
     assert len(urls) == len(set(urls)) == 9
     assert [event.payload["sources"][0]["title"] for event in completed] == ["round-1 source 0", "round-2 source 0", "round-3 source 0"]
+
+
+def test_ai_assets_do_not_report_three_generated_images_when_provider_is_missing(tmp_path: Path) -> None:
+    repository = PptRepository(tmp_path / "ppt.db")
+    repository.initialize()
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    document["presentationId"] = "presentation-no-ai-provider-001"
+    repository.create_presentation(
+        presentation_id="presentation-no-ai-provider-001",
+        owner_scope="owner-a",
+        title="Missing image provider",
+        document=document,
+        template_id=None,
+    )
+
+    def search(_query: str, _limit: int):
+        return [
+            {
+                "title": f"Source {index}",
+                "url": f"https://example.com/article-{index}",
+                "imageUrl": f"https://cdn.example/image-{index}.png",
+            }
+            for index in range(3)
+        ]
+
+    class Downloader:
+        def download(self, image_url: str) -> DownloadedImage:
+            return DownloadedImage(image_url, "image/png", b"image", "a" * 64)
+
+    service = AgentRunService(
+        repository,
+        search_adapters={"firecrawl": search, "qwen": search, "glm": search},
+        image_downloader=Downloader(),
+    )
+    # Explicitly clear settings-backed discovery for this deterministic missing-provider case.
+    service.ai_image_adapter = None
+    run, _ = service.create(
+        run_id="run-no-ai-provider-001",
+        presentation_id="presentation-no-ai-provider-001",
+        owner_scope="owner-a",
+        prompt="missing image provider",
+        max_iterations=3,
+    )
+
+    for _ in range(500):
+        snapshot = service.get(run.id, owner_scope="owner-a")
+        if snapshot.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+            break
+        time.sleep(0.01)
+
+    assert snapshot.status == "FAILED"
+    assert snapshot.state["aiImages"]["generatedCount"] == 0
+    events = repository.list_run_events(run.id, after_sequence=0, limit=200)
+    failed = next(event for event in events if event.event_type == "run.failed")
+    assert "AI 图片生成 provider 未配置" in failed.payload["message"]
+
+
+def test_idempotent_create_restarts_an_unfinished_worker_after_process_restore(tmp_path: Path) -> None:
+    repository = PptRepository(tmp_path / "ppt.db")
+    repository.initialize()
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    document["presentationId"] = "presentation-worker-restore-001"
+    repository.create_presentation(
+        presentation_id="presentation-worker-restore-001",
+        owner_scope="owner-a",
+        title="Worker restore",
+        document=document,
+        template_id=None,
+    )
+    repository.create_run(
+        run_id="run-worker-restore-001",
+        presentation_id="presentation-worker-restore-001",
+        owner_scope="owner-a",
+        status="RUNNING",
+        phase="WEB_ASSETS",
+        state={"prompt": "resume worker", "modelProvider": "deepseek", "searchProvider": "auto", "searchLimit": 20},
+    )
+    service = AgentRunService(repository, search_adapters={})
+    calls: list[str] = []
+    service._execute = lambda run_id, owner_scope: calls.append(f"{run_id}:{owner_scope}")  # type: ignore[method-assign]
+
+    restored, created = service.create(
+        run_id="run-worker-restore-001",
+        presentation_id="presentation-worker-restore-001",
+        owner_scope="owner-a",
+        prompt="resume worker",
+        max_iterations=3,
+    )
+
+    for _ in range(100):
+        if calls:
+            break
+        time.sleep(0.01)
+    assert created is False
+    assert restored.status == "RUNNING"
+    assert calls == ["run-worker-restore-001:owner-a"]
