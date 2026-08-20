@@ -518,7 +518,9 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const [activeSlideId, setActiveSlideId] = useState(() => freshFromSidebar ? freshSlides[0].id : initialSlides[0].id);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [workflowStep, setWorkflowStep] = useState(0);
+  const [targetWorkflowStep, setTargetWorkflowStep] = useState(0);
   const [running, setRunning] = useState(false);
+  const [runTerminal, setRunTerminal] = useState(false);
   const [zoom, setZoom] = useState(82);
   const [exporting, setExporting] = useState(false);
   const [mobileWorkflowOpen, setMobileWorkflowOpen] = useState(false);
@@ -583,10 +585,16 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   }, []);
 
   useEffect(() => {
-    if (!running || workflowStep >= workflow.length - 1) return;
-    const timer = window.setTimeout(() => setWorkflowStep((value) => Math.min(workflow.length - 1, value + 1)), 1500);
-    return () => window.clearTimeout(timer);
-  }, [running, workflowStep]);
+    if (!running) return;
+    if (workflowStep < targetWorkflowStep) {
+      const timer = window.setTimeout(() => setWorkflowStep((value) => Math.min(targetWorkflowStep, value + 1)), 720);
+      return () => window.clearTimeout(timer);
+    }
+    if (runTerminal && workflowStep >= targetWorkflowStep) {
+      const timer = window.setTimeout(() => setRunning(false), 720);
+      return () => window.clearTimeout(timer);
+    }
+  }, [runTerminal, running, targetWorkflowStep, workflowStep]);
 
   const statusText = useMemo(() => {
     if (!started) return "等待你的指令";
@@ -633,14 +641,14 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         maxIterations: 3,
       });
       setRunId(run.runId);
-      setWorkflowStep(workflowStepForPhase(run.phase));
+      setTargetWorkflowStep(workflowStepForPhase(run.phase));
       const poll = async () => {
         try {
           const snapshot = await pptApi.getRun(run.runId);
-          setWorkflowStep(workflowStepForPhase(snapshot.phase));
+          setTargetWorkflowStep((current) => Math.max(current, workflowStepForPhase(snapshot.phase)));
           if (snapshot.status === "COMPLETED" || snapshot.status === "CANCELLED" || snapshot.status === "FAILED") {
             runPollRef.current = null;
-            setRunning(false);
+            setRunTerminal(true);
             return;
           }
           runPollRef.current = window.setTimeout(() => void poll(), 220);
@@ -650,13 +658,17 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
       };
       runPollRef.current = window.setTimeout(() => void poll(), 120);
     } catch {
-      // The local timer remains the offline fallback when the API is unavailable.
+      // The staged client animation remains the offline fallback when the API is unavailable.
+      setTargetWorkflowStep(workflow.length - 1);
+      setRunTerminal(true);
     }
   };
 
   const sendChatMessage = (message: string) => {
     setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: message }, { id: nextId("assistant"), role: "assistant", text: "收到。我会先拆解需求，再进行多轮检索和素材收集；你可以在右侧实时看到每一页的搭建过程。" }]);
     setWorkflowStep(0);
+    setTargetWorkflowStep(0);
+    setRunTerminal(false);
     setRunning(true);
     void startAgentRun(message);
   };
@@ -664,6 +676,8 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const restartWorkflow = () => {
     setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "我会重新规划这一版结构，并从第一轮资料检索开始。" }]);
     setWorkflowStep(0);
+    setTargetWorkflowStep(0);
+    setRunTerminal(false);
     setRunning(true);
     void startAgentRun("重新规划当前演示文稿");
   };
