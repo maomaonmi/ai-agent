@@ -663,7 +663,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           const generatedCount = typeof event.data.generatedCount === "number" ? event.data.generatedCount : null;
           const requiredCount = typeof event.data.requiredCount === "number" ? event.data.requiredCount : null;
           const slideCount = typeof event.data.slideCount === "number" ? event.data.slideCount : null;
-          const mode = event.data.mode === "provider" ? "实时 provider" : event.data.mode === "demo-fallback" ? "未配置 provider" : null;
+          const mode = event.data.mode === "provider" ? "实时 provider" : event.data.mode === "provider-fallback" ? "Firecrawl fallback" : event.data.mode === "demo-fallback" ? "未配置 provider" : null;
           const meta = resultCount !== null ? `${resultCount} 条${mode ? ` · ${mode}` : ""}`
             : candidateCount !== null && selectedCount !== null ? `${candidateCount} 张候选 · ${selectedCount} 张采用${downloadedCount !== null ? ` · 已下载 ${downloadedCount}` : ""}`
               : generatedCount !== null && requiredCount !== null ? `${generatedCount} / ${requiredCount} 张${mode ? ` · ${mode}` : ""}`
