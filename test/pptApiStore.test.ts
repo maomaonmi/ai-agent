@@ -98,6 +98,38 @@ test("presentation API creates, loads, and commits operations with camel-case co
 });
 
 
+test("run API starts, polls, and cancels a durable agent loop", async () => {
+  const originalFetch = globalThis.fetch;
+  const api = createPptApi("http://ppt.test");
+  const calls: string[] = [];
+  const run = {
+    runId: "run-1",
+    presentationId: "presentation-1",
+    status: "RUNNING" as const,
+    phase: "SEARCH_1",
+    state: {},
+    createdAt: "2026-08-20T00:00:00Z",
+    updatedAt: "2026-08-20T00:00:00Z",
+  };
+  try {
+    globalThis.fetch = async (input) => {
+      calls.push(String(input));
+      return new Response(JSON.stringify(run), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    await api.createRun({ presentationId: "presentation-1", prompt: "做 PPT" });
+    await api.getRun("run-1");
+    await api.cancelRun("run-1");
+    assert.deepEqual(calls, [
+      "http://ppt.test/api/ppt/runs",
+      "http://ppt.test/api/ppt/runs/run-1",
+      "http://ppt.test/api/ppt/runs/run-1/cancel",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
 test("market store cancels stale list requests before applying results", async () => {
   const pending: Array<{
     signal: AbortSignal;

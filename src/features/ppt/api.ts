@@ -68,6 +68,25 @@ export interface ApplyPptOperationsInput {
   operations: Array<Record<string, unknown>>;
 }
 
+export type PptRunStatus = "QUEUED" | "RUNNING" | "PAUSED" | "COMPLETED" | "CANCELLED" | "FAILED";
+
+export interface PptRunResponse {
+  runId: string;
+  presentationId: string;
+  status: PptRunStatus;
+  phase: string;
+  state: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreatePptRunInput {
+  runId?: string;
+  presentationId: string;
+  prompt: string;
+  maxIterations?: number;
+}
+
 interface ApiErrorPayload {
   error?: {
     code?: string;
@@ -120,6 +139,9 @@ export interface PptApi {
   createPresentation(input?: CreatePptPresentationInput, signal?: AbortSignal): Promise<PptPresentationResponse>;
   getPresentation(presentationId: string, signal?: AbortSignal): Promise<PptPresentationResponse>;
   applyOperations(presentationId: string, input: ApplyPptOperationsInput, signal?: AbortSignal): Promise<PptPresentationResponse>;
+  createRun(input: CreatePptRunInput, signal?: AbortSignal): Promise<PptRunResponse>;
+  getRun(runId: string, signal?: AbortSignal): Promise<PptRunResponse>;
+  cancelRun(runId: string): Promise<PptRunResponse>;
 }
 
 export function createPptApi(baseUrl = DEFAULT_API_BASE_URL): PptApi {
@@ -178,6 +200,18 @@ export function createPptApi(baseUrl = DEFAULT_API_BASE_URL): PptApi {
     applyOperations: (presentationId, input, signal) => request<PptPresentationResponse>(
       `/api/ppt/presentations/${encodeURIComponent(presentationId)}/operations`,
       { method: "POST", body: JSON.stringify(input), signal },
+    ),
+    createRun: (input, signal) => request<PptRunResponse>(
+      "/api/ppt/runs",
+      { method: "POST", body: JSON.stringify(input), signal },
+    ),
+    getRun: (runId, signal) => request<PptRunResponse>(
+      `/api/ppt/runs/${encodeURIComponent(runId)}`,
+      { signal },
+    ),
+    cancelRun: (runId) => request<PptRunResponse>(
+      `/api/ppt/runs/${encodeURIComponent(runId)}/cancel`,
+      { method: "POST" },
     ),
   };
 }

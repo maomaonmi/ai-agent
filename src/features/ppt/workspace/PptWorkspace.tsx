@@ -325,6 +325,12 @@ function workspaceSlidesFromDocument(document: PresentationDocument): WorkspaceS
 }
 
 
+function workflowStepForPhase(phase: string): number {
+  const index = ["PLAN", "SEARCH_1", "SEARCH_2", "SEARCH_3", "WEB_ASSETS", "AI_ASSETS", "OUTLINE", "BUILD", "REVIEW"].indexOf(phase);
+  return index < 0 ? 0 : index;
+}
+
+
 async function imageUrlToDataUrl(src: string): Promise<string> {
   const response = await fetch(src);
   if (!response.ok) throw new Error("图片读取失败");
@@ -519,6 +525,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const [leftWidth, setLeftWidth] = useState(420);
   const [serverPresentation, setServerPresentation] = useState<PptPresentationResponse | null>(null);
   const [serverState, setServerState] = useState<"loading" | "ready" | "offline" | "error">("loading");
+  const [runId, setRunId] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => [{
     id: "welcome",
     role: "assistant",
@@ -527,6 +534,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const canvasRef = useRef<HTMLDivElement>(null);
   const serverPresentationRef = useRef<PptPresentationResponse | null>(null);
   const persistenceQueueRef = useRef(Promise.resolve());
+  const runPollRef = useRef<number | null>(null);
   const clientPresentationIdRef = useRef(presentationId === "new" ? `presentation-${crypto.randomUUID?.() ?? `${Date.now()}-${Math.round(Math.random() * 1000)}`}` : presentationId);
   const activeSlide = slides.find((slide) => slide.id === activeSlideId) ?? slides[0];
   const activeIndex = slides.findIndex((slide) => slide.id === activeSlide.id);
@@ -570,6 +578,10 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     return () => { cancelled = true; };
   }, [freshFromSidebar, presentationId, router, templateId]);
 
+  useEffect(() => () => {
+    if (runPollRef.current !== null) window.clearTimeout(runPollRef.current);
+  }, []);
+
   useEffect(() => {
     if (!running || workflowStep >= workflow.length - 1) return;
     const timer = window.setTimeout(() => setWorkflowStep((value) => Math.min(workflow.length - 1, value + 1)), 1500);
@@ -611,16 +623,49 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     }).catch(() => setServerState("error"));
   };
 
+  const startAgentRun = async (prompt: string) => {
+    const currentPresentation = serverPresentationRef.current;
+    if (!currentPresentation) return;
+    try {
+      const run = await pptApi.createRun({
+        presentationId: currentPresentation.presentationId,
+        prompt,
+        maxIterations: 3,
+      });
+      setRunId(run.runId);
+      setWorkflowStep(workflowStepForPhase(run.phase));
+      const poll = async () => {
+        try {
+          const snapshot = await pptApi.getRun(run.runId);
+          setWorkflowStep(workflowStepForPhase(snapshot.phase));
+          if (snapshot.status === "COMPLETED" || snapshot.status === "CANCELLED" || snapshot.status === "FAILED") {
+            runPollRef.current = null;
+            setRunning(false);
+            return;
+          }
+          runPollRef.current = window.setTimeout(() => void poll(), 220);
+        } catch {
+          runPollRef.current = null;
+        }
+      };
+      runPollRef.current = window.setTimeout(() => void poll(), 120);
+    } catch {
+      // The local timer remains the offline fallback when the API is unavailable.
+    }
+  };
+
   const sendChatMessage = (message: string) => {
     setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: message }, { id: nextId("assistant"), role: "assistant", text: "收到。我会先拆解需求，再进行多轮检索和素材收集；你可以在右侧实时看到每一页的搭建过程。" }]);
     setWorkflowStep(0);
     setRunning(true);
+    void startAgentRun(message);
   };
 
   const restartWorkflow = () => {
     setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "我会重新规划这一版结构，并从第一轮资料检索开始。" }]);
     setWorkflowStep(0);
     setRunning(true);
+    void startAgentRun("重新规划当前演示文稿");
   };
 
   const beginResize = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -743,7 +788,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         <div className="flex min-w-0 items-center gap-2.5">
           <Link href="/ppt" aria-label="返回模板市场" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100"><ArrowLeft size={18} /></Link>
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-violet-600 text-white"><Sparkles size={15} /></span>
-          <div className="min-w-0"><p className="truncate text-sm font-semibold">{serverPresentation?.title ?? (freshFromSidebar ? "新建 AI PPT" : "智能体时代的协作新范式")}</p><p className="truncate text-[10px] text-slate-400">{presentationId === "new" ? "新演示" : presentationId} · {freshFromSidebar ? "空白工作台" : `模板 ${templateId}`}</p></div>
+          <div className="min-w-0"><p className="truncate text-sm font-semibold">{serverPresentation?.title ?? (freshFromSidebar ? "新建 AI PPT" : "智能体时代的协作新范式")}</p><p className="truncate text-[10px] text-slate-400">{presentationId === "new" ? "新演示" : presentationId} · {freshFromSidebar ? "空白工作台" : `模板 ${templateId}`}{runId ? ` · Run ${runId.slice(-8)}` : ""}</p></div>
           <span className={`hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-medium md:flex ${serverState === "ready" ? "bg-emerald-50 text-emerald-700" : serverState === "loading" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500"}`}><span className={`h-1.5 w-1.5 rounded-full ${serverState === "ready" ? "bg-emerald-500" : serverState === "loading" ? "bg-amber-500" : "bg-slate-400"}`} /> {serverState === "ready" ? "已连接 · 自动保存" : serverState === "loading" ? "正在连接" : "本地编辑 · 稍后同步"}</span>
         </div>
         <div className="flex items-center gap-1.5">
