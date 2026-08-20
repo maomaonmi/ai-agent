@@ -43,6 +43,9 @@ def test_run_is_idempotent_and_events_are_replayable_as_sse(tmp_path: Path) -> N
         "runId": "run-api-001",
         "presentationId": "presentation-run-001",
         "prompt": "做一份关于团队协作的 8 页 PPT",
+        "modelProvider": "glm",
+        "searchProvider": "firecrawl",
+        "searchLimit": 15,
     }
 
     first = client.post("/api/ppt/runs", headers=headers, json=payload)
@@ -57,6 +60,9 @@ def test_run_is_idempotent_and_events_are_replayable_as_sse(tmp_path: Path) -> N
     assert conflicting.status_code == 409
     assert conflicting.json()["error"]["code"] == "PPT_RUN_CONFLICT"
     assert second.json()["runId"] == "run-api-001"
+    assert second.json()["state"]["modelProvider"] == "glm"
+    assert second.json()["state"]["searchProvider"] == "firecrawl"
+    assert second.json()["state"]["searchLimit"] == 15
 
     time.sleep(0.35)
     snapshot = client.get("/api/ppt/runs/run-api-001", headers=headers)

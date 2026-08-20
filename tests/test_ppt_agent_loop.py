@@ -70,6 +70,9 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
         owner_scope="owner-a",
         prompt="provider integration",
         max_iterations=3,
+        model_provider="qwen",
+        search_provider="firecrawl",
+        search_limit=3,
     )
 
     assert created is True
@@ -80,6 +83,9 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
         time.sleep(0.01)
 
     assert snapshot.status == "COMPLETED"
+    assert snapshot.state["modelProvider"] == "qwen"
+    assert snapshot.state["searchProvider"] == "firecrawl"
+    assert snapshot.state["searchLimit"] == 3
     assert snapshot.state["searchRounds"][0]["resultCount"] == 3
     assert snapshot.state["webImages"]["downloadedCount"] == 3
     assert snapshot.state["webImages"]["mode"] == "provider"
@@ -89,6 +95,11 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
     search_complete = next(event for event in events if event.event_type == "phase.completed" and event.payload.get("phase") == "SEARCH_1")
     assert search_complete.payload["resultCount"] == 3
     assert search_complete.payload["mode"] == "provider"
+    assert search_complete.payload["sources"] == [
+        {"title": "Source 0", "url": "https://example.com/article-10", "imageUrl": "https://cdn.example/image-10.png"},
+        {"title": "Source 1", "url": "https://example.com/article-11", "imageUrl": "https://cdn.example/image-11.png"},
+        {"title": "Source 2", "url": "https://example.com/article-12", "imageUrl": "https://cdn.example/image-12.png"},
+    ]
     web_complete = next(event for event in events if event.event_type == "phase.completed" and event.payload.get("phase") == "WEB_ASSETS")
     assert web_complete.payload["downloadedCount"] == 3
 

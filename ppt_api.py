@@ -70,6 +70,9 @@ class CreateRunRequest(BaseModel):
     presentation_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
     prompt: str = Field(min_length=1, max_length=50_000)
     max_iterations: int = Field(default=3, ge=1, le=8)
+    model_provider: Literal["deepseek", "qwen", "glm"] = "deepseek"
+    search_provider: Literal["auto", "firecrawl", "qwen", "glm"] = "auto"
+    search_limit: int = Field(default=20, ge=1, le=20)
 
 
 def _error(code: str, message: str, *, status_code: int, details: Any | None = None) -> JSONResponse:
@@ -236,6 +239,9 @@ def create_ppt_router(
                 owner_scope=owner_scope,
                 prompt=create.prompt,
                 max_iterations=create.max_iterations,
+                model_provider=create.model_provider,
+                search_provider=create.search_provider,
+                search_limit=create.search_limit,
             )
         except PresentationForRunNotFound:
             return _error("PPT_PRESENTATION_NOT_FOUND", "演示文稿不存在", status_code=404)

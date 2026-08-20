@@ -16,6 +16,7 @@ class SearchBatchLimitExceeded(ValueError):
 
 
 SearchProvider = Literal["firecrawl", "qwen", "glm"]
+SearchProviderSelection = Literal["auto", "firecrawl", "qwen", "glm"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +133,9 @@ class AgentRunService:
         owner_scope: str,
         prompt: str,
         max_iterations: int,
+        model_provider: Literal["deepseek", "qwen", "glm"] = "deepseek",
+        search_provider: SearchProviderSelection = "auto",
+        search_limit: int = 20,
     ) -> tuple[RunRecord, bool]:
         if self.repository.get_presentation(presentation_id, owner_scope=owner_scope) is None:
             raise PresentationForRunNotFound(presentation_id)
@@ -145,6 +149,9 @@ class AgentRunService:
             "prompt": prompt,
             "iteration": 0,
             "maxIterations": max_iterations,
+            "modelProvider": model_provider,
+            "searchProvider": search_provider,
+            "searchLimit": search_limit,
             "searchRounds": [],
             "webImages": {"candidateCount": 0, "selectedCount": 0},
             "aiImages": {"generatedCount": 0, "requiredCount": 3},
@@ -212,27 +219,37 @@ class AgentRunService:
                 current = self.repository.get_run(run_id, owner_scope=owner_scope)
                 if current is None or current.status == "CANCELLED":
                     return
-                self._emit(run_id, owner_scope, "phase.started", {"phase": phase, "label": label}, status="RUNNING", phase=phase)
+                selected_provider = current.state.get("searchProvider", "auto")
+                effective_provider = details.get("provider")
+                effective_limit = int(current.state.get("searchLimit", details.get("limit", 20)))
+                if phase.startswith("SEARCH") and selected_provider in {"firecrawl", "qwen", "glm"}:
+                    effective_provider = selected_provider
+                started_payload: dict[str, Any] = {"phase": phase, "label": label}
+                if phase.startswith("SEARCH"):
+                    SearchBatch(provider=effective_provider, query=current.state.get("prompt", "PPT"), limit=effective_limit)
+                    started_payload.update({"provider": effective_provider, "limit": effective_limit})
+                self._emit(run_id, owner_scope, "phase.started", started_payload, status="RUNNING", phase=phase)
                 state_patch: dict[str, Any] = {}
                 phase_details = dict(details)
                 if phase.startswith("SEARCH"):
-                    provider = details["provider"]
+                    provider = effective_provider
                     query = current.state.get("prompt", "PPT")
-                    SearchBatch(provider=provider, query=query, limit=details["limit"])
+                    SearchBatch(provider=provider, query=query, limit=effective_limit)
                     rounds = list(current.state.get("searchRounds", []))
                     configured_adapter = search_coordinator.adapters.get(provider)
                     if configured_adapter is not None:
                         try:
-                            results = search_coordinator.search_round(provider=provider, query=query, limit=details["limit"])
-                            phase_details.update({"resultCount": len(results), "mode": "provider"})
+                            results = search_coordinator.search_round(provider=provider, query=query, limit=effective_limit)
+                            phase_details.update({"provider": provider, "limit": effective_limit, "resultCount": len(results), "mode": "provider"})
                         except Exception as provider_error:
                             fallback_adapter = search_coordinator.adapters.get("firecrawl")
                             if provider == "firecrawl" or fallback_adapter is None:
                                 raise
-                            results = search_coordinator.search_round(provider="firecrawl", query=query, limit=details["limit"])
+                            results = search_coordinator.search_round(provider="firecrawl", query=query, limit=effective_limit)
                             phase_details.update({
                                 "provider": "firecrawl",
                                 "requestedProvider": provider,
+                                "limit": effective_limit,
                                 "resultCount": len(results),
                                 "mode": "provider-fallback",
                                 "fallbackReason": type(provider_error).__name__,
@@ -240,7 +257,22 @@ class AgentRunService:
                         rounds.append({"round": len(rounds) + 1, **phase_details, "results": results})
                     else:
                         phase_details["mode"] = "demo-fallback"
+                        phase_details.update({"provider": provider, "limit": effective_limit, "resultCount": 0})
                         rounds.append({"round": len(rounds) + 1, **phase_details})
+                    phase_details["sources"] = [
+                        {
+                            key: value
+                            for key, value in {
+                                "title": result.get("title") or result.get("name") or "未命名来源",
+                                "url": result.get("url"),
+                                "imageUrl": result.get("imageUrl"),
+                                "pageUrl": result.get("pageUrl"),
+                            }.items()
+                            if isinstance(value, str) and value.strip()
+                        }
+                        for result in (results if configured_adapter is not None else [])[:20]
+                        if isinstance(result, dict) and isinstance(result.get("url"), str) and result.get("url", "").startswith(("http://", "https://"))
+                    ]
                     state_patch["searchRounds"] = rounds
                 elif phase == "WEB_ASSETS":
                     real_sources = [
