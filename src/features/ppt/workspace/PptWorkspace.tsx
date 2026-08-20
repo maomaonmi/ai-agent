@@ -72,6 +72,10 @@ interface WorkflowStep {
 
 type ExportElement = { kind: string; [key: string]: unknown };
 type ChatMessage = { id: string; role: "user" | "assistant"; text: string };
+type ModelProvider = "deepseek" | "qwen" | "glm";
+type SearchProvider = "auto" | "firecrawl" | "qwen" | "glm";
+type SearchSource = { title: string; url: string; imageUrl?: string; pageUrl?: string };
+type RunConfig = { modelProvider: ModelProvider; searchProvider: SearchProvider; searchLimit: number };
 
 
 const generatedAssets = [
@@ -362,7 +366,7 @@ function SlideSurface({
   const mutedClass = dark ? "text-white/65" : "text-slate-500";
   return (
     <div className={`relative aspect-video w-full overflow-hidden bg-[#111827] ${dark ? "" : "bg-[#f4efe8]"}`}>
-      <Image src={slide.image} alt="演示文稿视觉素材" fill priority={slide.id.endsWith("cover")} sizes={compact ? "220px" : "(max-width: 1024px) 100vw, 65vw"} className={`object-cover ${dark ? "opacity-75" : "opacity-55"}`} />
+      <Image src={slide.image} alt="演示文稿视觉素材" fill sizes={compact ? "220px" : "(max-width: 1024px) 100vw, 65vw"} className={`object-cover ${dark ? "opacity-75" : "opacity-55"}`} />
       <div className={`absolute inset-0 ${dark ? "bg-slate-950/45" : "bg-white/35"}`} />
       <div className={`absolute inset-y-0 left-0 ${compact ? "w-[76%] p-[7%]" : "w-[72%] p-[7.5%]"}`}>
         <p className={`${mutedClass} ${compact ? "text-[5px]" : "text-[clamp(8px,0.72vw,12px)]"} font-semibold tracking-[0.22em]`}>{slide.eyebrow}</p>
@@ -428,6 +432,8 @@ function WorkflowPanel({
   running,
   started,
   details,
+  searchSources,
+  runConfig,
   messages,
   onCancel,
   onRestart,
@@ -437,14 +443,17 @@ function WorkflowPanel({
   running: boolean;
   started: boolean;
   details: Record<string, string>;
+  searchSources: Record<string, SearchSource[]>;
+  runConfig: RunConfig;
   messages: ChatMessage[];
   onCancel: () => void;
   onRestart: () => void;
-  onSendMessage: (message: string) => void;
+  onSendMessage: (message: string, config: RunConfig) => void;
 }) {
   const [workflowOpen, setWorkflowOpen] = useState(true);
   const [expandedSteps, setExpandedSteps] = useState<Record<string, boolean>>({});
   const [draft, setDraft] = useState("");
+  const [searchOptionsOpen, setSearchOptionsOpen] = useState(false);
   const messagesRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (messages.length > 1 && messagesRef.current) messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
@@ -452,7 +461,7 @@ function WorkflowPanel({
   const submit = () => {
     const message = draft.trim();
     if (!message) return;
-    onSendMessage(message);
+    onSendMessage(message, runConfig);
     setDraft("");
   };
   const progress = started ? Math.min(100, ((step + 1) / workflow.length) * 100) : 0;
@@ -491,11 +500,11 @@ function WorkflowPanel({
                       <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border ${complete ? "border-violet-600 bg-violet-600 text-white" : active ? "border-violet-300 bg-violet-50 text-violet-700" : "border-slate-200 text-slate-300"}`}>{complete ? <Check size={12} /> : active ? <LoaderCircle size={12} className={running ? "animate-spin" : ""} /> : <Circle size={7} />}</span>
                       <span className={`min-w-0 flex-1 truncate text-xs font-semibold ${complete || active ? "text-slate-900" : "text-slate-400"}`}>{item.label}</span><span className="shrink-0 text-[10px] text-slate-400">{details[item.id] ?? item.meta}</span><ChevronDown size={12} className={`shrink-0 text-slate-300 transition ${expanded ? "rotate-180" : ""}`} />
                     </button>
-                    {expanded && <div className="ml-10 mr-2 pb-2 text-[11px] leading-5 text-slate-500"><p>{item.description}</p>{active && item.id.startsWith("search") && <div className="mt-2 space-y-1 text-violet-700">{["行业研究与权威报告", "产品案例与数据证据", "关键观点交叉验证"].map((label) => <div key={label} className="flex items-center gap-1.5"><Search size={10} />{label}</div>)}</div>}</div>}
+                    {expanded && <div className="ml-10 mr-2 pb-2 text-[11px] leading-5 text-slate-500"><p>{item.description}</p>{item.id.startsWith("search") && <div className="mt-2 space-y-1.5">{(searchSources[item.id] ?? []).length > 0 ? <ol className="space-y-1.5 text-slate-600">{searchSources[item.id].map((source, sourceIndex) => <li key={`${source.url}-${sourceIndex}`} className="flex min-w-0 items-start gap-1.5"><span className="shrink-0 text-[10px] text-slate-400">{sourceIndex + 1}.</span><a href={source.url} target="_blank" rel="noreferrer" className="min-w-0 truncate text-violet-700 hover:underline" title={source.title}>{source.title}<span className="ml-1 text-[10px] text-slate-400">{source.url}</span></a></li>)}</ol> : <div className="flex items-center gap-1.5 text-slate-400"><Search size={10} />{active ? "等待 provider 返回来源…" : "暂无来源记录"}</div>}</div>}</div>}
                   </div>;
                 })}
               </div>
-              <div className="mt-3 border-t border-slate-100 pt-3"><div className="flex items-center justify-between"><span className="text-[11px] font-semibold text-slate-700">素材来源</span><span className="text-[10px] text-slate-400">可追溯</span></div><div className="mt-2 grid grid-cols-3 gap-2">{generatedAssets.map((asset, index) => <div key={asset} className="relative aspect-square overflow-hidden rounded-lg bg-slate-100"><Image src={asset} alt={index === 0 ? "AI 生成封面" : "视觉素材"} fill priority sizes="96px" className="object-cover" /><span className="absolute inset-x-1 bottom-1 rounded bg-slate-950/70 px-1 py-0.5 text-center text-[8px] text-white">{index === 1 ? "网页图片预览" : "AI 图片预览"}</span></div>)}</div><p className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500"><FileSearch size={11} />网页：{webAssetsMeta} · AI：{aiAssetsMeta}</p></div>
+              <div className="mt-3 border-t border-slate-100 pt-3"><div className="flex items-center justify-between"><span className="text-[11px] font-semibold text-slate-700">素材来源</span><span className="text-[10px] text-slate-400">可追溯</span></div><div className="mt-2 grid grid-cols-3 gap-2">{generatedAssets.map((asset, index) => <div key={asset} className="relative aspect-square overflow-hidden rounded-lg bg-slate-100"><Image src={asset} alt={index === 0 ? "AI 生成封面" : "视觉素材"} fill sizes="96px" className="object-cover" /><span className="absolute inset-x-1 bottom-1 rounded bg-slate-950/70 px-1 py-0.5 text-center text-[8px] text-white">{index === 1 ? "网页图片预览" : "AI 图片预览"}</span></div>)}</div><p className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500"><FileSearch size={11} />网页：{webAssetsMeta} · AI：{aiAssetsMeta}</p></div>
             </div>}
           </section>}
         </div>
@@ -504,7 +513,8 @@ function WorkflowPanel({
       <div className="shrink-0 border-t border-slate-200 p-4">
         <div className="rounded-2xl border border-slate-200 bg-white p-2 shadow-sm focus-within:border-violet-300 focus-within:ring-2 focus-within:ring-violet-100">
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} aria-label="AI PPT 对话输入" placeholder="描述你想制作的 PPT…" rows={2} className="w-full resize-none bg-transparent px-2 py-1 text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400" />
-          <div className="flex items-center justify-between px-1"><span className="text-[10px] text-slate-400">Enter 发送 · Shift + Enter 换行</span><button type="button" onClick={submit} aria-label="发送 PPT 需求" disabled={!draft.trim()} className="flex h-8 w-8 items-center justify-center rounded-full bg-violet-600 text-white hover:bg-violet-500 disabled:bg-slate-200 disabled:text-slate-400"><ArrowRight size={15} /></button></div>
+          {searchOptionsOpen && <div className="mb-2 grid grid-cols-2 gap-2 border-t border-slate-100 px-1 pt-2"><label className="text-[10px] text-slate-500">搜索服务<select aria-label="搜索服务" value={runConfig.searchProvider} onChange={(event) => { const value = event.target.value as SearchProvider; onSendMessage("", { ...runConfig, searchProvider: value }); }} className="mt-1 h-8 w-full rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-700"><option value="auto">自动选择</option><option value="firecrawl">Firecrawl</option><option value="qwen">千问原生</option><option value="glm">GLM 原生</option></select></label><label className="text-[10px] text-slate-500">每轮搜索数量<select aria-label="每轮搜索数量" value={runConfig.searchLimit} onChange={(event) => onSendMessage("", { ...runConfig, searchLimit: Math.min(20, Number(event.target.value)) })} className="mt-1 h-8 w-full rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-700"><option value={10}>10 条</option><option value={15}>15 条</option><option value={20}>20 条</option></select></label></div>}
+          <div className="flex items-center justify-between gap-2 px-1"><div className="flex min-w-0 items-center gap-2"><label className="flex items-center gap-1 text-[10px] text-slate-500">模型<select aria-label="选择生成模型" value={runConfig.modelProvider} onChange={(event) => onSendMessage("", { ...runConfig, modelProvider: event.target.value as ModelProvider })} className="h-7 rounded-md border border-slate-200 bg-white px-1.5 text-[10px] text-slate-700"><option value="deepseek">DeepSeek</option><option value="qwen">千问</option><option value="glm">GLM</option></select></label><button type="button" aria-expanded={searchOptionsOpen} onClick={() => setSearchOptionsOpen((value) => !value)} className="h-7 rounded-md border border-slate-200 px-2 text-[10px] text-slate-500 hover:border-violet-200 hover:text-violet-700">搜索参数</button><span className="hidden text-[10px] text-slate-400 sm:inline">Enter 发送 · Shift + Enter 换行</span></div><button type="button" onClick={submit} aria-label="发送 PPT 需求" disabled={!draft.trim()} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-violet-600 text-white hover:bg-violet-500 disabled:bg-slate-200 disabled:text-slate-400"><ArrowRight size={15} /></button></div>
         </div>
         {started && <button type="button" onClick={onRestart} className="mt-2 flex h-8 w-full items-center justify-center gap-2 rounded-lg text-[11px] font-medium text-slate-500 hover:bg-slate-50"><RefreshCcw size={12} /> 重新规划并生成</button>}
       </div>
@@ -523,6 +533,8 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [workflowStep, setWorkflowStep] = useState(0);
   const [workflowDetails, setWorkflowDetails] = useState<Record<string, string>>({});
+  const [searchSources, setSearchSources] = useState<Record<string, SearchSource[]>>({});
+  const [runConfig, setRunConfig] = useState<RunConfig>({ modelProvider: "deepseek", searchProvider: "auto", searchLimit: 20 });
   const [running, setRunning] = useState(false);
   const [zoom, setZoom] = useState(82);
   const [exporting, setExporting] = useState(false);
@@ -623,7 +635,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     }).catch(() => setServerState("error"));
   };
 
-  const startAgentRun = async (prompt: string) => {
+  const startAgentRun = async (prompt: string, config: RunConfig = runConfig) => {
     const currentPresentation = serverPresentationRef.current;
     if (!currentPresentation) {
       setRunning(false);
@@ -638,6 +650,9 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         presentationId: currentPresentation.presentationId,
         prompt,
         maxIterations: 3,
+        modelProvider: config.modelProvider,
+        searchProvider: config.searchProvider,
+        searchLimit: Math.min(20, Math.max(1, config.searchLimit)),
       });
       setRunId(run.runId);
       lastRunEventIdRef.current = 0;
@@ -650,7 +665,9 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         const phaseStep = phase ? workflowStepForPhase(phase) : null;
         if (event.type === "phase.started" && phaseStep !== null) {
           setWorkflowStep(phaseStep);
-          setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: "执行中" }));
+          const provider = typeof event.data.provider === "string" ? event.data.provider : null;
+          const limit = typeof event.data.limit === "number" ? event.data.limit : null;
+          setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: provider ? `请求 ${provider} · 最多 ${limit ?? 20} 条` : "执行中" }));
           setRunning(true);
           return;
         }
@@ -669,6 +686,17 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
               : generatedCount !== null && requiredCount !== null ? `${generatedCount} / ${requiredCount} 张${mode ? ` · ${mode}` : ""}`
                 : slideCount !== null ? `${slideCount} 页大纲` : "已完成";
           setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: meta }));
+          if (phase.startsWith("SEARCH")) {
+            const rawSources = Array.isArray(event.data.sources) ? event.data.sources : [];
+            const sources = rawSources.flatMap((source) => {
+              if (!source || typeof source !== "object") return [];
+              const candidate = source as Record<string, unknown>;
+              const url = typeof candidate.url === "string" ? candidate.url : "";
+              const title = typeof candidate.title === "string" ? candidate.title : "未命名来源";
+              return /^https?:\/\//.test(url) ? [{ title, url, ...(typeof candidate.imageUrl === "string" ? { imageUrl: candidate.imageUrl } : {}), ...(typeof candidate.pageUrl === "string" ? { pageUrl: candidate.pageUrl } : {}) }] : [];
+            });
+            setSearchSources((current) => ({ ...current, [workflow[phaseStep].id]: sources }));
+          }
           return;
         }
         if (event.type === "run.completed") {
@@ -707,20 +735,24 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     }
   };
 
-  const sendChatMessage = (message: string) => {
+  const sendChatMessage = (message: string, config: RunConfig = runConfig) => {
+    setRunConfig(config);
+    if (!message.trim()) return;
     setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: message }, { id: nextId("assistant"), role: "assistant", text: "收到。我会先拆解需求，再进行多轮检索和素材收集；你可以在右侧实时看到每一页的搭建过程。" }]);
     setWorkflowStep(0);
     setWorkflowDetails({});
+    setSearchSources({});
     setRunning(true);
-    void startAgentRun(message);
+    void startAgentRun(message, config);
   };
 
   const restartWorkflow = () => {
     setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "我会重新规划这一版结构，并从第一轮资料检索开始。" }]);
     setWorkflowStep(0);
     setWorkflowDetails({});
+    setSearchSources({});
     setRunning(true);
-    void startAgentRun("重新规划当前演示文稿");
+    void startAgentRun("重新规划当前演示文稿", runConfig);
   };
 
   const cancelAgentRun = () => {
@@ -866,11 +898,11 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <div className="hidden min-h-0 shrink-0 lg:flex" style={{ width: leftWidth }}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /></div>
+        <div className="hidden min-h-0 shrink-0 lg:flex" style={{ width: leftWidth }}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} searchSources={searchSources} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /></div>
         <div role="separator" aria-label="调整 AI 对话区宽度" aria-orientation="vertical" onPointerDown={beginResize} className="hidden w-1 shrink-0 cursor-col-resize bg-slate-200 transition hover:bg-violet-300 lg:block" />
         {mobileWorkflowOpen && (
           <div className="fixed inset-0 z-50 flex bg-slate-950/30 lg:hidden" onClick={() => setMobileWorkflowOpen(false)}>
-            <div className="relative flex h-full w-[min(92vw,430px)]" onClick={(event) => event.stopPropagation()}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /><button type="button" aria-label="关闭工作流" onClick={() => setMobileWorkflowOpen(false)} className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500 shadow"><X size={15} /></button></div>
+            <div className="relative flex h-full w-[min(92vw,430px)]" onClick={(event) => event.stopPropagation()}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} searchSources={searchSources} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /><button type="button" aria-label="关闭工作流" onClick={() => setMobileWorkflowOpen(false)} className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500 shadow"><X size={15} /></button></div>
           </div>
         )}
 

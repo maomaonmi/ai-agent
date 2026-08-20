@@ -96,6 +96,9 @@ export interface CreatePptRunInput {
   presentationId: string;
   prompt: string;
   maxIterations?: number;
+  modelProvider?: "deepseek" | "qwen" | "glm";
+  searchProvider?: "auto" | "firecrawl" | "qwen" | "glm";
+  searchLimit?: number;
 }
 
 interface ApiErrorPayload {
