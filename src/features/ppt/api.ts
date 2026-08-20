@@ -1,3 +1,5 @@
+import type { PresentationDocument } from "./types.ts";
+
 const DEFAULT_API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export type PptTemplateSource = "SYSTEM" | "PRIVATE";
@@ -41,6 +43,29 @@ export interface PptTemplateListResponse {
     pageSize: number;
     hasMore: boolean;
   };
+}
+
+export interface PptPresentationResponse {
+  presentationId: string;
+  title: string;
+  templateId: string | null;
+  revision: number;
+  document: PresentationDocument;
+  createdAt: string;
+  updatedAt: string;
+  ignoredOperationIds?: string[];
+}
+
+export interface CreatePptPresentationInput {
+  presentationId?: string;
+  templateId?: string;
+  title?: string;
+  document?: PresentationDocument;
+}
+
+export interface ApplyPptOperationsInput {
+  baseRevision: number;
+  operations: Array<Record<string, unknown>>;
 }
 
 interface ApiErrorPayload {
@@ -92,6 +117,9 @@ export interface PptApi {
   getTemplatePages(templateId: string, signal?: AbortSignal): Promise<PptTemplatePage[]>;
   updateTemplate(templateId: string, patch: { name?: string; description?: string; scene?: string }): Promise<PptTemplate>;
   deleteTemplate(templateId: string): Promise<void>;
+  createPresentation(input?: CreatePptPresentationInput, signal?: AbortSignal): Promise<PptPresentationResponse>;
+  getPresentation(presentationId: string, signal?: AbortSignal): Promise<PptPresentationResponse>;
+  applyOperations(presentationId: string, input: ApplyPptOperationsInput, signal?: AbortSignal): Promise<PptPresentationResponse>;
 }
 
 export function createPptApi(baseUrl = DEFAULT_API_BASE_URL): PptApi {
@@ -139,6 +167,18 @@ export function createPptApi(baseUrl = DEFAULT_API_BASE_URL): PptApi {
     deleteTemplate: async (templateId) => {
       await request<null>(`/api/ppt/templates/${encodeURIComponent(templateId)}`, { method: "DELETE" });
     },
+    createPresentation: (input = {}, signal) => request<PptPresentationResponse>(
+      "/api/ppt/presentations",
+      { method: "POST", body: JSON.stringify(input), signal },
+    ),
+    getPresentation: (presentationId, signal) => request<PptPresentationResponse>(
+      `/api/ppt/presentations/${encodeURIComponent(presentationId)}`,
+      { signal },
+    ),
+    applyOperations: (presentationId, input, signal) => request<PptPresentationResponse>(
+      `/api/ppt/presentations/${encodeURIComponent(presentationId)}/operations`,
+      { method: "POST", body: JSON.stringify(input), signal },
+    ),
   };
 }
 

@@ -2,6 +2,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import {
@@ -40,6 +41,9 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+
+import { PptApiError, pptApi, type PptPresentationResponse } from "../api.ts";
+import type { PresentationDocument } from "../types.ts";
 
 type CanvasItem =
   | { id: string; kind: "text"; x: number; y: number; w: number; h: number; text: string }
@@ -171,6 +175,153 @@ function createSlide(index: number): WorkspaceSlide {
     notes: "在这里输入演讲者备注。",
     items: [],
   };
+}
+
+
+function timestamp(): string {
+  return new Date().toISOString();
+}
+
+
+function canonicalTextElement(id: string, text: string, x: number, y: number, width: number, height: number, color: "#FFFFFF" | "#111827"): Record<string, unknown> {
+  return {
+    type: "TEXT",
+    id,
+    x,
+    y,
+    width,
+    height,
+    rotation: 0,
+    zIndex: 3,
+    opacity: 1,
+    isLocked: false,
+    isHidden: false,
+    text,
+    style: {
+      fontFamily: "Microsoft YaHei",
+      fontSize: 28,
+      color,
+      bold: true,
+      italic: false,
+      underline: false,
+      align: "LEFT",
+      verticalAlign: "MIDDLE",
+    },
+  };
+}
+
+
+function canonicalElementFromItem(item: CanvasItem, index: number): Record<string, unknown> {
+  const geometry = {
+    id: item.id,
+    x: item.x / 100,
+    y: item.y / 100,
+    width: item.w / 100,
+    height: item.h / 100,
+    rotation: 0,
+    zIndex: 4 + index,
+    opacity: 1,
+    isLocked: false,
+    isHidden: false,
+  };
+  if (item.kind === "text") {
+    return {
+      type: "TEXT",
+      ...geometry,
+      text: item.text,
+      style: {
+        fontFamily: "Microsoft YaHei",
+        fontSize: 18,
+        color: "#FFFFFF",
+        bold: false,
+        italic: false,
+        underline: false,
+        align: "LEFT",
+        verticalAlign: "MIDDLE",
+      },
+    };
+  }
+  if (item.kind === "shape") {
+    return { type: "SHAPE", ...geometry, shapeType: item.shape === "ellipse" ? "ELLIPSE" : "ROUND_RECT", fill: "#7C3AED", stroke: "#A78BFA", strokeWidth: 1.5 };
+  }
+  if (item.kind === "image") {
+    return { type: "IMAGE", ...geometry, assetId: `asset-generated-${index + 1}`, alt: item.alt, fit: "COVER" };
+  }
+  if (item.kind === "table") {
+    return { type: "TABLE", ...geometry, rows: [[{ text: "Q1" }, { text: "Q2" }, { text: "Q3" }], [{ text: "24" }, { text: "42" }, { text: "68" }]], borderColor: "#CBD5E1" };
+  }
+  return {
+    type: "CHART",
+    ...geometry,
+    chartType: "BAR",
+    categories: ["Q1", "Q2", "Q3"],
+    series: [{ name: "增长", values: [24, 42, 68], color: "#7C3AED" }],
+    showLegend: false,
+  };
+}
+
+
+function canonicalSlideFromWorkspace(slide: WorkspaceSlide, index: number): Record<string, unknown> {
+  const dark = slide.tone === "dark";
+  const elements = [
+    canonicalTextElement(`${slide.id}-eyebrow`, slide.eyebrow, 0.07, 0.08, 0.65, 0.05, dark ? "#FFFFFF" : "#111827"),
+    canonicalTextElement(`${slide.id}-title`, slide.title, 0.07, 0.18, 0.68, 0.25, dark ? "#FFFFFF" : "#111827"),
+    {
+      ...canonicalTextElement(`${slide.id}-subtitle`, slide.subtitle, 0.07, 0.58, 0.62, 0.14, dark ? "#FFFFFF" : "#111827"),
+      zIndex: 2,
+      style: { fontFamily: "Microsoft YaHei", fontSize: 14, color: dark ? "#FFFFFF" : "#111827", bold: false, italic: false, underline: false, align: "LEFT", verticalAlign: "MIDDLE" },
+    },
+    ...slide.items.map((item, itemIndex) => canonicalElementFromItem(item, itemIndex)),
+  ];
+  return {
+    id: slide.id,
+    order: index,
+    background: { type: "SOLID", color: dark ? "#0F172A" : "#F4EFE8" },
+    elements,
+    animations: [],
+    notes: slide.notes,
+  };
+}
+
+
+function presentationDocumentFromWorkspace(presentationId: string, templateId: string | null, slides: WorkspaceSlide[]): PresentationDocument {
+  const now = timestamp();
+  return {
+    schemaVersion: 1,
+    presentationId,
+    revision: 0,
+    title: slides[0]?.title.replace(/\n/g, " ").slice(0, 500) || "新建 AI PPT",
+    aspectRatio: "16:9",
+    canvas: { width: 13.333, height: 7.5 },
+    theme: {
+      name: "Aurora",
+      colors: { background: "#0B1020", surface: "#151C33", text: "#F7F8FC", mutedText: "#AAB2C8", accent1: "#7657FF", accent2: "#39C6B4" },
+      fonts: { heading: "Microsoft YaHei", body: "Microsoft YaHei", mono: "Cascadia Mono" },
+    },
+    slides: slides.map((slide, index) => canonicalSlideFromWorkspace(slide, index)) as unknown as PresentationDocument["slides"],
+    metadata: { ...(templateId ? { templateId } : {}), language: "zh-CN", createdAt: now, updatedAt: now },
+  };
+}
+
+
+function workspaceSlidesFromDocument(document: PresentationDocument): WorkspaceSlide[] {
+  return document.slides.map((slide, index) => {
+    const textElements = slide.elements.filter((element) => element.type === "TEXT");
+    const title = textElements.find((element) => element.id.endsWith("-title"))?.text ?? `第 ${index + 1} 页`;
+    const subtitle = textElements.find((element) => element.id.endsWith("-subtitle"))?.text ?? "从资料、观点到下一步行动。";
+    const eyebrow = textElements.find((element) => element.id.endsWith("-eyebrow"))?.text ?? `${String(index + 1).padStart(2, "0")} · AI PPT`;
+    const items: CanvasItem[] = [];
+    for (const element of slide.elements.filter((element) => !element.id.endsWith("-title") && !element.id.endsWith("-subtitle") && !element.id.endsWith("-eyebrow"))) {
+      const base = { id: element.id, x: element.x * 100, y: element.y * 100, w: element.width * 100, h: element.height * 100 };
+      if (element.type === "TEXT") items.push({ ...base, kind: "text", text: element.text });
+      else if (element.type === "SHAPE") items.push({ ...base, kind: "shape", shape: element.shapeType === "ELLIPSE" ? "ellipse" : "rect" });
+      else if (element.type === "IMAGE") items.push({ ...base, kind: "image", src: generatedAssets[index % generatedAssets.length], alt: element.alt });
+      else if (element.type === "TABLE") items.push({ ...base, kind: "table" });
+      else if (element.type === "CHART") items.push({ ...base, kind: "chart" });
+    }
+    const backgroundColor = slide.background.type === "SOLID" ? slide.background.color : "#0F172A";
+    return { id: slide.id, eyebrow, title, subtitle, image: generatedAssets[index % generatedAssets.length], tone: backgroundColor === "#F4EFE8" ? "light" : "dark", notes: slide.notes ?? "", items };
+  });
 }
 
 
@@ -353,6 +504,7 @@ function WorkflowPanel({
 
 
 export default function PptWorkspace({ presentationId }: { presentationId: string }) {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const freshFromSidebar = searchParams.get("source") === "sidebar";
   const templateId = freshFromSidebar ? "blank" : (searchParams.get("templateId") ?? "aurora-strategy");
@@ -365,15 +517,58 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const [exporting, setExporting] = useState(false);
   const [mobileWorkflowOpen, setMobileWorkflowOpen] = useState(false);
   const [leftWidth, setLeftWidth] = useState(420);
+  const [serverPresentation, setServerPresentation] = useState<PptPresentationResponse | null>(null);
+  const [serverState, setServerState] = useState<"loading" | "ready" | "offline" | "error">("loading");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => [{
     id: "welcome",
     role: "assistant",
     text: freshFromSidebar ? "你好，我是 AI PPT 助手。告诉我主题、受众和你希望达成的目标，我会先和你确认方向，再开始规划。" : "模板已经载入。你可以先告诉我想修改的主题、受众或页数，我会和你一起重新规划。",
   }]);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const serverPresentationRef = useRef<PptPresentationResponse | null>(null);
+  const persistenceQueueRef = useRef(Promise.resolve());
+  const clientPresentationIdRef = useRef(presentationId === "new" ? `presentation-${crypto.randomUUID?.() ?? `${Date.now()}-${Math.round(Math.random() * 1000)}`}` : presentationId);
   const activeSlide = slides.find((slide) => slide.id === activeSlideId) ?? slides[0];
   const activeIndex = slides.findIndex((slide) => slide.id === activeSlide.id);
   const started = running || workflowStep > 0 || chatMessages.some((message) => message.role === "user");
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadPresentation = async () => {
+      setServerState("loading");
+      try {
+        const nextPresentation = presentationId === "new"
+          ? await pptApi.createPresentation({
+            presentationId: clientPresentationIdRef.current,
+            templateId: templateId === "blank" ? undefined : templateId,
+            title: freshFromSidebar ? "新建 AI PPT" : "智能体时代的协作新范式",
+            document: presentationDocumentFromWorkspace(clientPresentationIdRef.current, templateId === "blank" ? null : templateId, freshFromSidebar ? freshSlides : initialSlides),
+          })
+          : await pptApi.getPresentation(presentationId);
+        if (cancelled) return;
+        serverPresentationRef.current = nextPresentation;
+        setServerPresentation(nextPresentation);
+        setServerState("ready");
+        if (presentationId === "new") {
+          const query = new URLSearchParams();
+          if (freshFromSidebar) query.set("source", "sidebar");
+          if (templateId !== "blank") query.set("templateId", templateId);
+          router.replace(`/ppt/workspace/${encodeURIComponent(nextPresentation.presentationId)}${query.toString() ? `?${query}` : ""}`);
+        } else {
+          const restoredSlides = workspaceSlidesFromDocument(nextPresentation.document);
+          if (restoredSlides.length > 0) {
+            setSlides(restoredSlides);
+            setActiveSlideId(restoredSlides[0].id);
+          }
+        }
+      } catch (error) {
+        if (cancelled) return;
+        setServerState(error instanceof PptApiError && error.status >= 500 ? "error" : "offline");
+      }
+    };
+    void loadPresentation();
+    return () => { cancelled = true; };
+  }, [freshFromSidebar, presentationId, router, templateId]);
 
   useEffect(() => {
     if (!running || workflowStep >= workflow.length - 1) return;
@@ -386,6 +581,35 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     if (workflowStep >= workflow.length - 1) return "已完成 · 所有页面均可编辑";
     return `正在${workflow[workflowStep].label}`;
   }, [started, workflowStep]);
+
+  const persistOperations = (operations: Array<Record<string, unknown>>) => {
+    if (operations.length === 0 || !serverPresentationRef.current) return;
+    persistenceQueueRef.current = persistenceQueueRef.current.then(async () => {
+      const current = serverPresentationRef.current;
+      if (!current) return;
+      try {
+        const updated = await pptApi.applyOperations(current.presentationId, {
+          baseRevision: current.revision,
+          operations,
+        });
+        serverPresentationRef.current = updated;
+        setServerPresentation(updated);
+        setServerState("ready");
+      } catch (error) {
+        if (error instanceof PptApiError && error.status === 409) {
+          try {
+            const latest = await pptApi.getPresentation(current.presentationId);
+            serverPresentationRef.current = latest;
+            setServerPresentation(latest);
+          } catch {
+            setServerState("error");
+          }
+        } else {
+          setServerState("offline");
+        }
+      }
+    }).catch(() => setServerState("error"));
+  };
 
   const sendChatMessage = (message: string) => {
     setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: message }, { id: nextId("assistant"), role: "assistant", text: "收到。我会先拆解需求，再进行多轮检索和素材收集；你可以在右侧实时看到每一页的搭建过程。" }]);
@@ -410,7 +634,19 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   };
 
   const updateActiveSlide = (patch: Partial<WorkspaceSlide>) => {
-    setSlides((items) => items.map((slide) => slide.id === activeSlide.id ? { ...slide, ...patch } : slide));
+    const previous = activeSlide;
+    setSlides((items) => items.map((slide) => slide.id === previous.id ? { ...slide, ...patch } : slide));
+    const operations: Array<Record<string, unknown>> = [];
+    if (patch.title !== undefined) operations.push({ operationId: nextId("op-title"), type: "UPDATE_ELEMENT", slideId: previous.id, elementId: `${previous.id}-title`, patch: { text: patch.title } });
+    if (patch.subtitle !== undefined) operations.push({ operationId: nextId("op-subtitle"), type: "UPDATE_ELEMENT", slideId: previous.id, elementId: `${previous.id}-subtitle`, patch: { text: patch.subtitle } });
+    if (patch.notes !== undefined) operations.push({ operationId: nextId("op-notes"), type: "SET_NOTES", slideId: previous.id, notes: patch.notes });
+    if (patch.items) {
+      const before = new Map(previous.items.map((item) => [item.id, item]));
+      const after = new Map(patch.items.map((item) => [item.id, item]));
+      for (const item of patch.items) if (!before.has(item.id)) operations.push({ operationId: nextId("op-add"), type: "ADD_ELEMENT", slideId: previous.id, element: canonicalElementFromItem(item, patch.items.indexOf(item)) });
+      for (const item of previous.items) if (!after.has(item.id)) operations.push({ operationId: nextId("op-delete"), type: "DELETE_ELEMENT", slideId: previous.id, elementId: item.id });
+    }
+    persistOperations(operations);
   };
 
   const insertItem = (kind: "text" | "shape" | "image" | "table" | "chart") => {
@@ -429,6 +665,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     setSlides((items) => [...items, slide]);
     setActiveSlideId(slide.id);
     setSelectedItemId(null);
+    persistOperations([{ operationId: nextId("op-slide"), type: "ADD_SLIDE", slide: canonicalSlideFromWorkspace(slide, slides.length) }]);
   };
 
   const duplicateSlide = () => {
@@ -437,6 +674,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     next.splice(activeIndex + 1, 0, copy);
     setSlides(next);
     setActiveSlideId(copy.id);
+    persistOperations([{ operationId: nextId("op-slide"), type: "ADD_SLIDE", slide: canonicalSlideFromWorkspace(copy, activeIndex + 1) }]);
   };
 
   const deleteSlide = () => {
@@ -444,6 +682,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     const next = slides.filter((slide) => slide.id !== activeSlide.id);
     setSlides(next);
     setActiveSlideId(next[Math.max(0, activeIndex - 1)].id);
+    persistOperations([{ operationId: nextId("op-slide-delete"), type: "DELETE_SLIDE", slideId: activeSlide.id }]);
   };
 
   const deleteSelected = () => {
@@ -504,8 +743,8 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         <div className="flex min-w-0 items-center gap-2.5">
           <Link href="/ppt" aria-label="返回模板市场" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100"><ArrowLeft size={18} /></Link>
           <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-violet-600 text-white"><Sparkles size={15} /></span>
-          <div className="min-w-0"><p className="truncate text-sm font-semibold">{freshFromSidebar ? "新建 AI PPT" : "智能体时代的协作新范式"}</p><p className="truncate text-[10px] text-slate-400">{presentationId === "new" ? "新演示" : presentationId} · {freshFromSidebar ? "空白工作台" : `模板 ${templateId}`}</p></div>
-          <span className="hidden items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-medium text-emerald-700 md:flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" /> 自动保存</span>
+          <div className="min-w-0"><p className="truncate text-sm font-semibold">{serverPresentation?.title ?? (freshFromSidebar ? "新建 AI PPT" : "智能体时代的协作新范式")}</p><p className="truncate text-[10px] text-slate-400">{presentationId === "new" ? "新演示" : presentationId} · {freshFromSidebar ? "空白工作台" : `模板 ${templateId}`}</p></div>
+          <span className={`hidden items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-medium md:flex ${serverState === "ready" ? "bg-emerald-50 text-emerald-700" : serverState === "loading" ? "bg-amber-50 text-amber-700" : "bg-slate-100 text-slate-500"}`}><span className={`h-1.5 w-1.5 rounded-full ${serverState === "ready" ? "bg-emerald-500" : serverState === "loading" ? "bg-amber-500" : "bg-slate-400"}`} /> {serverState === "ready" ? "已连接 · 自动保存" : serverState === "loading" ? "正在连接" : "本地编辑 · 稍后同步"}</span>
         </div>
         <div className="flex items-center gap-1.5">
           <button type="button" onClick={() => setMobileWorkflowOpen(true)} className="flex h-9 items-center gap-2 rounded-full border border-slate-200 px-3 text-xs font-medium lg:hidden"><Menu size={15} /> 工作流</button>

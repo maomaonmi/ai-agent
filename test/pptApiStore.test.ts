@@ -6,6 +6,7 @@ import { createStore } from "zustand/vanilla";
 import {
   PptApiError,
   createPptApi,
+  type PptPresentationResponse,
   type PptTemplateListResponse,
 } from "../src/features/ppt/api.ts";
 import {
@@ -49,6 +50,48 @@ test("PPT API types list responses and stable errors", async () => {
         && error.code === "PPT_TEMPLATE_NOT_FOUND"
         && error.status === 404,
     );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test("presentation API creates, loads, and commits operations with camel-case contract", async () => {
+  const originalFetch = globalThis.fetch;
+  const api = createPptApi("http://ppt.test");
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const response: PptPresentationResponse = {
+    presentationId: "presentation-1",
+    title: "协作",
+    templateId: null,
+    revision: 0,
+    document: {} as PptPresentationResponse["document"],
+    createdAt: "2026-08-20T00:00:00Z",
+    updatedAt: "2026-08-20T00:00:00Z",
+  };
+  try {
+    globalThis.fetch = async (input, init) => {
+      calls.push({ url: String(input), init });
+      return new Response(JSON.stringify(response), {
+        status: calls.length === 1 ? 201 : 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    await api.createPresentation({ title: "协作", templateId: "blank" });
+    await api.getPresentation("presentation-1");
+    await api.applyOperations("presentation-1", {
+      baseRevision: 0,
+      operations: [{ operationId: "op-1", type: "SET_NOTES", slideId: "slide-1", notes: "备注" }],
+    });
+
+    assert.equal(calls[0].url, "http://ppt.test/api/ppt/presentations");
+    assert.equal(calls[1].url, "http://ppt.test/api/ppt/presentations/presentation-1");
+    assert.equal(calls[2].url, "http://ppt.test/api/ppt/presentations/presentation-1/operations");
+    assert.deepEqual(JSON.parse(String(calls[2].init?.body)), {
+      baseRevision: 0,
+      operations: [{ operationId: "op-1", type: "SET_NOTES", slideId: "slide-1", notes: "备注" }],
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }
