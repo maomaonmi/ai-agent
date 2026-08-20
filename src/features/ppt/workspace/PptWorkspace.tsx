@@ -144,13 +144,13 @@ const freshSlides: WorkspaceSlide[] = [
 
 const workflow: WorkflowStep[] = [
   { id: "plan", label: "需求理解与任务规划", description: "拆解受众、目标、页数与叙事结构", meta: "规划 v2" },
-  { id: "search-1", label: "联网检索 · 第 1 轮", description: "检索趋势、定义与权威背景资料", meta: "18 条 · DeepSeek / Firecrawl" },
-  { id: "search-2", label: "联网检索 · 第 2 轮", description: "验证关键结论并补齐反方观点", meta: "16 条 · 千问原生搜索" },
-  { id: "search-3", label: "联网检索 · 第 3 轮", description: "查找案例、数据与可视化素材", meta: "12 条 · GLM 原生搜索" },
-  { id: "web-assets", label: "网页图片素材收集", description: "筛选带图网页并保留授权与素材来源", meta: "6 张候选 · 3 张采用" },
-  { id: "ai-assets", label: "AI 生成图片", description: "生成封面、中段背景与结尾主视觉", meta: "3 / 3 张" },
-  { id: "outline", label: "叙事与视觉方案", description: "统一主题、配色、字体和页面节奏", meta: "16 页大纲" },
-  { id: "build", label: "逐页搭建", description: "一个组件一个组件写入可编辑画布", meta: "正在同步右侧" },
+  { id: "search-1", label: "联网检索 · 第 1 轮", description: "检索趋势、定义与权威背景资料", meta: "等待 provider" },
+  { id: "search-2", label: "联网检索 · 第 2 轮", description: "验证关键结论并补齐反方观点", meta: "等待 provider" },
+  { id: "search-3", label: "联网检索 · 第 3 轮", description: "查找案例、数据与可视化素材", meta: "等待 provider" },
+  { id: "web-assets", label: "网页图片素材收集", description: "筛选带图网页并保留授权与素材来源", meta: "等待执行" },
+  { id: "ai-assets", label: "AI 生成图片", description: "生成封面、中段背景与结尾主视觉", meta: "等待执行" },
+  { id: "outline", label: "叙事与视觉方案", description: "统一主题、配色、字体和页面节奏", meta: "等待执行" },
+  { id: "build", label: "逐页搭建", description: "一个组件一个组件写入可编辑画布", meta: "等待执行" },
   { id: "review", label: "质量检查与导出", description: "检查溢出、引用、可读性与兼容性", meta: "等待执行" },
 ];
 
@@ -433,6 +433,7 @@ function WorkflowPanel({
   started,
   details,
   searchSources,
+  assetSources,
   runConfig,
   messages,
   onCancel,
@@ -444,6 +445,7 @@ function WorkflowPanel({
   started: boolean;
   details: Record<string, string>;
   searchSources: Record<string, SearchSource[]>;
+  assetSources: Record<string, string[]>;
   runConfig: RunConfig;
   messages: ChatMessage[];
   onCancel: () => void;
@@ -467,6 +469,7 @@ function WorkflowPanel({
   const progress = started ? Math.min(100, ((step + 1) / workflow.length) * 100) : 0;
   const webAssetsMeta = details["web-assets"] ?? "等待事件";
   const aiAssetsMeta = details["ai-assets"] ?? "等待事件";
+  const materialPreviews = [...(assetSources["web-assets"] ?? []), ...(assetSources["ai-assets"] ?? [])].slice(0, 3);
   return (
     <aside aria-label="AI 工作流" className="flex min-h-0 w-full flex-col border-r border-slate-200 bg-white">
       <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4">
@@ -485,7 +488,7 @@ function WorkflowPanel({
           {started && <section aria-label="AI 工作流链路" className="rounded-2xl border border-slate-200 bg-white shadow-sm">
             <button type="button" aria-expanded={workflowOpen} onClick={() => setWorkflowOpen((value) => !value)} className="flex w-full items-center gap-3 px-4 py-3 text-left">
               <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-100 text-violet-700"><FileSearch size={15} /></span>
-              <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-900">AI 工作流链路</span><span className="mt-0.5 block text-[11px] text-slate-500">{started ? `${Math.min(step + 1, workflow.length)} / ${workflow.length} 阶段 · ${running ? "正在执行" : "已暂停"}` : "等待你的指令后开始"} · 每次不超过 {runConfig.searchLimit} 条</span></span>
+              <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-900">AI 工作流链路</span><span className="mt-0.5 block text-[11px] text-slate-500">{started ? `${Math.min(step + 1, workflow.length)} / ${workflow.length} 阶段 · ${running ? "正在执行" : "已暂停"}` : "等待你的指令后开始"} · 每次不超过 20 条 · 当前 {runConfig.searchLimit} 条</span></span>
               <ChevronDown size={15} className={`text-slate-400 transition ${workflowOpen ? "rotate-180" : ""}`} />
             </button>
             {workflowOpen && <div className="border-t border-slate-100 px-4 pb-3 pt-3">
@@ -504,7 +507,7 @@ function WorkflowPanel({
                   </div>;
                 })}
               </div>
-              <div className="mt-3 border-t border-slate-100 pt-3"><div className="flex items-center justify-between"><span className="text-[11px] font-semibold text-slate-700">素材来源</span><span className="text-[10px] text-slate-400">可追溯</span></div><div className="mt-2 grid grid-cols-3 gap-2">{generatedAssets.map((asset, index) => <div key={asset} className="relative aspect-square overflow-hidden rounded-lg bg-slate-100"><Image src={asset} alt={index === 0 ? "AI 生成封面" : "视觉素材"} fill sizes="96px" className="object-cover" /><span className="absolute inset-x-1 bottom-1 rounded bg-slate-950/70 px-1 py-0.5 text-center text-[8px] text-white">{index === 1 ? "网页图片预览" : "AI 图片预览"}</span></div>)}</div><p className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500"><FileSearch size={11} />网页：{webAssetsMeta} · AI：{aiAssetsMeta}</p></div>
+              <div className="mt-3 border-t border-slate-100 pt-3"><div className="flex items-center justify-between"><span className="text-[11px] font-semibold text-slate-700">素材来源</span><span className="text-[10px] text-slate-400">可追溯</span></div><div className="mt-2 grid grid-cols-3 gap-2">{materialPreviews.length > 0 ? materialPreviews.map((asset, index) => <div key={`${asset}-${index}`} className="relative aspect-square overflow-hidden rounded-lg bg-slate-100"><img src={asset} alt={index < (assetSources["web-assets"] ?? []).length ? "网页图片素材" : "AI 生成图片"} className="h-full w-full object-cover" /><span className="absolute inset-x-1 bottom-1 rounded bg-slate-950/70 px-1 py-0.5 text-center text-[8px] text-white">{index < (assetSources["web-assets"] ?? []).length ? "网页图片" : "AI 图片"}</span></div>) : <div className="col-span-3 rounded-lg bg-slate-50 px-3 py-4 text-center text-[11px] text-slate-400">等待真实素材下载或生成后显示</div>}</div><p className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500"><FileSearch size={11} />网页：{webAssetsMeta} · AI：{aiAssetsMeta}</p></div>
             </div>}
           </section>}
         </div>
@@ -528,12 +531,14 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const searchParams = useSearchParams();
   const freshFromSidebar = searchParams.get("source") === "sidebar";
   const templateId = freshFromSidebar ? "blank" : (searchParams.get("templateId") ?? "aurora-strategy");
+  const resumeRunId = searchParams.get("runId");
   const [slides, setSlides] = useState<WorkspaceSlide[]>(() => freshFromSidebar ? freshSlides : initialSlides);
   const [activeSlideId, setActiveSlideId] = useState(() => freshFromSidebar ? freshSlides[0].id : initialSlides[0].id);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [workflowStep, setWorkflowStep] = useState(0);
   const [workflowDetails, setWorkflowDetails] = useState<Record<string, string>>({});
   const [searchSources, setSearchSources] = useState<Record<string, SearchSource[]>>({});
+  const [assetSources, setAssetSources] = useState<Record<string, string[]>>({});
   const [runConfig, setRunConfig] = useState<RunConfig>({ modelProvider: "deepseek", searchProvider: "auto", searchLimit: 20 });
   const [running, setRunning] = useState(false);
   const [zoom, setZoom] = useState(82);
@@ -553,6 +558,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const persistenceQueueRef = useRef(Promise.resolve());
   const runEventControllerRef = useRef<AbortController | null>(null);
   const lastRunEventIdRef = useRef(0);
+  const resumeStartedRef = useRef(false);
   const clientPresentationIdRef = useRef(presentationId === "new" ? `presentation-${crypto.randomUUID?.() ?? `${Date.now()}-${Math.round(Math.random() * 1000)}`}` : presentationId);
   const activeSlide = slides.find((slide) => slide.id === activeSlideId) ?? slides[0];
   const activeIndex = slides.findIndex((slide) => slide.id === activeSlide.id);
@@ -563,6 +569,21 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     const loadPresentation = async () => {
       setServerState("loading");
       try {
+        if (presentationId === "new" && freshFromSidebar && !resumeRunId) {
+          try {
+            const resumable = await pptApi.listResumableRuns();
+            const latest = resumable.runs[0];
+            if (latest) {
+              router.replace(`/ppt/workspace/${encodeURIComponent(latest.presentationId)}?source=sidebar&runId=${encodeURIComponent(latest.runId)}&resume=1`);
+              return;
+            }
+          } catch (error) {
+            // Older manually-started API processes do not expose the resumable
+            // route yet; preserve the blank-workspace flow until the user
+            // restarts that process with the new backend code.
+            if (!(error instanceof PptApiError) || error.status !== 404) throw error;
+          }
+        }
         const nextPresentation = presentationId === "new"
           ? await pptApi.createPresentation({
             presentationId: clientPresentationIdRef.current,
@@ -594,7 +615,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     };
     void loadPresentation();
     return () => { cancelled = true; };
-  }, [freshFromSidebar, presentationId, router, templateId]);
+  }, [freshFromSidebar, presentationId, resumeRunId, router, templateId]);
 
   useEffect(() => () => {
     runEventControllerRef.current?.abort();
@@ -635,7 +656,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     }).catch(() => setServerState("error"));
   };
 
-  const startAgentRun = async (prompt: string, config: RunConfig = runConfig) => {
+  const startAgentRun = async (prompt: string, config: RunConfig = runConfig, existingRunId?: string) => {
     const currentPresentation = serverPresentationRef.current;
     if (!currentPresentation) {
       setRunning(false);
@@ -647,6 +668,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     runEventControllerRef.current = eventController;
     try {
       const run = await pptApi.createRun({
+        ...(existingRunId ? { runId: existingRunId } : {}),
         presentationId: currentPresentation.presentationId,
         prompt,
         maxIterations: 3,
@@ -697,6 +719,36 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
             });
             setSearchSources((current) => ({ ...current, [workflow[phaseStep].id]: sources }));
           }
+          if (phase === "WEB_ASSETS" || phase === "AI_ASSETS") {
+            const assets = Array.isArray(event.data.assets) ? event.data.assets : [];
+            const urls = assets.flatMap((asset) => {
+              if (!asset || typeof asset !== "object") return [];
+              const candidate = asset as Record<string, unknown>;
+              return typeof candidate.imageUrl === "string" && /^https?:\/\//.test(candidate.imageUrl) ? [candidate.imageUrl] : [];
+            });
+            setAssetSources((current) => ({ ...current, [workflow[phaseStep].id]: urls }));
+          }
+          return;
+        }
+        if (event.type === "phase.progress" && phaseStep !== null) {
+          const candidateCount = typeof event.data.candidateCount === "number" ? event.data.candidateCount : null;
+          const selectedCount = typeof event.data.selectedCount === "number" ? event.data.selectedCount : null;
+          const downloadedCount = typeof event.data.downloadedCount === "number" ? event.data.downloadedCount : null;
+          const generatedCount = typeof event.data.generatedCount === "number" ? event.data.generatedCount : null;
+          const requiredCount = typeof event.data.requiredCount === "number" ? event.data.requiredCount : null;
+          const progressMeta = candidateCount !== null && downloadedCount !== null
+            ? `${candidateCount} 张候选 · 已下载 ${downloadedCount}${selectedCount !== null ? ` · ${selectedCount} 张采用` : ""}`
+            : generatedCount !== null && requiredCount !== null ? `${generatedCount} / ${requiredCount} 张` : "执行中";
+          setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: progressMeta }));
+          if (phase === "WEB_ASSETS" || phase === "AI_ASSETS") {
+            const assets = Array.isArray(event.data.assets) ? event.data.assets : [];
+            const urls = assets.flatMap((asset) => {
+              if (!asset || typeof asset !== "object") return [];
+              const candidate = asset as Record<string, unknown>;
+              return typeof candidate.imageUrl === "string" && /^https?:\/\//.test(candidate.imageUrl) ? [candidate.imageUrl] : [];
+            });
+            setAssetSources((current) => ({ ...current, [workflow[phaseStep].id]: urls }));
+          }
           return;
         }
         if (event.type === "run.completed") {
@@ -735,6 +787,32 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     }
   };
 
+  useEffect(() => {
+    if (!resumeRunId || presentationId === "new" || serverState !== "ready" || resumeStartedRef.current) return;
+    resumeStartedRef.current = true;
+    const resume = async () => {
+      try {
+        const run = await pptApi.getRun(resumeRunId);
+        if (run.presentationId !== presentationId) return;
+        const state = run.state;
+        const nextConfig: RunConfig = {
+          modelProvider: state.modelProvider === "qwen" || state.modelProvider === "glm" ? state.modelProvider : "deepseek",
+          searchProvider: state.searchProvider === "firecrawl" || state.searchProvider === "qwen" || state.searchProvider === "glm" ? state.searchProvider : "auto",
+          searchLimit: typeof state.searchLimit === "number" ? Math.min(20, Math.max(1, state.searchLimit)) : 20,
+        };
+        setRunConfig(nextConfig);
+        const prompt = typeof state.prompt === "string" ? state.prompt : "继续完成这份 PPT";
+        setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: prompt }, { id: nextId("assistant"), role: "assistant", text: "已恢复上次未完成的 AI PPT 会话，继续接收实时进度。" }]);
+        setWorkflowStep(workflowStepForPhase(run.phase));
+        setRunning(run.status === "RUNNING" || run.status === "QUEUED" || run.status === "PAUSED");
+        await startAgentRun(prompt, nextConfig, run.runId);
+      } catch {
+        resumeStartedRef.current = false;
+      }
+    };
+    void resume();
+  }, [presentationId, resumeRunId, serverState]);
+
   const sendChatMessage = (message: string, config: RunConfig = runConfig) => {
     setRunConfig(config);
     if (!message.trim()) return;
@@ -742,6 +820,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     setWorkflowStep(0);
     setWorkflowDetails({});
     setSearchSources({});
+    setAssetSources({});
     setRunning(true);
     void startAgentRun(message, config);
   };
@@ -751,6 +830,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     setWorkflowStep(0);
     setWorkflowDetails({});
     setSearchSources({});
+    setAssetSources({});
     setRunning(true);
     void startAgentRun("重新规划当前演示文稿", runConfig);
   };
@@ -898,11 +978,11 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <div className="hidden min-h-0 shrink-0 lg:flex" style={{ width: leftWidth }}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} searchSources={searchSources} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /></div>
+        <div className="hidden min-h-0 shrink-0 lg:flex" style={{ width: leftWidth }}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} searchSources={searchSources} assetSources={assetSources} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /></div>
         <div role="separator" aria-label="调整 AI 对话区宽度" aria-orientation="vertical" onPointerDown={beginResize} className="hidden w-1 shrink-0 cursor-col-resize bg-slate-200 transition hover:bg-violet-300 lg:block" />
         {mobileWorkflowOpen && (
           <div className="fixed inset-0 z-50 flex bg-slate-950/30 lg:hidden" onClick={() => setMobileWorkflowOpen(false)}>
-            <div className="relative flex h-full w-[min(92vw,430px)]" onClick={(event) => event.stopPropagation()}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} searchSources={searchSources} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /><button type="button" aria-label="关闭工作流" onClick={() => setMobileWorkflowOpen(false)} className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500 shadow"><X size={15} /></button></div>
+            <div className="relative flex h-full w-[min(92vw,430px)]" onClick={(event) => event.stopPropagation()}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} searchSources={searchSources} assetSources={assetSources} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /><button type="button" aria-label="关闭工作流" onClick={() => setMobileWorkflowOpen(false)} className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500 shadow"><X size={15} /></button></div>
           </div>
         )}
 
