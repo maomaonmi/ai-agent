@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 from fastapi import APIRouter, Query, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ppt_models import parse_presentation_document
 from ppt_operations import OperationRejected, RevisionConflict, apply_operations, parse_operations
+from ppt_agent_loop import AgentRunService, PresentationForRunNotFound, RunNotFound
 from ppt_repository import PptRepository, RepositoryConflict
 from ppt_service import (
     PresentationDocumentInvalid,
@@ -61,6 +63,15 @@ class ApplyOperationsRequest(BaseModel):
     operations: list[dict[str, Any]] = Field(min_length=0, max_length=100)
 
 
+class CreateRunRequest(BaseModel):
+    model_config = ConfigDict(alias_generator=_to_camel, extra="forbid", populate_by_name=True)
+
+    run_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+    presentation_id: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+    prompt: str = Field(min_length=1, max_length=50_000)
+    max_iterations: int = Field(default=3, ge=1, le=8)
+
+
 def _error(code: str, message: str, *, status_code: int, details: Any | None = None) -> JSONResponse:
     payload: dict[str, Any] = {"error": {"code": code, "message": message}}
     if details is not None:
@@ -103,6 +114,7 @@ def create_ppt_router(
     repository.initialize()
     service = PptService(repository)
     service.ensure_system_templates()
+    run_service = AgentRunService(repository)
     router = APIRouter(prefix="/api/ppt", tags=["ppt"])
 
     @router.post("/presentations", status_code=status.HTTP_201_CREATED, response_model=None)
@@ -209,6 +221,80 @@ def create_ppt_router(
             record = repository.get_presentation(presentation_id, owner_scope=owner_scope)
             assert record is not None
         return service.presentation_payload(record, ignored_operation_ids=ignored)
+
+    @router.post("/runs", response_model=None)
+    async def create_run(request: Request, payload: dict[str, Any]) -> JSONResponse | dict[str, Any]:
+        try:
+            create = CreateRunRequest.model_validate(payload)
+        except ValidationError as exc:
+            return _validation_error(exc)
+        owner_scope = await _resolve_owner(owner_resolver, request)
+        try:
+            run, created = run_service.create(
+                run_id=create.run_id,
+                presentation_id=create.presentation_id,
+                owner_scope=owner_scope,
+                prompt=create.prompt,
+                max_iterations=create.max_iterations,
+            )
+        except PresentationForRunNotFound:
+            return _error("PPT_PRESENTATION_NOT_FOUND", "演示文稿不存在", status_code=404)
+        except RepositoryConflict:
+            return _error("PPT_RUN_CONFLICT", "运行任务已存在", status_code=409)
+        response = JSONResponse(status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK, content=run_service.payload(run))
+        return response
+
+    @router.get("/runs/{run_id}", response_model=None)
+    async def get_run(run_id: str, request: Request) -> JSONResponse | dict[str, Any]:
+        owner_scope = await _resolve_owner(owner_resolver, request)
+        try:
+            return run_service.payload(run_service.get(run_id, owner_scope=owner_scope))
+        except RunNotFound:
+            return _error("PPT_RUN_NOT_FOUND", "运行任务不存在", status_code=404)
+
+    @router.get("/runs/{run_id}/events", response_model=None)
+    async def stream_run_events(
+        run_id: str,
+        request: Request,
+        follow: bool = Query(default=False),
+        after: int = Query(default=0, ge=0),
+    ) -> StreamingResponse | JSONResponse:
+        owner_scope = await _resolve_owner(owner_resolver, request)
+        try:
+            run_service.get(run_id, owner_scope=owner_scope)
+        except RunNotFound:
+            return _error("PPT_RUN_NOT_FOUND", "运行任务不存在", status_code=404)
+        header_value = request.headers.get("last-event-id")
+        try:
+            cursor = max(after, int(header_value or 0))
+        except ValueError:
+            cursor = after
+
+        async def event_stream():
+            nonlocal cursor
+            deadline = asyncio.get_running_loop().time() + 60
+            while True:
+                events = repository.list_run_events(run_id, after_sequence=cursor, limit=1_000)
+                for event in events:
+                    cursor = event.sequence
+                    payload = {"runId": run_id, "sequence": event.sequence, **event.payload}
+                    import json
+                    yield f"id: {event.sequence}\nevent: {event.event_type}\ndata: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+                current = run_service.get(run_id, owner_scope=owner_scope)
+                if not follow or current.status in {"COMPLETED", "CANCELLED", "FAILED"} or asyncio.get_running_loop().time() >= deadline:
+                    yield "event: end\ndata: {}\n\n"
+                    return
+                await asyncio.sleep(0.2)
+
+        return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    @router.post("/runs/{run_id}/cancel", response_model=None)
+    async def cancel_run(run_id: str, request: Request) -> JSONResponse | dict[str, Any]:
+        owner_scope = await _resolve_owner(owner_resolver, request)
+        try:
+            return run_service.payload(run_service.cancel(run_id, owner_scope=owner_scope))
+        except RunNotFound:
+            return _error("PPT_RUN_NOT_FOUND", "运行任务不存在", status_code=404)
 
     @router.get("/templates", response_model=None)
     async def list_templates(
