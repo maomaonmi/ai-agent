@@ -2,13 +2,13 @@
 
 source visual truth: `C:/Users/xys/AppData/Local/Temp/codex-clipboard-62ca529d-fc5c-4a8d-9230-4eda1f7bd8ed.png`（对话 + 编辑器参考）与 `C:/Users/xys/AppData/Local/Temp/codex-clipboard-e3e60254-c91f-4c63-aaff-7e0a16a256a8.png`（工作流参考）。
 
-implementation screenshot: `frontend/ai-agent/design-qa-chat-final.png`（应用内浏览器，1280×720，device scale 1）。
+implementation screenshot: `frontend/ai-agent/design-qa-chat-initial.png`（首次进入，应用内浏览器，1280×720，device scale 1）；交互后补充证据为 `frontend/ai-agent/design-qa-chat-final.png`。
 
 state: `/ppt/workspace/new?source=sidebar&session=chat-layout-2`；空白新工作台，发送“做一份关于团队协作的 8 页 PPT”后，工作流运行中。
 
 comparison evidence:
 
-- Full view：左侧为正常 AI 对话、可折叠工作流卡片和输入框；右侧为缩略图、工具栏、16:9 画布和备注区，保持参考图的左右层级。
+- Full view：首次进入左侧显示正常 AI 对话、可折叠工作流卡片和输入框；右侧为缩略图、工具栏、16:9 画布和备注区，保持参考图的左右层级。
 - Focused regions：左侧链路卡片可展开/收起每个阶段；右侧新增幻灯片、插入图表和文本编辑控件已在真实浏览器交互中验证。
 - Typography：沿用项目 system/PingFang fallback，标题与阶段标题使用明确的 semibold 层级，小字使用高对比 slate 色。
 - Spacing/layout：对话区、拖拽分隔线、缩略图轨和画布区均使用稳定边界；左栏宽度可在 320–620px 之间拖动。
