@@ -76,7 +76,7 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
     )
 
     assert created is True
-    for _ in range(100):
+    for _ in range(500):
         snapshot = service.get(run.id, owner_scope="owner-a")
         if snapshot.status in {"COMPLETED", "FAILED", "CANCELLED"}:
             break
@@ -102,6 +102,7 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
     ]
     web_complete = next(event for event in events if event.event_type == "phase.completed" and event.payload.get("phase") == "WEB_ASSETS")
     assert web_complete.payload["downloadedCount"] == 3
+    assert len(web_complete.payload["assets"]) == 3
 
 
 def test_agent_run_falls_back_to_firecrawl_when_native_search_times_out(tmp_path: Path) -> None:
@@ -132,6 +133,8 @@ def test_agent_run_falls_back_to_firecrawl_when_native_search_times_out(tmp_path
         search_adapters={"firecrawl": firecrawl, "qwen": native_failure, "glm": native_failure},
         ai_image_adapter=ImageAdapter(),
         image_downloader=None,
+        web_image_extractor=type("Extractor", (), {"extract": lambda *_args, **_kwargs: []})(),
+        allow_demo_materials=True,
     )
     run, _ = service.create(
         run_id="run-fallback-001",
@@ -140,7 +143,7 @@ def test_agent_run_falls_back_to_firecrawl_when_native_search_times_out(tmp_path
         prompt="fallback",
         max_iterations=3,
     )
-    for _ in range(100):
+    for _ in range(500):
         snapshot = service.get(run.id, owner_scope="owner-a")
         if snapshot.status in {"COMPLETED", "FAILED", "CANCELLED"}:
             break
@@ -152,3 +155,56 @@ def test_agent_run_falls_back_to_firecrawl_when_native_search_times_out(tmp_path
     assert second_search.payload["mode"] == "provider-fallback"
     assert second_search.payload["provider"] == "firecrawl"
     assert second_search.payload["requestedProvider"] == "qwen"
+
+
+def test_agent_run_deduplicates_sources_across_search_rounds(tmp_path: Path) -> None:
+    repository = PptRepository(tmp_path / "ppt.db")
+    repository.initialize()
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    document["presentationId"] = "presentation-dedupe-001"
+    repository.create_presentation(
+        presentation_id="presentation-dedupe-001",
+        owner_scope="owner-a",
+        title="Dedupe test",
+        document=document,
+        template_id=None,
+    )
+
+    def search(query: str, _limit: int):
+        marker = "round-2" if "行业研究" in query else "round-3" if "最新实践" in query else "round-1"
+        return [
+            {"title": f"{marker} source {index}", "url": f"https://example.com/{marker}-{index}"}
+            for index in range(3)
+        ]
+
+    class ImageAdapter:
+        def generate(self, *, role: str, prompt: str):
+            return {"role": role, "assetId": f"asset-{role.lower()}", "imageUrl": "https://cdn.example/generated.png"}
+
+    service = AgentRunService(
+        repository,
+        search_adapters={"firecrawl": search, "qwen": search, "glm": search},
+        ai_image_adapter=ImageAdapter(),
+        image_downloader=None,
+        web_image_extractor=type("Extractor", (), {"extract": lambda *_args, **_kwargs: []})(),
+        allow_demo_materials=True,
+    )
+    run, _ = service.create(
+        run_id="run-dedupe-001",
+        presentation_id="presentation-dedupe-001",
+        owner_scope="owner-a",
+        prompt="agent workflow",
+        max_iterations=3,
+    )
+    for _ in range(500):
+        snapshot = service.get(run.id, owner_scope="owner-a")
+        if snapshot.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+            break
+        time.sleep(0.01)
+
+    assert snapshot.status == "COMPLETED"
+    events = repository.list_run_events(run.id, after_sequence=0, limit=200)
+    completed = [event for event in events if event.event_type == "phase.completed" and event.payload.get("phase", "").startswith("SEARCH")]
+    urls = [url for event in completed for url in [source["url"] for source in event.payload["sources"]]]
+    assert len(urls) == len(set(urls)) == 9
+    assert [event.payload["sources"][0]["title"] for event in completed] == ["round-1 source 0", "round-2 source 0", "round-3 source 0"]

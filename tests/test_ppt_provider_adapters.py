@@ -15,6 +15,7 @@ from ppt_materials import (
     SourceLedger,
     UnsafeSourceUrl,
     generate_required_ai_images,
+    WebPageImageExtractor,
 )
 
 
@@ -266,4 +267,22 @@ def test_settings_ai_image_adapter_uses_glm_generation_contract() -> None:
         "imageUrl": "https://cdn.example/generated.png",
     }
     assert calls[0][2]["model"] == "glm-image"
+    assert calls[0][2]["size"] == "1728x960"
     assert "画面用途：COVER" in str(calls[0][2]["prompt"])
+
+
+def test_web_page_image_extractor_reads_open_graph_and_img_sources() -> None:
+    html = b'''<html><head><meta property="og:image" content="https://cdn.example/og.png"></head><body><img src="/images/hero.webp"></body></html>'''
+
+    class Response:
+        def read(self, _size: int = -1) -> bytes:
+            return html
+
+        def close(self) -> None:
+            return None
+
+    extractor = WebPageImageExtractor(opener=lambda _request: Response())
+    assert extractor.extract("https://example.com/article", limit=2) == [
+        "https://cdn.example/og.png",
+        "https://example.com/images/hero.webp",
+    ]

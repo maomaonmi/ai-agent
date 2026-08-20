@@ -67,6 +67,8 @@ class AgentRunService:
         search_adapters: Mapping[str, Any] | None = None,
         ai_image_adapter: Any | None = None,
         image_downloader: Any | None = None,
+        web_image_extractor: Any | None = None,
+        allow_demo_materials: bool = False,
     ) -> None:
         self.repository = repository
         self._locks: dict[str, threading.Lock] = {}
@@ -91,8 +93,14 @@ class AgentRunService:
             from ppt_materials import SafeImageDownloader
 
             image_downloader = SafeImageDownloader()
+        if web_image_extractor is None:
+            from ppt_materials import WebPageImageExtractor
+
+            web_image_extractor = WebPageImageExtractor()
         self.ai_image_adapter = ai_image_adapter
         self.image_downloader = image_downloader
+        self.web_image_extractor = web_image_extractor
+        self.allow_demo_materials = allow_demo_materials
 
     def _refresh_settings_backed_adapters(self) -> None:
         """Reload persisted provider profiles for every run after a settings save."""
@@ -234,18 +242,30 @@ class AgentRunService:
                 if phase.startswith("SEARCH"):
                     provider = effective_provider
                     query = current.state.get("prompt", "PPT")
-                    SearchBatch(provider=provider, query=query, limit=effective_limit)
+                    focus = {
+                        "SEARCH_1": "概念定义与权威背景",
+                        "SEARCH_2": "行业研究与案例数据",
+                        "SEARCH_3": "最新实践与可视化素材",
+                    }.get(phase, "补充资料")
+                    search_query = f"{query}\n检索方向：{focus}"
+                    SearchBatch(provider=provider, query=search_query, limit=effective_limit)
                     rounds = list(current.state.get("searchRounds", []))
+                    seen_urls = {
+                        str(result.get("url", ""))
+                        for round_state in rounds
+                        for result in round_state.get("results", [])
+                        if isinstance(result, dict) and isinstance(result.get("url"), str)
+                    }
                     configured_adapter = search_coordinator.adapters.get(provider)
                     if configured_adapter is not None:
                         try:
-                            results = search_coordinator.search_round(provider=provider, query=query, limit=effective_limit)
+                            results = search_coordinator.search_round(provider=provider, query=search_query, limit=effective_limit, exclude_urls=seen_urls)
                             phase_details.update({"provider": provider, "limit": effective_limit, "resultCount": len(results), "mode": "provider"})
                         except Exception as provider_error:
                             fallback_adapter = search_coordinator.adapters.get("firecrawl")
                             if provider == "firecrawl" or fallback_adapter is None:
                                 raise
-                            results = search_coordinator.search_round(provider="firecrawl", query=query, limit=effective_limit)
+                            results = search_coordinator.search_round(provider="firecrawl", query=search_query, limit=effective_limit, exclude_urls=seen_urls)
                             phase_details.update({
                                 "provider": "firecrawl",
                                 "requestedProvider": provider,
@@ -275,41 +295,62 @@ class AgentRunService:
                     ]
                     state_patch["searchRounds"] = rounds
                 elif phase == "WEB_ASSETS":
-                    real_sources = [
-                        result
+                    rounds = [
+                        {**round_state, "results": [dict(result) for result in round_state.get("results", []) if isinstance(result, dict)]}
                         for round_state in current.state.get("searchRounds", [])
-                        for result in round_state.get("results", [])
-                        if isinstance(result, dict) and isinstance(result.get("imageUrl"), str) and isinstance(result.get("url"), str)
+                        if isinstance(round_state, dict)
                     ]
+                    real_sources: list[dict[str, Any]] = []
+                    seen_images: set[str] = set()
+                    for round_state in rounds:
+                        for result in round_state["results"]:
+                            if not isinstance(result.get("url"), str):
+                                continue
+                            image_urls = [result["imageUrl"]] if isinstance(result.get("imageUrl"), str) else []
+                            if not image_urls and self.web_image_extractor is not None:
+                                image_urls = self.web_image_extractor.extract(result["url"], limit=3)
+                            for image_url in image_urls:
+                                if image_url in seen_images:
+                                    continue
+                                seen_images.add(image_url)
+                                real_sources.append({**result, "imageUrl": image_url})
                     downloaded_count = 0
                     if self.image_downloader is not None:
-                        for source in real_sources[:3]:
-                            material_gate.ledger.add_downloaded_web_image(
-                                source["imageUrl"],
-                                page_url=str(source.get("pageUrl") or source["url"]),
-                                downloader=self.image_downloader,
-                                alt=str(source.get("title", "")),
-                            )
-                            downloaded_count += 1
+                        for source in real_sources:
+                            if downloaded_count >= 3:
+                                break
+                            try:
+                                material_gate.ledger.add_downloaded_web_image(
+                                    source["imageUrl"],
+                                    page_url=str(source.get("pageUrl") or source["url"]),
+                                    downloader=self.image_downloader,
+                                    alt=str(source.get("title", "")),
+                                )
+                                downloaded_count += 1
+                            except Exception:
+                                continue
                     if downloaded_count < 3:
-                        # This deterministic branch is deliberately marked in the
-                        # state so demo runs are never mistaken for sourced assets.
+                        if not self.allow_demo_materials:
+                            raise RuntimeError(f"网页图片素材不足：仅成功下载 {downloaded_count} / 3 张（候选 {len(real_sources)} 个）")
+                        # Injectable unit-test runs without a downloader retain a
+                        # deterministic fallback, explicitly marked as demo data.
                         for index in range(3 - downloaded_count):
-                            material_gate.ledger.add_web_image(
-                                f"https://images.example.com/ppt/{run_id}/{index}.jpg",
-                                page_url="https://example.com/research",
-                                alt=f"网页素材 {index + 1}",
-                            )
+                            material_gate.ledger.add_web_image(f"https://images.example.com/ppt/{run_id}/{index}.jpg", page_url="https://example.com/research", alt=f"网页素材 {index + 1}")
+                    state_patch["searchRounds"] = rounds
                     state_patch["webImages"] = {
                         "candidateCount": max(details["candidateCount"], len(real_sources)),
                         "selectedCount": len(material_gate.ledger.web_images),
                         "downloadedCount": downloaded_count,
                         "mode": "provider" if downloaded_count >= 3 else "demo-fallback",
+                        "assets": list(material_gate.ledger.web_images),
                     }
                     phase_details.update(state_patch["webImages"])
                 elif phase == "AI_ASSETS":
                     if self.ai_image_adapter is not None:
-                        generated = generate_required_ai_images(self.ai_image_adapter, prompt=current.state.get("prompt", "PPT"))
+                        try:
+                            generated = generate_required_ai_images(self.ai_image_adapter, prompt=current.state.get("prompt", "PPT"))
+                        except Exception as image_error:
+                            raise RuntimeError(f"AI 图片生成失败（GLM-Image）：{type(image_error).__name__}") from image_error
                         for asset in generated:
                             material_gate.record_ai_asset(asset)
                         state_patch["aiImages"] = {

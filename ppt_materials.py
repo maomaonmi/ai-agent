@@ -9,16 +9,18 @@ moving credentials into the domain model or browser.
 from __future__ import annotations
 
 import hashlib
+from html.parser import HTMLParser
 import ipaddress
 import json
 import os
 import socket
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 import re
 
 from ppt_agent_loop import SearchBatch, SearchProvider
@@ -70,7 +72,7 @@ def _validate_https_url(raw: str) -> str:
     return parsed.geturl()
 
 
-def _default_json_request(endpoint: str, headers: dict[str, str], payload: dict[str, object]) -> Mapping[str, object]:
+def _request_json_with_timeout(endpoint: str, headers: dict[str, str], payload: dict[str, object], *, timeout_seconds: int) -> Mapping[str, object]:
     """POST JSON with bounded response size and a generic public error."""
 
     request = urllib.request.Request(
@@ -80,7 +82,6 @@ def _default_json_request(endpoint: str, headers: dict[str, str], payload: dict[
         method="POST",
     )
     try:
-        timeout_seconds = max(5, min(60, int(os.getenv("PPT_PROVIDER_TIMEOUT_SECONDS", "12"))))
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             raw = response.read(_MAX_JSON_BYTES + 1)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
@@ -94,6 +95,16 @@ def _default_json_request(endpoint: str, headers: dict[str, str], payload: dict[
     if not isinstance(decoded, Mapping):
         raise ProviderRequestFailed("provider returned an invalid response")
     return decoded
+
+
+def _default_json_request(endpoint: str, headers: dict[str, str], payload: dict[str, object]) -> Mapping[str, object]:
+    return _request_json_with_timeout(endpoint, headers, payload, timeout_seconds=max(5, min(60, int(os.getenv("PPT_PROVIDER_TIMEOUT_SECONDS", "12")))))
+
+
+def _image_json_request(endpoint: str, headers: dict[str, str], payload: dict[str, object]) -> Mapping[str, object]:
+    # GLM-Image HD generation is documented to take about 20 seconds; the
+    # hosted endpoint can be slower on a cold request, so allow two minutes.
+    return _request_json_with_timeout(endpoint, headers, payload, timeout_seconds=max(30, min(180, int(os.getenv("PPT_IMAGE_PROVIDER_TIMEOUT_SECONDS", "120")))))
 
 
 def _normalize_search_response(payload: Mapping[str, object]) -> list[dict[str, object]]:
@@ -335,12 +346,14 @@ class SearchCoordinator:
         self.adapters = dict(adapters)
         self.ledger: list[dict[str, object]] = []
 
-    def search_round(self, *, provider: str, query: str, limit: int = 20) -> list[dict[str, object]]:
+    def search_round(self, *, provider: str, query: str, limit: int = 20, exclude_urls: set[str] | None = None) -> list[dict[str, object]]:
         if provider not in self.adapters:
             raise ValueError(f"unsupported search provider: {provider}")
         batch = SearchBatch(provider=self._provider_name(provider), query=query, limit=limit)
         raw_results = self.adapters[provider](batch.query, batch.limit)
         results: list[dict[str, object]] = []
+        excluded = {_source_key(url) for url in (exclude_urls or set())}
+        seen: set[str] = set()
         for raw in raw_results[:_MAX_SEARCH_RESULTS]:
             url = raw.get("url")
             if not isinstance(url, str):
@@ -349,6 +362,10 @@ class SearchCoordinator:
                 safe_url = _validate_https_url(url)
             except UnsafeSourceUrl:
                 continue
+            key = _source_key(safe_url)
+            if key in excluded or key in seen:
+                continue
+            seen.add(key)
             item: dict[str, object] = {"title": str(raw.get("title", ""))[:500], "url": safe_url}
             image_url = raw.get("imageUrl")
             if isinstance(image_url, str):
@@ -375,6 +392,74 @@ class SearchCoordinator:
         raise ValueError(f"unsupported search provider: {provider}")
 
 
+def _source_key(url: str) -> str:
+    parsed = urlparse(url.strip())
+    return f"{parsed.scheme.lower()}://{(parsed.netloc or '').lower()}{parsed.path.rstrip('/')}".lower()
+
+
+class _ImageHintParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.hints: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = {key.lower(): value for key, value in attrs}
+        if tag.lower() == "meta" and values.get("property", "").lower() in {"og:image", "og:image:url", "twitter:image"}:
+            if values.get("content"):
+                self.hints.append(values["content"] or "")
+        elif tag.lower() == "img":
+            for key in ("src", "data-src", "data-original"):
+                if values.get(key):
+                    self.hints.append(values[key] or "")
+                    break
+
+
+class WebPageImageExtractor:
+    """Find public image hints in a page before handing them to the downloader."""
+
+    def __init__(self, *, opener: Callable[[urllib.request.Request], Any] | None = None, max_html_bytes: int = 512 * 1024) -> None:
+        self.max_html_bytes = max_html_bytes
+        if opener is None:
+            opener_instance = urllib.request.build_opener()
+            self.opener = lambda request: opener_instance.open(request, timeout=15)
+        else:
+            self.opener = opener
+
+    def extract(self, page_url: str, *, limit: int = 3) -> list[str]:
+        try:
+            safe_page_url = _validate_https_url(page_url)
+            request = urllib.request.Request(safe_page_url, headers={"Accept": "text/html", "User-Agent": "AIPPT/1.0"}, method="GET")
+            response = self.opener(request)
+            try:
+                raw = response.read(self.max_html_bytes + 1)
+            finally:
+                close = getattr(response, "close", None)
+                if callable(close):
+                    close()
+            if len(raw) > self.max_html_bytes:
+                raw = raw[: self.max_html_bytes]
+            parser = _ImageHintParser()
+            parser.feed(raw.decode("utf-8", errors="ignore"))
+            images: list[str] = []
+            seen: set[str] = set()
+            for hint in parser.hints:
+                candidate = urljoin(safe_page_url, hint.strip())
+                try:
+                    candidate = _validate_https_url(candidate)
+                except UnsafeSourceUrl:
+                    continue
+                key = _source_key(candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                images.append(candidate)
+                if len(images) >= max(1, min(limit, 10)):
+                    break
+            return images
+        except (OSError, urllib.error.URLError, UnicodeError, UnsafeSourceUrl, ValueError):
+            return []
+
+
 def _resolve_public_hostname(hostname: str, resolver: Callable[..., Sequence[tuple[Any, ...]]]) -> None:
     try:
         addresses = resolver(hostname, 443, type=socket.SOCK_STREAM)
@@ -387,7 +472,11 @@ def _resolve_public_hostname(hostname: str, resolver: Callable[..., Sequence[tup
             address = ipaddress.ip_address(str(info[4][0]))
         except (IndexError, ValueError) as exc:
             raise UnsafeSourceUrl("source hostname resolved to an invalid address") from exc
-        if not address.is_global:
+        # The local desktop runtime maps public hosts into TEST-NET-2-like
+        # egress addresses (198.18.0.0/15). urllib still reaches the public
+        # origin, so keep the SSRF guard while allowing this known bridge.
+        synthetic_egress = ipaddress.ip_network("198.18.0.0/15")
+        if not address.is_global and address not in synthetic_egress:
             raise UnsafeSourceUrl("source hostname resolved to a private or reserved address")
 
 
@@ -512,7 +601,7 @@ class AiImageAdapter:
     ) -> None:
         self.endpoint = endpoint if endpoint is not None else os.getenv("AI_IMAGE_URL")
         self.api_key = api_key if api_key is not None else os.getenv("AI_IMAGE_API_KEY")
-        self.request_json = request_json or _default_json_request
+        self.request_json = request_json or _image_json_request
 
     def generate(self, *, role: str, prompt: str) -> dict[str, object]:
         if role not in _AI_IMAGE_ROLES:
@@ -557,7 +646,7 @@ class SettingsAiImageAdapter:
     ) -> None:
         self.api_key = api_key
         self.endpoint = endpoint
-        self.request_json = request_json or _default_json_request
+        self.request_json = request_json or _image_json_request
 
     def generate(self, *, role: str, prompt: str) -> dict[str, object]:
         if role not in _AI_IMAGE_ROLES:
@@ -565,7 +654,9 @@ class SettingsAiImageAdapter:
         if not self.api_key:
             raise ProviderNotConfigured("image provider is not configured")
         _validate_https_url(self.endpoint)
-        payload = {"model": "glm-image", "prompt": f"{prompt}\n画面用途：{role}", "size": "1440x810"}
+        # GLM-Image requires dimensions divisible by 32; 1728x960 is the
+        # documented 16:9 size and avoids the invalid 1440x810 request.
+        payload = {"model": "glm-image", "prompt": f"{prompt}\n画面用途：{role}"[:1000], "size": "1728x960"}
         response = self.request_json(
             self.endpoint,
             {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
@@ -584,7 +675,13 @@ class SettingsAiImageAdapter:
 def generate_required_ai_images(adapter: AiImageAdapter, *, prompt: str) -> list[dict[str, object]]:
     """Generate exactly the three visuals required before PPT build can start."""
 
-    return [adapter.generate(role=role, prompt=f"{prompt}\nComposition role: {role}") for role in _AI_IMAGE_ROLES]
+    def generate(role: str) -> dict[str, object]:
+        return adapter.generate(role=role, prompt=f"{prompt}\nComposition role: {role}")
+
+    # The provider supports concurrent jobs; preserve role order while keeping
+    # the live workflow responsive instead of waiting for three serial calls.
+    with ThreadPoolExecutor(max_workers=len(_AI_IMAGE_ROLES), thread_name_prefix="ppt-image") as executor:
+        return list(executor.map(generate, _AI_IMAGE_ROLES))
 
 
 def build_settings_ai_image_adapter(*, request_json: JsonRequest | None = None) -> SettingsAiImageAdapter | None:
