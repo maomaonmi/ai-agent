@@ -85,3 +85,9 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
     assert snapshot.state["webImages"]["mode"] == "provider"
     assert snapshot.state["aiImages"]["mode"] == "provider"
     assert len(calls) == 3
+    events = repository.list_run_events(run.id, after_sequence=0, limit=200)
+    search_complete = next(event for event in events if event.event_type == "phase.completed" and event.payload.get("phase") == "SEARCH_1")
+    assert search_complete.payload["resultCount"] == 3
+    assert search_complete.payload["mode"] == "provider"
+    web_complete = next(event for event in events if event.event_type == "phase.completed" and event.payload.get("phase") == "WEB_ASSETS")
+    assert web_complete.payload["downloadedCount"] == 3

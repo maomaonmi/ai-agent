@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import threading
-import time
 import uuid
 import os
 from dataclasses import dataclass
@@ -193,6 +192,7 @@ class AgentRunService:
                     return
                 self._emit(run_id, owner_scope, "phase.started", {"phase": phase, "label": label}, status="RUNNING", phase=phase)
                 state_patch: dict[str, Any] = {}
+                phase_details = dict(details)
                 if phase.startswith("SEARCH"):
                     provider = details["provider"]
                     query = current.state.get("prompt", "PPT")
@@ -201,9 +201,11 @@ class AgentRunService:
                     configured_adapter = search_coordinator.adapters.get(provider)
                     if configured_adapter is not None:
                         results = search_coordinator.search_round(provider=provider, query=query, limit=details["limit"])
-                        rounds.append({"round": len(rounds) + 1, **details, "resultCount": len(results), "results": results})
+                        phase_details.update({"resultCount": len(results), "mode": "provider"})
+                        rounds.append({"round": len(rounds) + 1, **phase_details, "results": results})
                     else:
-                        rounds.append({"round": len(rounds) + 1, **details, "mode": "demo-fallback"})
+                        phase_details["mode"] = "demo-fallback"
+                        rounds.append({"round": len(rounds) + 1, **phase_details})
                     state_patch["searchRounds"] = rounds
                 elif phase == "WEB_ASSETS":
                     real_sources = [
@@ -237,6 +239,7 @@ class AgentRunService:
                         "downloadedCount": downloaded_count,
                         "mode": "provider" if downloaded_count >= 3 else "demo-fallback",
                     }
+                    phase_details.update(state_patch["webImages"])
                 elif phase == "AI_ASSETS":
                     if self.ai_image_adapter is not None:
                         generated = generate_required_ai_images(self.ai_image_adapter, prompt=current.state.get("prompt", "PPT"))
@@ -256,12 +259,12 @@ class AgentRunService:
                             "requiredCount": details["requiredCount"],
                             "mode": "demo-fallback",
                         }
+                    phase_details.update(state_patch["aiImages"])
                 elif phase == "BUILD" and not material_gate.ready_for_build():
                     raise RuntimeError("material gates are not satisfied")
                 elif phase == "PLAN":
                     state_patch["iteration"] = details["iteration"]
-                self._emit(run_id, owner_scope, "phase.completed", {"phase": phase, "label": label, **details}, state_patch=state_patch)
-                time.sleep(0.035)
+                self._emit(run_id, owner_scope, "phase.completed", {"phase": phase, "label": label, **phase_details}, state_patch=state_patch)
             self._emit(run_id, owner_scope, "run.completed", {"slideCount": 16}, status="COMPLETED", phase="REVIEW")
         except Exception as exc:  # pragma: no cover - defensive worker boundary
             self._emit(run_id, owner_scope, "run.failed", {"message": str(exc)[:500]}, status="FAILED", phase="REVIEW")
