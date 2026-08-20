@@ -2,7 +2,7 @@
 
 import { MODE_OPTIONS } from './ModeSelector';
 import { SessionSummary } from '../lib/api';
-import { Activity, ChevronUp, Film, LogOut, Puzzle, Settings, UserRound, Workflow } from 'lucide-react';
+import { Activity, ChevronUp, Film, LogOut, Presentation, Puzzle, Settings, UserRound, Workflow } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 interface SessionSidebarProps {
@@ -23,6 +23,7 @@ interface SessionSidebarProps {
   onOpenImageStudio: () => void;
   onOpenVideoStudio: () => void;
   onOpenVisualWorkflow: () => void;
+  onOpenPpt: () => void;
 }
 
 function modeLabel(mode: SessionSummary['mode']) {
@@ -47,6 +48,7 @@ export default function SessionSidebar({
   onOpenImageStudio,
   onOpenVideoStudio,
   onOpenVisualWorkflow,
+  onOpenPpt,
 }: SessionSidebarProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -134,6 +136,14 @@ export default function SessionSidebar({
           >
             <Workflow size={16} className="shrink-0 text-violet-500" />
             AI 工作流
+          </button>
+          <button
+            type="button"
+            onClick={onOpenPpt}
+            className="mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <Presentation size={16} className="shrink-0 text-orange-500" />
+            AI PPT
           </button>
           <button
             type="button"
@@ -258,6 +268,15 @@ export default function SessionSidebar({
             className="mt-3 flex h-9 w-9 items-center justify-center rounded-lg text-violet-600 hover:bg-violet-50 hover:text-violet-700"
           >
             <Workflow size={18} />
+          </button>
+          <button
+            type="button"
+            aria-label="打开 AI PPT"
+            title="AI PPT"
+            onClick={onOpenPpt}
+            className="mt-3 flex h-9 w-9 items-center justify-center rounded-lg text-orange-600 hover:bg-orange-50 hover:text-orange-700"
+          >
+            <Presentation size={18} />
           </button>
           <button
             type="button"

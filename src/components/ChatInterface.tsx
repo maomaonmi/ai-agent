@@ -1267,6 +1267,15 @@ export default function ChatInterface() {
   const openVisualWorkflow = useCallback(() => {
     window.location.assign('/visual-workflow');
   }, []);
+  const openPptMarket = useCallback(() => {
+    window.location.assign('/ppt');
+  }, []);
+  const openPptWorkspace = useCallback(() => {
+    const sessionId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.round(Math.random() * 1_000_000)}`;
+    window.location.assign(`/ppt/workspace/new?source=sidebar&session=${sessionId}`);
+  }, []);
 
   // Why: Create with agent（计划书 §3.1 D4）——关市场→新建会话→输入框预填随机提示词（不发送）。
   const handleCreateWithAgent = useCallback(async (prompt: string) => {
@@ -2289,6 +2298,7 @@ export default function ChatInterface() {
         onOpenImageStudio={() => openImageWorkspace()}
         onOpenVideoStudio={() => openVideoWorkspace()}
         onOpenVisualWorkflow={openVisualWorkflow}
+        onOpenPpt={openPptWorkspace}
       />
       <SettingsDialog
         open={isSettingsOpen}
@@ -3162,6 +3172,7 @@ export default function ChatInterface() {
                           if (label.includes('视频')) openVideoMarket(input);
                           if (label === '代码') setView('code-showcase');
                           if (label === 'AI 写作') void openWritingWorkspace();
+                          if (label === 'PPT 创作') openPptMarket();
                         }}
                         className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-slate-700 transition hover:bg-slate-100 hover:text-slate-950"
                       >
