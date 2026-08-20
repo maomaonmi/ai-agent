@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
@@ -10,11 +11,24 @@ from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from ppt_repository import PptRepository
-from ppt_service import PptService, TemplateNotFound, TemplateReadOnly
+from ppt_models import parse_presentation_document
+from ppt_operations import OperationRejected, RevisionConflict, apply_operations, parse_operations
+from ppt_repository import PptRepository, RepositoryConflict
+from ppt_service import (
+    PresentationDocumentInvalid,
+    PresentationNotFound,
+    PptService,
+    TemplateNotFound,
+    TemplateReadOnly,
+)
 
 
 OwnerResolver = Callable[[Request], str | Awaitable[str]]
+
+
+def _to_camel(value: str) -> str:
+    head, *tail = value.split("_")
+    return head + "".join(part[:1].upper() + part[1:] for part in tail)
 
 
 class UpdateTemplateRequest(BaseModel):
@@ -29,6 +43,22 @@ class UpdateTemplateRequest(BaseModel):
         if self.name is None and self.description is None and self.scene is None:
             raise ValueError("at least one field must be provided")
         return self
+
+
+class CreatePresentationRequest(BaseModel):
+    model_config = ConfigDict(alias_generator=_to_camel, extra="forbid", populate_by_name=True)
+
+    presentation_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+    template_id: str | None = Field(default=None, min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    document: dict[str, Any] | None = None
+
+
+class ApplyOperationsRequest(BaseModel):
+    model_config = ConfigDict(alias_generator=_to_camel, extra="forbid", populate_by_name=True)
+
+    base_revision: int = Field(ge=0)
+    operations: list[dict[str, Any]] = Field(min_length=0, max_length=100)
 
 
 def _error(code: str, message: str, *, status_code: int, details: Any | None = None) -> JSONResponse:
@@ -73,6 +103,111 @@ def create_ppt_router(
     repository.initialize()
     service = PptService(repository)
     router = APIRouter(prefix="/api/ppt", tags=["ppt"])
+
+    @router.post("/presentations", status_code=status.HTTP_201_CREATED, response_model=None)
+    async def create_presentation(request: Request, payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
+        try:
+            create = CreatePresentationRequest.model_validate(payload)
+        except ValidationError as exc:
+            return _validation_error(exc)
+        owner_scope = await _resolve_owner(owner_resolver, request)
+        try:
+            return service.create_presentation(
+                owner_scope=owner_scope,
+                presentation_id=create.presentation_id,
+                title=create.title,
+                template_id=create.template_id,
+                document=create.document,
+            )
+        except TemplateNotFound:
+            return _error("PPT_TEMPLATE_NOT_FOUND", "模板不存在", status_code=404)
+        except PresentationDocumentInvalid as exc:
+            return _error("PPT_DOCUMENT_INVALID", str(exc), status_code=422)
+        except RepositoryConflict:
+            return _error("PPT_PRESENTATION_CONFLICT", "演示文稿已存在", status_code=409)
+
+    @router.get("/presentations/{presentation_id}", response_model=None)
+    async def get_presentation(presentation_id: str, request: Request) -> dict[str, Any] | JSONResponse:
+        owner_scope = await _resolve_owner(owner_resolver, request)
+        try:
+            return service.get_presentation(presentation_id, owner_scope=owner_scope)
+        except PresentationNotFound:
+            return _error("PPT_PRESENTATION_NOT_FOUND", "演示文稿不存在", status_code=404)
+
+    @router.post("/presentations/{presentation_id}/operations", response_model=None)
+    async def apply_presentation_operations(
+        presentation_id: str,
+        request: Request,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | JSONResponse:
+        try:
+            command = ApplyOperationsRequest.model_validate(payload)
+        except ValidationError as exc:
+            return _validation_error(exc)
+        owner_scope = await _resolve_owner(owner_resolver, request)
+        record = repository.get_presentation(presentation_id, owner_scope=owner_scope)
+        if record is None:
+            return _error("PPT_PRESENTATION_NOT_FOUND", "演示文稿不存在", status_code=404)
+        try:
+            document = parse_presentation_document(record.document)
+            operations = parse_operations(command.operations)
+            known_ids = repository.get_applied_operation_ids(
+                presentation_id,
+                [operation.operation_id for operation in operations],
+            )
+            result = apply_operations(
+                document,
+                base_revision=command.base_revision,
+                operations=operations,
+                applied_operation_ids=known_ids,
+            )
+        except ValidationError as exc:
+            return _validation_error(exc)
+        except RevisionConflict as exc:
+            return _error(
+                "REVISION_CONFLICT",
+                "演示文稿已被更新，请重新加载后再试",
+                status_code=409,
+                details={"currentRevision": exc.current_revision},
+            )
+        except OperationRejected as exc:
+            return _error("PPT_OPERATION_REJECTED", str(exc), status_code=422)
+
+        ignored = list(result.ignored_operation_ids)
+        pending_ids = [
+            operation.operation_id
+            for operation in operations
+            if operation.operation_id not in set(ignored)
+        ]
+        if pending_ids:
+            operation_payloads = {
+                operation.operation_id: hashlib.sha256(
+                    operation.model_dump_json(by_alias=True, exclude_none=True).encode("utf-8")
+                ).hexdigest()
+                for operation in operations
+                if operation.operation_id in pending_ids
+            }
+            try:
+                repository.commit_revision(
+                    presentation_id=presentation_id,
+                    owner_scope=owner_scope,
+                    expected_revision=record.current_revision,
+                    document=result.document.model_dump(mode="json", by_alias=True, exclude_none=True),
+                    operations=[operation.model_dump(mode="json", by_alias=True, exclude_none=True) for operation in operations],
+                    operation_payloads=operation_payloads,
+                )
+            except RepositoryConflict:
+                latest = repository.get_presentation(presentation_id, owner_scope=owner_scope)
+                current_revision = latest.current_revision if latest else record.current_revision
+                return _error(
+                    "REVISION_CONFLICT",
+                    "演示文稿已被更新，请重新加载后再试",
+                    status_code=409,
+                    details={"currentRevision": current_revision},
+                )
+            record = repository.get_presentation(presentation_id, owner_scope=owner_scope)
+            assert record is not None
+        return service.presentation_payload(record, ignored_operation_ids=ignored)
 
     @router.get("/templates", response_model=None)
     async def list_templates(

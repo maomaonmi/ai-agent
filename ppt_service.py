@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import copy
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
+from ppt_models import parse_presentation_document
 from ppt_repository import PptRepository, TemplateRecord
 
 
@@ -13,6 +17,14 @@ class TemplateNotFound(LookupError):
 
 
 class TemplateReadOnly(PermissionError):
+    pass
+
+
+class PresentationNotFound(LookupError):
+    pass
+
+
+class PresentationDocumentInvalid(ValueError):
     pass
 
 
@@ -27,6 +39,124 @@ class TemplatePage:
 class PptService:
     def __init__(self, repository: PptRepository) -> None:
         self.repository = repository
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+    @classmethod
+    def blank_document(
+        cls,
+        *,
+        presentation_id: str,
+        title: str,
+        template_id: str | None,
+    ) -> dict[str, Any]:
+        timestamp = cls._now()
+        return {
+            "schemaVersion": 1,
+            "presentationId": presentation_id,
+            "revision": 0,
+            "title": title,
+            "aspectRatio": "16:9",
+            "canvas": {"width": 13.333, "height": 7.5},
+            "theme": {
+                "name": "Aurora",
+                "colors": {
+                    "background": "#0B1020",
+                    "surface": "#151C33",
+                    "text": "#F7F8FC",
+                    "mutedText": "#AAB2C8",
+                    "accent1": "#7657FF",
+                    "accent2": "#39C6B4",
+                },
+                "fonts": {
+                    "heading": "Microsoft YaHei",
+                    "body": "Microsoft YaHei",
+                    "mono": "Cascadia Mono",
+                },
+            },
+            "slides": [
+                {
+                    "id": "slide-1",
+                    "order": 0,
+                    "background": {"type": "SOLID", "color": "#0B1020"},
+                    "elements": [],
+                    "animations": [],
+                    "notes": "",
+                }
+            ],
+            "metadata": {
+                **({"templateId": template_id} if template_id else {}),
+                "language": "zh-CN",
+                "createdAt": timestamp,
+                "updatedAt": timestamp,
+            },
+        }
+
+    @staticmethod
+    def presentation_payload(record: Any, *, ignored_operation_ids: list[str] | None = None) -> dict[str, Any]:
+        payload = {
+            "presentationId": record.id,
+            "title": record.title,
+            "templateId": record.template_id,
+            "revision": record.current_revision,
+            "document": copy.deepcopy(record.document),
+            "createdAt": record.created_at,
+            "updatedAt": record.updated_at,
+        }
+        if ignored_operation_ids is not None:
+            payload["ignoredOperationIds"] = ignored_operation_ids
+        return payload
+
+    def create_presentation(
+        self,
+        *,
+        owner_scope: str,
+        presentation_id: str | None,
+        title: str | None,
+        template_id: str | None,
+        document: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if template_id is not None and self.repository.get_template(template_id, owner_scope=owner_scope) is None:
+            raise TemplateNotFound(template_id)
+        resolved_id = (
+            presentation_id
+            or (str(document.get("presentationId")) if isinstance(document, dict) and document.get("presentationId") else None)
+            or f"presentation-{uuid.uuid4().hex}"
+        )
+        candidate = copy.deepcopy(document) if document is not None else self.blank_document(
+            presentation_id=resolved_id,
+            title=title or "新建 AI PPT",
+            template_id=template_id,
+        )
+        if candidate.get("presentationId") not in (None, resolved_id):
+            raise PresentationDocumentInvalid("presentationId must match the request")
+        candidate["presentationId"] = resolved_id
+        if title is not None:
+            candidate["title"] = title
+        if template_id is not None:
+            metadata = candidate.setdefault("metadata", {})
+            metadata["templateId"] = template_id
+        candidate["revision"] = 0
+        try:
+            parsed = parse_presentation_document(candidate)
+        except (TypeError, ValueError) as exc:
+            raise PresentationDocumentInvalid(str(exc)) from exc
+        record = self.repository.create_presentation(
+            presentation_id=resolved_id,
+            owner_scope=owner_scope,
+            title=parsed.title,
+            document=parsed.model_dump(mode="json", by_alias=True, exclude_none=True),
+            template_id=template_id,
+        )
+        return self.presentation_payload(record)
+
+    def get_presentation(self, presentation_id: str, *, owner_scope: str) -> dict[str, Any]:
+        record = self.repository.get_presentation(presentation_id, owner_scope=owner_scope)
+        if record is None:
+            raise PresentationNotFound(presentation_id)
+        return self.presentation_payload(record)
 
     @staticmethod
     def template_payload(record: TemplateRecord, *, include_manifest: bool = False) -> dict[str, Any]:
