@@ -429,7 +429,7 @@ function WorkflowPanel({
   started,
   details,
   messages,
-  onToggle,
+  onCancel,
   onRestart,
   onSendMessage,
 }: {
@@ -438,7 +438,7 @@ function WorkflowPanel({
   started: boolean;
   details: Record<string, string>;
   messages: ChatMessage[];
-  onToggle: () => void;
+  onCancel: () => void;
   onRestart: () => void;
   onSendMessage: (message: string) => void;
 }) {
@@ -462,7 +462,7 @@ function WorkflowPanel({
     <aside aria-label="AI 工作流" className="flex min-h-0 w-full flex-col border-r border-slate-200 bg-white">
       <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4">
         <div className="flex items-center gap-2"><span className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-100 text-violet-700"><WandSparkles size={16} /></span><div><p className="text-sm font-semibold text-slate-950">AI PPT 助手</p><p className="text-[10px] text-slate-400">对话驱动的演示创作</p></div></div>
-        <button type="button" onClick={onToggle} aria-label={started ? (running ? "暂停生成" : "继续生成") : "等待你的指令"} disabled={!started} className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300">{running ? <Pause size={15} /> : <Play size={15} />}</button>
+        <button type="button" onClick={onCancel} aria-label={started ? (running ? "暂停生成" : "生成已停止") : "等待你的指令"} disabled={!started || !running} className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300">{running ? <Pause size={15} /> : <Play size={15} />}</button>
       </div>
 
       <div ref={messagesRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
@@ -625,7 +625,11 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
 
   const startAgentRun = async (prompt: string) => {
     const currentPresentation = serverPresentationRef.current;
-    if (!currentPresentation) return;
+    if (!currentPresentation) {
+      setRunning(false);
+      setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "演示文稿还在连接中，暂时无法开始实时生成。" }]);
+      return;
+    }
     runEventControllerRef.current?.abort();
     const eventController = new AbortController();
     runEventControllerRef.current = eventController;
@@ -713,6 +717,17 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     setWorkflowDetails({});
     setRunning(true);
     void startAgentRun("重新规划当前演示文稿");
+  };
+
+  const cancelAgentRun = () => {
+    if (!runId || !running) return;
+    runEventControllerRef.current?.abort();
+    void pptApi.cancelRun(runId).then(() => {
+      setRunning(false);
+      setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "已暂停当前生成。你可以继续编辑当前页面，或重新规划并生成。" }]);
+    }).catch(() => {
+      setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "暂停请求未完成，请稍后重试。" }]);
+    });
   };
 
   const beginResize = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -847,11 +862,11 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <div className="hidden min-h-0 shrink-0 lg:flex" style={{ width: leftWidth }}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} messages={chatMessages} onToggle={() => setRunning((value) => !value)} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /></div>
+        <div className="hidden min-h-0 shrink-0 lg:flex" style={{ width: leftWidth }}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /></div>
         <div role="separator" aria-label="调整 AI 对话区宽度" aria-orientation="vertical" onPointerDown={beginResize} className="hidden w-1 shrink-0 cursor-col-resize bg-slate-200 transition hover:bg-violet-300 lg:block" />
         {mobileWorkflowOpen && (
           <div className="fixed inset-0 z-50 flex bg-slate-950/30 lg:hidden" onClick={() => setMobileWorkflowOpen(false)}>
-            <div className="relative flex h-full w-[min(92vw,430px)]" onClick={(event) => event.stopPropagation()}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} messages={chatMessages} onToggle={() => setRunning((value) => !value)} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /><button type="button" aria-label="关闭工作流" onClick={() => setMobileWorkflowOpen(false)} className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500 shadow"><X size={15} /></button></div>
+            <div className="relative flex h-full w-[min(92vw,430px)]" onClick={(event) => event.stopPropagation()}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /><button type="button" aria-label="关闭工作流" onClick={() => setMobileWorkflowOpen(false)} className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500 shadow"><X size={15} /></button></div>
           </div>
         )}
 
