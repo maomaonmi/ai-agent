@@ -5,8 +5,9 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+import os
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from ppt_repository import PptRepository, RepositoryConflict, RunRecord
 
@@ -59,9 +60,34 @@ class AgentRunService:
         ("REVIEW", "质量检查与导出", {"checks": ["overflow", "citations", "compatibility"]}),
     )
 
-    def __init__(self, repository: PptRepository) -> None:
+    def __init__(
+        self,
+        repository: PptRepository,
+        *,
+        search_adapters: Mapping[str, Any] | None = None,
+        ai_image_adapter: Any | None = None,
+        image_downloader: Any | None = None,
+    ) -> None:
         self.repository = repository
         self._locks: dict[str, threading.Lock] = {}
+        # Providers are optional at runtime: a local build remains usable with
+        # deterministic demo materials, while configured adapters are used for
+        # real runs and keep their credentials outside the run state.
+        if search_adapters is None:
+            from ppt_materials import build_default_search_adapters
+
+            search_adapters = build_default_search_adapters()
+        self.search_adapters = dict(search_adapters)
+        if ai_image_adapter is None and os.getenv("AI_IMAGE_API_KEY") and os.getenv("AI_IMAGE_URL"):
+            from ppt_materials import AiImageAdapter
+
+            ai_image_adapter = AiImageAdapter()
+        if image_downloader is None:
+            from ppt_materials import SafeImageDownloader
+
+            image_downloader = SafeImageDownloader()
+        self.ai_image_adapter = ai_image_adapter
+        self.image_downloader = image_downloader
 
     def _lock(self, run_id: str) -> threading.Lock:
         return self._locks.setdefault(run_id, threading.Lock())
@@ -156,9 +182,10 @@ class AgentRunService:
 
     def _execute(self, run_id: str, owner_scope: str) -> None:
         try:
-            from ppt_materials import MaterialGate, SourceLedger
+            from ppt_materials import MaterialGate, SearchCoordinator, SourceLedger, generate_required_ai_images
 
             material_gate = MaterialGate(SourceLedger())
+            search_coordinator = SearchCoordinator(self.search_adapters)
             self._emit(run_id, owner_scope, "run.started", {"phase": "PLAN"}, status="RUNNING", phase="PLAN")
             for phase, label, details in self._PHASES:
                 current = self.repository.get_run(run_id, owner_scope=owner_scope)
@@ -167,22 +194,68 @@ class AgentRunService:
                 self._emit(run_id, owner_scope, "phase.started", {"phase": phase, "label": label}, status="RUNNING", phase=phase)
                 state_patch: dict[str, Any] = {}
                 if phase.startswith("SEARCH"):
-                    SearchBatch(provider=details["provider"], query=current.state.get("prompt", "PPT"), limit=details["limit"])
+                    provider = details["provider"]
+                    query = current.state.get("prompt", "PPT")
+                    SearchBatch(provider=provider, query=query, limit=details["limit"])
                     rounds = list(current.state.get("searchRounds", []))
-                    rounds.append({"round": len(rounds) + 1, **details})
+                    configured_adapter = search_coordinator.adapters.get(provider)
+                    if configured_adapter is not None:
+                        results = search_coordinator.search_round(provider=provider, query=query, limit=details["limit"])
+                        rounds.append({"round": len(rounds) + 1, **details, "resultCount": len(results), "results": results})
+                    else:
+                        rounds.append({"round": len(rounds) + 1, **details, "mode": "demo-fallback"})
                     state_patch["searchRounds"] = rounds
                 elif phase == "WEB_ASSETS":
-                    for index in range(3):
-                        material_gate.ledger.add_web_image(
-                            f"https://images.example.com/ppt/{run_id}/{index}.jpg",
-                            page_url="https://example.com/research",
-                            alt=f"网页素材 {index + 1}",
-                        )
-                    state_patch["webImages"] = {"candidateCount": details["candidateCount"], "selectedCount": details["selectedCount"]}
+                    real_sources = [
+                        result
+                        for round_state in current.state.get("searchRounds", [])
+                        for result in round_state.get("results", [])
+                        if isinstance(result, dict) and isinstance(result.get("imageUrl"), str) and isinstance(result.get("url"), str)
+                    ]
+                    downloaded_count = 0
+                    if self.image_downloader is not None:
+                        for source in real_sources[:3]:
+                            material_gate.ledger.add_downloaded_web_image(
+                                source["imageUrl"],
+                                page_url=str(source.get("pageUrl") or source["url"]),
+                                downloader=self.image_downloader,
+                                alt=str(source.get("title", "")),
+                            )
+                            downloaded_count += 1
+                    if downloaded_count < 3:
+                        # This deterministic branch is deliberately marked in the
+                        # state so demo runs are never mistaken for sourced assets.
+                        for index in range(3 - downloaded_count):
+                            material_gate.ledger.add_web_image(
+                                f"https://images.example.com/ppt/{run_id}/{index}.jpg",
+                                page_url="https://example.com/research",
+                                alt=f"网页素材 {index + 1}",
+                            )
+                    state_patch["webImages"] = {
+                        "candidateCount": max(details["candidateCount"], len(real_sources)),
+                        "selectedCount": len(material_gate.ledger.web_images),
+                        "downloadedCount": downloaded_count,
+                        "mode": "provider" if downloaded_count >= 3 else "demo-fallback",
+                    }
                 elif phase == "AI_ASSETS":
-                    for role in ("COVER", "MID_BACKGROUND", "END"):
-                        material_gate.record_ai_image(role, f"asset-ai-{role.lower()}")
-                    state_patch["aiImages"] = {"generatedCount": details["generatedCount"], "requiredCount": details["requiredCount"]}
+                    if self.ai_image_adapter is not None:
+                        generated = generate_required_ai_images(self.ai_image_adapter, prompt=current.state.get("prompt", "PPT"))
+                        for asset in generated:
+                            material_gate.record_ai_asset(asset)
+                        state_patch["aiImages"] = {
+                            "generatedCount": len(generated),
+                            "requiredCount": details["requiredCount"],
+                            "mode": "provider",
+                            "assets": generated,
+                        }
+                    else:
+                        for role in ("COVER", "MID_BACKGROUND", "END"):
+                            material_gate.record_ai_image(role, f"asset-ai-{role.lower()}")
+                        state_patch["aiImages"] = {
+                            "generatedCount": details["generatedCount"],
+                            "requiredCount": details["requiredCount"],
+                            "mode": "demo-fallback",
+                        }
                 elif phase == "BUILD" and not material_gate.ready_for_build():
                     raise RuntimeError("material gates are not satisfied")
                 elif phase == "PLAN":
