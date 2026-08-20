@@ -456,6 +456,8 @@ function WorkflowPanel({
     setDraft("");
   };
   const progress = started ? Math.min(100, ((step + 1) / workflow.length) * 100) : 0;
+  const webAssetsMeta = details["web-assets"] ?? "等待事件";
+  const aiAssetsMeta = details["ai-assets"] ?? "等待事件";
   return (
     <aside aria-label="AI 工作流" className="flex min-h-0 w-full flex-col border-r border-slate-200 bg-white">
       <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4">
@@ -493,7 +495,7 @@ function WorkflowPanel({
                   </div>;
                 })}
               </div>
-              <div className="mt-3 border-t border-slate-100 pt-3"><div className="flex items-center justify-between"><span className="text-[11px] font-semibold text-slate-700">素材来源</span><span className="text-[10px] text-slate-400">可追溯</span></div><div className="mt-2 grid grid-cols-3 gap-2">{generatedAssets.map((asset, index) => <div key={asset} className="relative aspect-square overflow-hidden rounded-lg bg-slate-100"><Image src={asset} alt={index === 0 ? "AI 生成封面" : "视觉素材"} fill priority sizes="96px" className="object-cover" /><span className="absolute inset-x-1 bottom-1 rounded bg-slate-950/70 px-1 py-0.5 text-center text-[8px] text-white">{index === 1 ? "网页图片" : "AI 生成图片"}</span></div>)}</div><p className="mt-2 flex items-center gap-1.5 text-[10px] text-slate-500"><FileSearch size={11} />3 个带图网页 · 3 张 AI 图片</p></div>
+              <div className="mt-3 border-t border-slate-100 pt-3"><div className="flex items-center justify-between"><span className="text-[11px] font-semibold text-slate-700">素材来源</span><span className="text-[10px] text-slate-400">可追溯</span></div><div className="mt-2 grid grid-cols-3 gap-2">{generatedAssets.map((asset, index) => <div key={asset} className="relative aspect-square overflow-hidden rounded-lg bg-slate-100"><Image src={asset} alt={index === 0 ? "AI 生成封面" : "视觉素材"} fill priority sizes="96px" className="object-cover" /><span className="absolute inset-x-1 bottom-1 rounded bg-slate-950/70 px-1 py-0.5 text-center text-[8px] text-white">{index === 1 ? "网页图片预览" : "AI 图片预览"}</span></div>)}</div><p className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500"><FileSearch size={11} />网页：{webAssetsMeta} · AI：{aiAssetsMeta}</p></div>
             </div>}
           </section>}
         </div>
