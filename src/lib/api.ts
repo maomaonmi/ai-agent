@@ -1060,6 +1060,8 @@ export interface ChatMessage {
   planProgress?: PlanProgressEvent;
   /** 自主规划最终报告的异步配图结果；与任务进度绑定持久化。 */
   planFigures?: PlanFigure[];
+  /** Incremental final report text received before the terminal done event. */
+  streamingReport?: string;
   /** MCP tool calls belong to the assistant turn that triggered them. */
   mcpTrace?: McpTraceItem[];
   // Why: 千问深度调研反问卡片——type='qwen_feedback' 时渲染为带输入框的内嵌卡片，
@@ -1164,6 +1166,9 @@ export interface PlanFigure {
   error_message?: string | null;
   task_id?: string;
   section_title?: string;
+  source_url?: string | null;
+  source_image_url?: string | null;
+  image_origin?: 'source' | 'generated' | string;
 }
 
 export interface PlanFigureJob {
@@ -1181,6 +1186,7 @@ export async function createPlanFigureJob(input: {
   max_images?: number;
   policy?: 'economy' | 'balanced' | 'quality';
   context_mode?: 'preceding' | 'mixed';
+  source_urls?: string[];
 }): Promise<PlanFigureJob> {
   const response = await fetch(`${API_BASE_URL}/api/plan/figures/jobs`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input),
@@ -1341,6 +1347,12 @@ export type CodeGenerationEvent = CodeUpdateEvent | CodeErrorEvent | CodeAgentAc
 
 export type PlanTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
+export interface PlanSearchResult {
+  title: string;
+  url: string;
+  content?: string;
+}
+
 export interface PlanTask {
   id: number;
   title: string;
@@ -1350,7 +1362,19 @@ export interface PlanTask {
   assigned_agent?: string;
   result?: string | null;
   error?: string | null;
+  source_urls?: string[];
+  search_results?: PlanSearchResult[];
+  streaming_result?: string | null;
+  search_status?: 'idle' | 'searching' | 'completed' | 'failed';
 }
+
+export type PlanRuntimeEvent =
+  | { type: 'search_started'; query: string; provider?: string }
+  | { type: 'search_completed'; query: string; cached?: boolean; result_count: number; results?: PlanSearchResult[]; error?: string }
+  | { type: 'task_started'; task_id: number; title?: string; requires_web?: boolean }
+  | { type: 'task_delta'; task_id: number; delta: string }
+  | { type: 'task_completed'; task_id: number; status: PlanTaskStatus; result?: string | null; error?: string | null }
+  | { type: 'report_delta'; delta: string };
 
 export interface PlanProgressEvent {
   phase: 'planning' | 'executing' | 'replanning' | 'completed';
@@ -1358,6 +1382,7 @@ export interface PlanProgressEvent {
   current_task_id?: number | null;
   iteration: number;
   message?: string;
+  active_task_ids?: number[];
 }
 
 // 多智能体协同事件
@@ -1760,6 +1785,7 @@ type ChatHandlers = {
   onAgentFinalAnswer?: (event: AgentFinalAnswerEvent) => void;
   onSystemStatus?: (event: SystemStatusEvent) => void;
   onPlanProgress?: (event: PlanProgressEvent) => void;
+  onPlanEvent?: (event: PlanRuntimeEvent) => void;
   onToken?: (token: string) => void;
   onReasoningDelta?: (token: string) => void;
   // MCP 工具调用可观测性
@@ -1845,6 +1871,7 @@ export async function sendChatMessage(
 
   const decoder = new TextDecoder();
   let buffer = '';
+  let currentEventName = '';
 
   while (true) {
     const { done, value } = await reader.read();
@@ -1855,7 +1882,10 @@ export async function sendChatMessage(
     buffer = lines.pop() || '';
 
     for (const line of lines) {
-      if (line.startsWith('event:')) continue;
+      if (line.startsWith('event:')) {
+        currentEventName = line.slice(6).trim();
+        continue;
+      }
       if (line.startsWith('data:')) {
         const data = line.slice(5).trim();
         if (!data) continue;
@@ -1884,6 +1914,19 @@ export async function sendChatMessage(
             continue;
           }
 
+          const planRuntimeTypes = new Set([
+            'search_started',
+            'search_completed',
+            'task_started',
+            'task_delta',
+            'task_completed',
+            'report_delta',
+          ]);
+          if (typeof parsed.type === 'string' && planRuntimeTypes.has(parsed.type)) {
+            handlers.onPlanEvent?.(parsed as unknown as PlanRuntimeEvent);
+            continue;
+          }
+
           if (parsed.usage && typeof parsed.usage === 'object') {
             handlers.onUsage?.(parsed.usage as TokenUsage);
             // Usage is also included in done events where available; do not let it
@@ -1895,7 +1938,10 @@ export async function sendChatMessage(
             handlers.onToken?.(String(parsed.token));
           } else if (parsed.reasoning_delta !== undefined) {
             handlers.onReasoningDelta?.(String(parsed.reasoning_delta));
-          } else if (parsed.phase && Array.isArray(parsed.tasks)) {
+          } else if (
+            (currentEventName === 'plan_update' || parsed.type === 'plan_update' || parsed.event === 'plan_update' || Boolean(parsed.phase))
+            && Array.isArray(parsed.tasks)
+          ) {
             handlers.onPlanProgress?.({
               phase: String(parsed.phase) as PlanProgressEvent['phase'],
               tasks: parsed.tasks as PlanTask[],
@@ -1904,6 +1950,9 @@ export async function sendChatMessage(
                 : Number(parsed.current_task_id),
               iteration: Number(parsed.iteration) || 0,
               message: parsed.message ? String(parsed.message) : undefined,
+              active_task_ids: Array.isArray(parsed.active_task_ids)
+                ? parsed.active_task_ids.map((value) => Number(value))
+                : undefined,
             });
           } else if (parsed.node_name) {
             const knownKeys = new Set([

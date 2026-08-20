@@ -5,7 +5,7 @@ export interface PlanReportTable {
   rows: string[][];
 }
 
-export type PlanReportChartKind = 'bar' | 'line' | 'donut';
+export type PlanReportChartKind = 'bar' | 'line' | 'donut' | 'progress';
 
 export interface PlanReportChart {
   id: string;
@@ -63,12 +63,27 @@ function buildCharts(tables: PlanReportTable[]): PlanReportChart[] {
     if (pairs.length < 2) return;
     charts.push({
       id: `plan-chart-${tableIndex}`,
-      kind: tableIndex % 3 === 0 ? 'bar' : tableIndex % 3 === 1 ? 'line' : 'donut',
+      kind: tableIndex % 4 === 0 ? 'bar' : tableIndex % 4 === 1 ? 'line' : tableIndex % 4 === 2 ? 'donut' : 'progress',
       title: table.headers[valueColumn] || '关键指标对比',
       labels: pairs.map((pair) => pair.label),
       values: pairs.map((pair) => pair.value),
     });
   });
+  return charts;
+}
+
+function parseChartBlocks(markdown: string): PlanReportChart[] {
+  const charts: PlanReportChart[] = [];
+  for (const match of markdown.matchAll(/```chart\s*([\s\S]*?)```/gi)) {
+    try {
+      const value = JSON.parse(match[1].trim()) as Partial<PlanReportChart>;
+      if (!value.title || !Array.isArray(value.labels) || !Array.isArray(value.values)) continue;
+      const kind = value.kind === 'line' || value.kind === 'donut' || value.kind === 'progress' ? value.kind : 'bar';
+      const values = value.values.map(Number).filter(Number.isFinite);
+      if (values.length < 2 || values.length !== value.labels.length) continue;
+      charts.push({ id: `plan-chart-block-${charts.length}`, kind, title: String(value.title), labels: value.labels.map(String), values, unit: value.unit });
+    } catch { /* malformed chart blocks remain visible as Markdown code */ }
+  }
   return charts;
 }
 
@@ -89,7 +104,7 @@ function extractSummary(markdown: string) {
 function extractSections(markdown: string) {
   return markdown.split(/(?=^##\s)/m).map((block) => {
     const match = block.match(/^##\s+(.+?)(?:\n|$)/);
-    return match ? { heading: match[1].trim(), body: block.slice(match[0].length).trim() } : null;
+    return match ? { heading: match[1].trim(), body: block.slice(match[0].length).replace(/```chart\s*[\s\S]*?```/gi, '').trim() } : null;
   }).filter((section): section is { heading: string; body: string } => Boolean(section));
 }
 
@@ -99,5 +114,5 @@ export function adaptPlanReport(markdown: string, figures: PlanFigure[] = [], pr
   const sections = extractSections(markdown);
   const title = extractTitle(markdown);
   if (summary.length === 0 && progress?.tasks.length) summary.push(`已完成 ${progress.tasks.filter((task) => task.status === 'completed').length}/${progress.tasks.length} 个拆解任务。`);
-  return { title, summary, sections, tables, charts: buildCharts(tables), figures };
+  return { title, summary, sections, tables, charts: [...parseChartBlocks(markdown), ...buildCharts(tables)].slice(0, 6), figures };
 }

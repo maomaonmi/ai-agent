@@ -12,6 +12,7 @@ import {
   PlanFigure,
   AgentTalkEvent,
   PlanProgressEvent,
+  PlanRuntimeEvent,
   DiscussionLength,
   CapabilityMode,
   McpMode,
@@ -72,6 +73,7 @@ import VideoStudioWorkspace from '../features/video/VideoStudioWorkspace';
 import VideoMarketWorkspace from '../features/video/VideoMarketWorkspace';
 import ResearchWorkspace from '../features/deep-research/ResearchWorkspace';
 import PlanWorkspace from '../features/autonomous-plan/PlanWorkspace';
+import PlanChainTimeline from '../features/autonomous-plan/PlanChainTimeline';
 import ResearchDocumentCard from '../features/deep-research/ResearchDocumentCard';
 import { deriveReportTitle } from '../features/deep-research/report/researchReportAdapter';
 import { useTypewriterPacing } from '../lib/useTypewriterPacing';
@@ -1631,6 +1633,16 @@ export default function ChatInterface() {
           onNode: handleNodeEvent,
           onSystemStatus: (event) => {
             setAgentStatus(event.message);
+            // Mount the independent workspace as soon as the planner request
+            // starts, so the user sees an active chain instead of a blank pane
+            // while the first graph snapshot is still being produced.
+            setPlanProgress((previous) => previous ?? {
+              phase: 'planning',
+              tasks: [],
+              current_task_id: null,
+              iteration: 0,
+              message: event.message,
+            });
           },
           onPlanProgress: (event) => {
             perRoundPlanProgressRef.current = event;
@@ -1644,6 +1656,116 @@ export default function ChatInterface() {
               : [...current, { role: 'assistant' as const, content: '', planProgress: event }];
             persistPlanMessages(requestSessionId, nextMessages);
           },
+          onPlanEvent: (event: PlanRuntimeEvent) => {
+            if (event.type === 'search_started') {
+              setAgentStatus(`正在搜索资料：${event.query}`);
+              setPlanProgress((previous) => {
+                if (!previous) return previous;
+                const nextTasks = previous.tasks.map((task) => task.requires_web && task.status === 'in_progress'
+                  ? { ...task, search_status: 'searching' as const }
+                  : task);
+                const next = { ...previous, tasks: nextTasks };
+                perRoundPlanProgressRef.current = next;
+                return next;
+              });
+              return;
+            }
+            if (event.type === 'search_completed') {
+              setAgentStatus(event.error ? '搜索暂时失败，继续使用已有上下文' : `已找到 ${event.result_count} 条摘要`);
+              setPlanProgress((previous) => {
+                if (!previous) return previous;
+                const next = {
+                  ...previous,
+                  tasks: previous.tasks.map((task) => task.requires_web && task.status === 'in_progress'
+                    ? {
+                      ...task,
+                      search_status: event.error ? 'failed' as const : 'completed' as const,
+                      search_results: event.results ?? task.search_results,
+                    }
+                    : task),
+                };
+                perRoundPlanProgressRef.current = next;
+                return next;
+              });
+              return;
+            }
+            if (event.type === 'task_started') {
+              setAgentStatus(`正在执行 Task ${event.task_id}`);
+              setPlanProgress((previous) => {
+                if (!previous) return previous;
+                const next = {
+                  ...previous,
+                  current_task_id: event.task_id,
+                  active_task_ids: Array.from(new Set([...(previous.active_task_ids ?? []), event.task_id])),
+                  tasks: previous.tasks.map((task) => task.id === event.task_id
+                    ? {
+                      ...task,
+                      status: 'in_progress' as const,
+                      streaming_result: '',
+                      search_status: event.requires_web
+                        ? (task.search_results?.length ? 'completed' as const : 'searching' as const)
+                        : task.search_status,
+                    }
+                    : task),
+                };
+                perRoundPlanProgressRef.current = next;
+                return next;
+              });
+              return;
+            }
+            if (event.type === 'task_delta') {
+              setPlanProgress((previous) => {
+                if (!previous) return previous;
+                const next = {
+                  ...previous,
+                  tasks: previous.tasks.map((task) => task.id === event.task_id
+                    ? { ...task, streaming_result: `${task.streaming_result ?? ''}${event.delta}` }
+                    : task),
+                };
+                perRoundPlanProgressRef.current = next;
+                return next;
+              });
+              return;
+            }
+            if (event.type === 'task_completed') {
+              const nextProgress = (() => {
+                const previous = perRoundPlanProgressRef.current;
+                if (!previous) return previous;
+                return {
+                  ...previous,
+                  current_task_id: null,
+                  active_task_ids: (previous.active_task_ids ?? []).filter((id) => id !== event.task_id),
+                  tasks: previous.tasks.map((task) => task.id === event.task_id
+                    ? { ...task, status: event.status, result: event.result ?? task.result, error: event.error ?? null, streaming_result: null }
+                    : task),
+                };
+              })();
+              if (nextProgress) {
+                perRoundPlanProgressRef.current = nextProgress;
+                setPlanProgress(nextProgress);
+                const current = messagesRef.current;
+                const existingIndex = [...current].map((message, index) => ({ message, index })).reverse()
+                  .find(({ message }) => message.role === 'assistant' && message.planProgress)?.index ?? -1;
+                const nextMessages = existingIndex >= 0
+                  ? current.map((message, index) => index === existingIndex ? { ...message, planProgress: nextProgress } : message)
+                  : [...current, { role: 'assistant' as const, content: '', planProgress: nextProgress }];
+                persistPlanMessages(requestSessionId, nextMessages);
+              }
+              setAgentStatus('');
+              return;
+            }
+            if (event.type === 'report_delta') {
+              const current = messagesRef.current;
+              const existingIndex = [...current].map((message, index) => ({ message, index })).reverse()
+                .find(({ message }) => message.role === 'assistant' && message.planProgress)?.index ?? -1;
+              const previousReport = existingIndex >= 0 ? current[existingIndex]?.streamingReport ?? '' : '';
+              const nextMessages = existingIndex >= 0
+                ? current.map((message, index) => index === existingIndex ? { ...message, streamingReport: `${previousReport}${event.delta}` } : message)
+                : [...current, { role: 'assistant' as const, content: '', streamingReport: event.delta, planProgress: perRoundPlanProgressRef.current ?? undefined }];
+              messagesRef.current = nextMessages;
+              setMessages(nextMessages);
+            }
+          },
           onSkillMatched: (event) => {
             setMatchedSkills((prev) => [...prev, event]);
           },
@@ -1656,6 +1778,7 @@ export default function ChatInterface() {
               ? current.map((message, index) => index === existingIndex ? {
                 ...message,
                 content: event.answer,
+                streamingReport: undefined,
                 planProgress: perRoundPlanProgressRef.current ?? message.planProgress,
               } : message)
               : [...current, { role: 'assistant' as const, content: event.answer, planProgress: perRoundPlanProgressRef.current ?? undefined }];
@@ -2076,7 +2199,7 @@ export default function ChatInterface() {
     ? [...messages].reverse().find((message) => message.role === 'user')
     : undefined;
   const latestPlanReportMessage = isPlanMode
-    ? [...messages].reverse().find((message) => message.role === 'assistant' && (message.planProgress || message.content.trim()))
+    ? [...messages].reverse().find((message) => message.role === 'assistant' && (message.planProgress || message.content.trim() || message.streamingReport))
     : undefined;
   const latestResearchReportMessage = mode === 'research'
     ? [...messages].reverse().find((message) => message.role === 'assistant' && message.type !== 'qwen_feedback')
@@ -2795,8 +2918,8 @@ export default function ChatInterface() {
               </div>
             )}
 
-            {isPlanMode && isLoading && !planProgress && agentStatus && (
-              <div className="mt-4 flex items-center gap-2 rounded-lg bg-cyan-50 px-4 py-3 text-sm text-cyan-700" role="status"><span className="h-2 w-2 animate-pulse rounded-full bg-cyan-500" />{agentStatus}</div>
+            {isPlanMode && (isLoading || planProgress) && (
+              <PlanChainTimeline progress={planProgress} status={agentStatus} />
             )}
 
             {agentFinalMessages.map((msg, index) => (
@@ -3117,7 +3240,7 @@ export default function ChatInterface() {
       {isPlanMode && !isNewConversation && (
         <PlanWorkspace
           progress={latestPlanReportMessage?.planProgress ?? planProgress}
-          report={latestPlanReportMessage?.content || ''}
+          report={latestPlanReportMessage?.content || latestPlanReportMessage?.streamingReport || ''}
           figures={(latestPlanReportMessage?.planFigures ?? []) as PlanFigure[]}
           loading={isLoading}
           distributed={mode === 'distributed_plan'}
