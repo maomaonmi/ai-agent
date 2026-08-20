@@ -19,12 +19,14 @@ import sys
 import time
 import hashlib
 import uuid
-from urllib.parse import urlparse
+import queue
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urljoin, urlparse
 from types import SimpleNamespace
 from pathlib import Path
 from typing import Annotated, TypedDict, List, Dict, Literal, Optional, Any, NotRequired, TypeVar, Callable, Awaitable, AsyncGenerator
 from contextlib import asynccontextmanager
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 
 # Why: Windows 下必须用 ProactorEventLoop 才能创建子进程（Selector 环的
 # _make_subprocess_transport 会抛 NotImplementedError，导致 MCP 进程拉起必崩）。
@@ -306,6 +308,8 @@ def _initialize_image_store() -> None:
             connection.execute("ALTER TABLE research_figure_jobs ADD COLUMN report_text TEXT")
         if "target_ordinal" not in job_columns:
             connection.execute("ALTER TABLE research_figure_jobs ADD COLUMN target_ordinal INTEGER")
+        if "source_urls_json" not in job_columns:
+            connection.execute("ALTER TABLE research_figure_jobs ADD COLUMN source_urls_json TEXT")
         connection.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_research_figure_job_dedupe
             ON research_figure_jobs(session_id, report_hash, policy)
@@ -342,6 +346,12 @@ def _initialize_image_store() -> None:
             connection.execute("ALTER TABLE research_figures ADD COLUMN batch_index INTEGER NOT NULL DEFAULT 0")
         if "batch_title" not in figure_columns:
             connection.execute("ALTER TABLE research_figures ADD COLUMN batch_title TEXT")
+        if "source_url" not in figure_columns:
+            connection.execute("ALTER TABLE research_figures ADD COLUMN source_url TEXT")
+        if "source_image_url" not in figure_columns:
+            connection.execute("ALTER TABLE research_figures ADD COLUMN source_image_url TEXT")
+        if "image_origin" not in figure_columns:
+            connection.execute("ALTER TABLE research_figures ADD COLUMN image_origin TEXT")
         connection.commit()
 
 
@@ -1781,6 +1791,30 @@ PLAN_AGENT_REGISTRY = {
     "data_analyst_agent": "数据分析专家",
 }
 DEFAULT_PLAN_AGENT = "deep_thinker_agent"
+# Fast/cheap models are used only for JSON planning decisions. The final
+# evidence synthesis continues to use the user's selected model. An explicit
+# PLAN_FAST_MODEL_ID can override the provider default when the deployment has
+# a preferred low-latency alias.
+PLAN_FAST_MODEL_DEFAULTS = {
+    "deepseek": "deepseek-v4-flash",
+    "glm": "glm-5-turbo",
+    "qwen": "qwen3.7-flash",
+}
+_PLAN_EVENT_SINK: ContextVar[Optional[Callable[[Dict[str, Any]], None]]] = ContextVar(
+    "plan_event_sink", default=None
+)
+_PLAN_TASK_ID: ContextVar[Optional[int]] = ContextVar("plan_task_id", default=None)
+
+
+def emit_plan_runtime_event(event_type: str, **payload: Any) -> None:
+    sink = _PLAN_EVENT_SINK.get()
+    if sink is None:
+        return
+    try:
+        sink({"event_type": event_type, **payload})
+    except Exception:
+        # Telemetry must never fail the planning graph itself.
+        logger.debug("plan runtime event sink failed", exc_info=True)
 MARKDOWN_REPORT_FORMAT = """
 使用规整的 Markdown 输出，严格采用以下结构：
 
@@ -1788,20 +1822,35 @@ MARKDOWN_REPORT_FORMAT = """
 - 用 2-4 条要点给出本任务最重要的结论。
 
 ## 对比分析
-只要存在两个或以上可比较对象、方案、指标或观点，就必须输出表格：
+只有在存在 3 个以上对象且表格能显著降低理解成本时，才输出 1 张对比表；
+如果只是两种方案或观点，优先使用短段落、项目符号或“优点/限制”分栏文字，禁止为了凑格式生成表格。
+整篇报告最多 2 张 Markdown 表格，禁止重复表达同一组信息。
 
 | 对比维度 | 方案/对象 A | 方案/对象 B | 判断 |
 |---|---|---|---|
 | 核心指标 | 具体内容 | 具体内容 | 明确结论 |
 
-列名应根据实际内容调整，不要保留“A/B”占位符。无法合理比较时，改用“关键发现”表格，
-至少包含“发现、证据、影响”三列。
+列名应根据实际内容调整，不要保留“A/B”占位符。无法合理比较时，使用带小标题的文字总结，
+不要改用表格。
 
 ## 详细分析
-使用短段落和分级列表说明证据、计算或判断依据。
+使用短段落、分级列表和必要的公式说明证据、计算或判断依据。
+有时间序列用折线/趋势描述，有比例用占比描述，有流程用步骤描述；不要把每个章节都改写成表格。
+如果章节存在可靠的数值证据，可在对应章节插入不超过 3 个图表数据块；图表类型从 bar、line、donut、progress 中选择：
+```chart
+{"kind":"line","title":"指标趋势","labels":["阶段1","阶段2"],"values":[12,18]}
+```
+图表数据必须来自任务成果，不得凭空编造；没有可靠数字时不要生成图表数据块。
+当任务成果中存在 2 组以上可靠数值证据时，优先在不同章节各插入 1 个不同类型的图表数据块，
+不要把所有图表集中在报告开头。
 
 ## 风险与限制
-用表格列出风险、影响程度和应对建议；信息不足处必须明确标注。
+用项目符号列出风险、影响程度和应对建议；仅当风险超过 4 项且确实需要逐列比较时才使用表格。
+信息不足处必须明确标注。
+
+## 结论与下一步
+用 1-2 段自然语言收束全文，再用不超过 3 条行动建议结束。
+本节必须以文字或项目符号结尾，禁止以表格、代码块或图表数据结尾。
 
 不要使用纯文本伪表格。Markdown 表格的表头与分隔行必须完整。
 """
@@ -1820,6 +1869,13 @@ class PlanExecuteState(TypedDict):
     replan_message: str
     should_finish: bool
     final_response: str
+    # Per-run evidence cache. These fields are intentionally optional so old
+    # callers/tests that build the original state shape remain compatible.
+    search_cache: NotRequired[Dict[str, Dict[str, Any]]]
+    shared_search_results: NotRequired[List[Dict[str, Any]]]
+    shared_search_error: NotRequired[str]
+    needs_replan: NotRequired[bool]
+    active_task_ids: NotRequired[List[int]]
 
 
 def resolve_plan_agent(
@@ -1974,6 +2030,16 @@ def normalize_plan_tasks(
             "assigned_agent": assigned_agent,
             "result": raw.get("result"),
             "error": raw.get("error"),
+            "source_urls": [str(url) for url in raw.get("source_urls", []) if isinstance(url, str)][:24] if isinstance(raw.get("source_urls"), list) else [],
+            "search_results": [
+                {
+                    "title": str(item.get("title") or "未命名来源")[:180],
+                    "url": str(item.get("url") or ""),
+                    "content": str(item.get("content") or "")[:420],
+                }
+                for item in raw.get("search_results", [])[:8]
+                if isinstance(item, dict) and item.get("url")
+            ] if isinstance(raw.get("search_results"), list) else [],
         })
         next_id += 1
     return tasks
@@ -2177,6 +2243,8 @@ def _firecrawl_extract_candidates(payload: Any, *, diagnostics: dict | None = No
 def _run_firecrawl_search(
     user_query: str,
     options: WebSearchOptions | None = None,
+    *,
+    fast: bool = False,
 ) -> tuple[list[dict] | None, str | None, int]:
     """Firecrawl /v2/search + 可选 Scrape Top N，参数对齐官方 Playground 默认。
 
@@ -2241,8 +2309,8 @@ def _run_firecrawl_search(
     # 401/403/429 不重试（Retrying = 烧额度/烧 Key），直接抛致命。
     session = requests.Session()
     retry_policy = _Retry(
-        total=3,
-        backoff_factor=0.5,
+        total=1 if fast else 3,
+        backoff_factor=0.2 if fast else 0.5,
         status_forcelist=[408, 425, 500, 502, 503, 504],
         allowed_methods=["POST"],
         raise_on_status=False,
@@ -2257,6 +2325,7 @@ def _run_firecrawl_search(
     SCRAPE_READ_T = 60     # scrape 端等 60s；爬大页面需要
 
     BASE = FIRECRAWL_BASE_URL.rstrip("/")
+    plan_search_read_timeout = 15 if fast else SEARCH_READ_T
     V2 = f"{BASE}/v2/search"
     V1 = f"{BASE}/v1/search"
     SCRAPE_URL = f"{BASE}/v2/scrape"
@@ -2294,7 +2363,7 @@ def _run_firecrawl_search(
         return r, data, None
 
     # ========== 第一轮：v2/search（Session Retry 自动补 2 次 = 共 3 次）
-    resp, json_data, err = _post_once(V2, PAYLOAD, read_timeout=SEARCH_READ_T)
+    resp, json_data, err = _post_once(V2, PAYLOAD, read_timeout=plan_search_read_timeout)
     v2_fallback_needed = (
         resp is not None and resp.status_code in {404, 410} and json_data is not None
         and isinstance(json_data, dict)
@@ -2314,7 +2383,7 @@ def _run_firecrawl_search(
                 v1_body["highlights"] = True
         elif FIRECRAWL_ENABLE_HIGHLIGHTS:
             v1_body["highlights"] = True
-        resp, json_data, err = _post_once(V1, v1_body, read_timeout=SEARCH_READ_T)
+        resp, json_data, err = _post_once(V1, v1_body, read_timeout=plan_search_read_timeout)
 
     # ========== 手工第 4 次补射（仅当 urllib3 Retry 3 次后仍是网络异常时）
     # urllib3.Retry 遇到的是 ConnectError/ReadTimeout 会自动重试；这里判的是：
@@ -2322,14 +2391,14 @@ def _run_firecrawl_search(
     #   - err 里写的是 Timeout / ConnectionError / connect
     # 这种情况给一次"立刻再打一次同参数 v2"的机会（不换参数！）。
     manual_retry_used = False
-    if json_data is None and err and (
+    if not fast and json_data is None and err and (
         "Timeout" in err or "ConnectionError" in err or "connect" in err.lower()
         or "timed out" in err.lower()
     ):
         print("[Node: Firecrawl] urllib3 Retry 3 次后仍网络异常 → 手工补 1 次同参数 POST")
         manual_retry_used = True
         diag_main["manual_retry"] = True
-        r2, d2, e2 = _post_once(V2, PAYLOAD, read_timeout=SEARCH_READ_T)
+        r2, d2, e2 = _post_once(V2, PAYLOAD, read_timeout=plan_search_read_timeout)
         if d2 is not None:
             resp, json_data, err = r2, d2, None
             diag_main["manual_retry_succeeded"] = True
@@ -2394,7 +2463,7 @@ def _run_firecrawl_search(
             f"同参数补 1 次 POST 补全...（绝不换 tbs/location！）"
         )
         diag_main["patch_attempted"] = True
-        rp, dp, ep = _post_once(V2, PAYLOAD, read_timeout=SEARCH_READ_T)
+        rp, dp, ep = _post_once(V2, PAYLOAD, read_timeout=plan_search_read_timeout)
         if dp is not None:
             sub: dict = {}
             extra = _firecrawl_extract_candidates(dp, diagnostics=sub)
@@ -2616,6 +2685,21 @@ def run_plan_web_search(
     if not bool(state.get("web_search_enabled", True)):
         return [], "本次会话已关闭联网搜索。"
 
+    normalized_query = re.sub(r"\s+", " ", str(query or "").strip()).casefold()
+    cache = state.setdefault("search_cache", {})
+    cached = cache.get(normalized_query)
+    if cached is not None:
+        emit_plan_runtime_event(
+            "search_completed",
+            query=query,
+            cached=True,
+            result_count=len(cached.get("candidates") or []),
+            results=(cached.get("candidates") or [])[:8],
+            error=cached.get("error"),
+        )
+        return list(cached.get("candidates") or []), cached.get("error")
+
+    emit_plan_runtime_event("search_started", query=query, provider=SEARCH_PROVIDER)
     provider = SEARCH_PROVIDER if SEARCH_PROVIDER in {"tavily", "firecrawl"} else "firecrawl"
     if provider == "tavily":
         candidates, fatal_error, _scrape_count = _run_tavily_search(query)
@@ -2625,12 +2709,67 @@ def run_plan_web_search(
             options = WebSearchOptions.model_validate(raw_options)
         except Exception:
             options = WebSearchOptions()
+        # Plan tasks need evidence quickly. Search snippets/highlights are the
+        # default source; full-page scraping remains available to the dedicated
+        # research workflow but is deliberately disabled for Plan-and-Execute.
+        options = options.model_copy(update={"scrape_top_n": 0})
         candidates, fatal_error, _scrape_count = _run_firecrawl_search(
             query,
             options=options,
+            fast=True,
         )
+    normalized = [
+        {
+            "title": str(item.get("title") or "")[:240],
+            "content": str(item.get("content") or item.get("description") or "")[:1200],
+            "url": str(item.get("url") or ""),
+        }
+        for item in (candidates or [])
+        if isinstance(item, dict) and item.get("url")
+    ]
+    cache[normalized_query] = {"candidates": normalized, "error": fatal_error}
+    emit_plan_runtime_event(
+        "search_completed",
+        query=query,
+        cached=False,
+        result_count=len(normalized),
+        results=normalized[:8],
+        error=fatal_error,
+    )
+    return normalized, fatal_error
 
-    return list(candidates or []), fatal_error
+
+def get_shared_plan_search_results(
+    state: PlanExecuteState | Dict[str, Any],
+) -> tuple[list[dict], str | None]:
+    """Fetch one evidence set for the whole plan execution.
+
+    Multiple web-enabled tasks consume the same user-goal evidence. This
+    avoids issuing one near-identical Firecrawl request per task while keeping
+    task-specific prompts responsible for narrowing and interpreting results.
+    """
+    if "shared_search_results" in state:
+        return list(state.get("shared_search_results") or []), state.get("shared_search_error")
+    candidates, search_error = run_plan_web_search(str(state.get("user_task") or ""), state)
+    state["shared_search_results"] = candidates
+    if search_error:
+        state["shared_search_error"] = search_error
+    return candidates, search_error
+
+
+def _plan_search_state_updates(state: PlanExecuteState | Dict[str, Any]) -> Dict[str, Any]:
+    """Carry mutable per-run evidence state through LangGraph node updates."""
+    updates: Dict[str, Any] = {
+        "search_cache": state.get("search_cache", {}),
+    }
+    # Do not materialize an empty shared-search key before the first lookup.
+    # ``get_shared_plan_search_results`` uses key presence to distinguish a
+    # pending search from a completed (possibly empty) search.
+    if "shared_search_results" in state:
+        updates["shared_search_results"] = state.get("shared_search_results")
+    if "shared_search_error" in state:
+        updates["shared_search_error"] = state.get("shared_search_error", "")
+    return updates
 
 
 def web_search_node(state: GroundedState):
@@ -3583,16 +3722,58 @@ def get_multi_agent_app():
 plan_execute_app = None
 
 
-def plan_llm_invoke(system_prompt: str, user_content: str, timeout: int = 120) -> str:
-    response = ChatOpenAI(
-        model=ACTIVE_MODEL_ID,
-        api_key=DEEPSEEK_API_KEY,
-        base_url=DEEPSEEK_BASE_URL,
-        timeout=timeout,
-    ).invoke([
+def plan_llm_invoke(
+    system_prompt: str,
+    user_content: str,
+    timeout: int = 120,
+    *,
+    fast: bool = False,
+    stream: bool = False,
+) -> str:
+    settings = model_settings_store.load()
+    model_id = ACTIVE_MODEL_ID
+    api_key = DEEPSEEK_API_KEY
+    base_url = DEEPSEEK_BASE_URL
+    if fast:
+        model_id = (
+            os.getenv("PLAN_FAST_MODEL_ID", "").strip()
+            or PLAN_FAST_MODEL_DEFAULTS.get(settings.provider, settings.model_id)
+        )
+        api_key = settings.api_key or api_key
+        base_url = settings.base_url or base_url
+    client = ChatOpenAI(
+        model=model_id,
+        api_key=api_key,
+        base_url=base_url,
+        timeout=min(timeout, 60) if fast else timeout,
+    )
+    messages = [
         SystemMessage(content=system_prompt),
         HumanMessage(content=user_content),
-    ])
+    ]
+    if stream:
+        parts: list[str] = []
+        for chunk in client.stream(messages):
+            content = chunk.content
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = "".join(
+                    str(item.get("text") or "")
+                    for item in content
+                    if isinstance(item, dict)
+                )
+            else:
+                text = str(content or "")
+            if text:
+                parts.append(text)
+                task_id = _PLAN_TASK_ID.get()
+                if task_id is not None:
+                    emit_plan_runtime_event("task_delta", task_id=task_id, delta=text)
+                else:
+                    emit_plan_runtime_event("report_delta", delta=text)
+        return "".join(parts)
+    response = client.invoke(messages)
     _response_token_usage(response)
     return str(response.content)
 
@@ -3691,7 +3872,7 @@ requires_web 仅在 assigned_agent=web_search_agent 时为 true。
         },
     ]
     try:
-        raw = plan_llm_invoke(system_prompt, state["user_task"])
+        raw = plan_llm_invoke(system_prompt, state["user_task"], fast=True)
         payload = extract_json_object(raw)
         tasks = normalize_plan_tasks(
             payload.get("tasks"),
@@ -3723,24 +3904,33 @@ requires_web 仅在 assigned_agent=web_search_agent 时为 true。
 
 def task_start_node(state: PlanExecuteState):
     tasks = [dict(task) for task in state.get("tasks", [])]
-    current_task_id = None
+    active_task_ids: List[int] = []
     for task in tasks:
         if task["status"] == "pending":
             task["status"] = "in_progress"
-            current_task_id = int(task["id"])
-            break
+            active_task_ids.append(int(task["id"]))
+    current_task_id = active_task_ids[0] if active_task_ids else None
     return {
         "tasks": tasks,
         "current_task_id": current_task_id,
+        "active_task_ids": active_task_ids,
         "should_finish": current_task_id is None,
+        **_plan_search_state_updates(state),
     }
 
 
 def execute_web_search_agent(state: PlanExecuteState, task: Dict[str, Any]) -> str:
-    candidates, search_error = run_plan_web_search(
-        f"{state['user_task']}\n当前子任务：{task['description']}",
-        state,
-    )
+    candidates, search_error = get_shared_plan_search_results(state)
+    task["source_urls"] = [str(item.get("url")) for item in candidates if item.get("url")][:24]
+    task["search_results"] = [
+        {
+            "title": str(item.get("title") or "未命名来源")[:180],
+            "url": str(item.get("url") or ""),
+            "content": str(item.get("content") or "")[:420],
+        }
+        for item in candidates[:8]
+        if item.get("url")
+    ]
     evidence_items = [
         (
             f"标题：{item.get('title', '')}\n"
@@ -3757,33 +3947,20 @@ def execute_web_search_agent(state: PlanExecuteState, task: Dict[str, Any]) -> s
         f"执行要求：{task['description']}\n\n检索资料：\n"
         f"{chr(10).join(evidence_items) or search_error or '未检索到有效资料。'}",
         timeout=180,
+        stream=True,
     )
 
 
 def execute_deep_thinker_agent(state: PlanExecuteState, task: Dict[str, Any]) -> str:
-    client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
-    response = client.chat.completions.create(
-        model=ACTIVE_MODEL_ID,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "你是 R1 深度思考专家。完成复杂推理、技术论证、风险判断和方案权衡。"
-                    "只返回可供用户核查的分析过程摘要与结论，不输出隐藏思维链。"
-                    + MARKDOWN_REPORT_FORMAT
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"总目标：{state['user_task']}\n\n"
-                    f"当前任务：{task['title']}\n执行要求：{task['description']}"
-                ),
-            },
-        ],
+    return plan_llm_invoke(
+        "你是 R1 深度思考专家。完成复杂推理、技术论证、风险判断和方案权衡。"
+        "只返回可供用户核查的分析过程摘要与结论，不输出隐藏思维链。"
+        + MARKDOWN_REPORT_FORMAT,
+        f"总目标：{state['user_task']}\n\n"
+        f"当前任务：{task['title']}\n执行要求：{task['description']}",
         timeout=180,
+        stream=True,
     )
-    return str(response.choices[0].message.content or "")
 
 
 def execute_data_analyst_agent(state: PlanExecuteState, task: Dict[str, Any]) -> str:
@@ -3796,12 +3973,13 @@ def execute_data_analyst_agent(state: PlanExecuteState, task: Dict[str, Any]) ->
         """你是数据分析专家。负责结构化数据解析、指标定义、对比、计算和成本建模。
 先说明输入数据与假设，再展示可复核的计算过程和单位，最后给出结论。
 如果缺少必要数据，不得编造数字；应给出待补数据和可执行的计算框架。
-优先使用 Markdown 表格，数学公式使用 $...$ 或 $$...$$。不要输出隐藏思维链。"""
+只有在多组数据必须逐列比较时才使用 Markdown 表格，数学公式使用 $...$ 或 $$...$$。不要输出隐藏思维链。"""
         + MARKDOWN_REPORT_FORMAT,
         f"总目标：{state['user_task']}\n\n当前任务：{task['title']}\n"
         f"执行要求：{task['description']}\n\n已有跨智能体成果：\n"
         f"{json.dumps(completed_context, ensure_ascii=False)}",
         timeout=180,
+        stream=True,
     )
 
 
@@ -3812,10 +3990,17 @@ def execute_custom_plan_agent(
 ) -> str:
     evidence = ""
     if "web_search" in agent_config.get("tools", []):
-        candidates, search_error = run_plan_web_search(
-            f"{state['user_task']}\n当前子任务：{task['description']}",
-            state,
-        )
+        candidates, search_error = get_shared_plan_search_results(state)
+        task["source_urls"] = [str(item.get("url")) for item in candidates if item.get("url")][:24]
+        task["search_results"] = [
+            {
+                "title": str(item.get("title") or "未命名来源")[:180],
+                "url": str(item.get("url") or ""),
+                "content": str(item.get("content") or "")[:420],
+            }
+            for item in candidates[:8]
+            if item.get("url")
+        ]
         evidence = "\n\n".join(
             f"标题：{item.get('title', '')}\n"
             f"链接：{item.get('url', '')}\n"
@@ -3842,6 +4027,7 @@ read、edit、terminal 在当前版本仅为配置元数据，不得声称已经
         f"执行要求：{task['description']}\n\n联网资料：\n"
         f"{evidence or '本任务没有可用的联网资料。'}",
         timeout=180,
+        stream=True,
     )
 
 
@@ -3852,7 +4038,7 @@ PLAN_AGENT_EXECUTORS = {
 }
 
 
-def task_executor_node(state: PlanExecuteState):
+def _execute_single_plan_task_impl(state: PlanExecuteState):
     tasks = [dict(task) for task in state.get("tasks", [])]
     current_id = state.get("current_task_id")
     current_task = next((task for task in tasks if task["id"] == current_id), None)
@@ -3861,6 +4047,8 @@ def task_executor_node(state: PlanExecuteState):
             "tasks": tasks,
             "iteration": state.get("iteration", 0) + 1,
             "replan_message": "未找到当前任务，交由 Re-Planner 修正。",
+            "needs_replan": True,
+            **_plan_search_state_updates(state),
         }
 
     print(f"[Node: Executor] 执行 Task {current_task['id']}: {current_task['title']}")
@@ -3903,15 +4091,24 @@ def task_executor_node(state: PlanExecuteState):
         return {
             "tasks": tasks,
             "iteration": state.get("iteration", 0) + 1,
+            "needs_replan": current_task.get("status") == "failed",
+            **_plan_search_state_updates(state),
         }
 
     evidence = ""
     if current_task.get("requires_web"):
         try:
-            candidates, search_error = run_plan_web_search(
-                f"{state['user_task']}\n当前子任务：{current_task['description']}",
-                state,
-            )
+            candidates, search_error = get_shared_plan_search_results(state)
+            current_task["source_urls"] = [str(item.get("url")) for item in candidates if item.get("url")][:24]
+            current_task["search_results"] = [
+                {
+                    "title": str(item.get("title") or "未命名来源")[:180],
+                    "url": str(item.get("url") or ""),
+                    "content": str(item.get("content") or "")[:420],
+                }
+                for item in candidates[:8]
+                if item.get("url")
+            ]
             evidence_items = []
             for item in candidates[:5]:
                 evidence_items.append(
@@ -3950,7 +4147,7 @@ def task_executor_node(state: PlanExecuteState):
 检索资料：
 {evidence or "该任务无需联网检索。"}"""
     try:
-        result = plan_llm_invoke(system_prompt, user_content, timeout=180)
+        result = plan_llm_invoke(system_prompt, user_content, timeout=180, stream=True)
         current_task["status"] = "completed"
         current_task["result"] = result
         current_task["error"] = None
@@ -3963,6 +4160,97 @@ def task_executor_node(state: PlanExecuteState):
     return {
         "tasks": tasks,
         "iteration": state.get("iteration", 0) + 1,
+        "needs_replan": current_task.get("status") == "failed",
+        **_plan_search_state_updates(state),
+    }
+
+
+def _execute_single_plan_task(state: PlanExecuteState):
+    current_id = state.get("current_task_id")
+    token = _PLAN_TASK_ID.set(int(current_id) if current_id is not None else None)
+    if current_id is not None:
+        current = next((task for task in state.get("tasks", []) if int(task["id"]) == int(current_id)), None)
+        if current:
+            emit_plan_runtime_event(
+                "task_started",
+                task_id=int(current_id),
+                title=current.get("title", ""),
+                requires_web=bool(current.get("requires_web")),
+            )
+    try:
+        result = _execute_single_plan_task_impl(state)
+        updated = next(
+            (task for task in result.get("tasks", []) if int(task["id"]) == int(current_id)),
+            None,
+        ) if current_id is not None else None
+        if updated:
+            emit_plan_runtime_event(
+                "task_completed",
+                task_id=int(current_id),
+                status=updated.get("status"),
+                result=updated.get("result"),
+                error=updated.get("error"),
+            )
+        return result
+    finally:
+        _PLAN_TASK_ID.reset(token)
+
+
+def task_executor_node(state: PlanExecuteState):
+    """Execute the current ready batch concurrently, preserving task order."""
+    tasks = [dict(task) for task in state.get("tasks", [])]
+    active_ids = [int(value) for value in state.get("active_task_ids", [])]
+    if not active_ids and state.get("current_task_id") is not None:
+        active_ids = [int(state["current_task_id"])]
+    if len(active_ids) <= 1:
+        return _execute_single_plan_task(state)
+
+    # Fetch shared evidence once before threads start. Every web task then
+    # consumes the same bounded snippets instead of racing duplicate requests.
+    if any(next((task for task in tasks if int(task["id"]) == task_id), {}).get("requires_web") for task_id in active_ids):
+        get_shared_plan_search_results(state)
+
+    print(f"[Node: Executor] 并行执行任务批次: {active_ids}")
+    merged_tasks = [dict(task) for task in tasks]
+    worker_state = dict(state)
+    worker_state["tasks"] = tasks
+    worker_state["active_task_ids"] = []
+    with ThreadPoolExecutor(max_workers=min(len(active_ids), 4)) as pool:
+        futures = {
+            pool.submit(
+                copy_context().run,
+                _execute_single_plan_task,
+                {**worker_state, "current_task_id": task_id},
+            ): task_id
+            for task_id in active_ids
+        }
+        for future in as_completed(futures):
+            task_id = futures[future]
+            try:
+                result = future.result()
+                updated = next((item for item in result.get("tasks", []) if int(item["id"]) == task_id), None)
+                if updated:
+                    for index, task in enumerate(merged_tasks):
+                        if int(task["id"]) == task_id:
+                            merged_tasks[index] = updated
+                            break
+            except Exception as exc:
+                for task in merged_tasks:
+                    if int(task["id"]) == task_id:
+                        task["status"] = "failed"
+                        task["result"] = None
+                        task["error"] = f"并行执行失败：{exc}"
+                        break
+    return {
+        "tasks": merged_tasks,
+        "current_task_id": None,
+        "active_task_ids": [],
+        "iteration": state.get("iteration", 0) + 1,
+        "needs_replan": any(
+            task.get("status") == "failed" and int(task.get("id", -1)) in active_ids
+            for task in merged_tasks
+        ),
+        **_plan_search_state_updates(state),
     }
 
 
@@ -3974,7 +4262,9 @@ def replanner_node(state: PlanExecuteState):
             "tasks": tasks,
             "current_task_id": None,
             "should_finish": True,
+            "needs_replan": False,
             "replan_message": f"已达到最大执行轮数 {iteration}，开始汇总现有成果。",
+            **_plan_search_state_updates(state),
         }
 
     completed = [
@@ -4022,7 +4312,7 @@ assigned_agent 只能是以下 ID 之一：
 当前剩余任务：
 {json.dumps(remaining, ensure_ascii=False)}"""
     try:
-        raw = plan_llm_invoke(system_prompt, user_content)
+        raw = plan_llm_invoke(system_prompt, user_content, fast=True)
         payload = extract_json_object(raw)
         finish = bool(payload.get("finish", False))
         message = str(payload.get("message", "已根据最新结果检查剩余计划。"))
@@ -4048,6 +4338,8 @@ assigned_agent 只能是以下 ID 之一：
         "current_task_id": None,
         "should_finish": finish,
         "replan_message": message,
+        "needs_replan": False,
+        **_plan_search_state_updates(state),
     }
 
 
@@ -4059,6 +4351,23 @@ def route_after_replan(state: PlanExecuteState):
     if not any(task["status"] == "pending" for task in state.get("tasks", [])):
         return "summarizer"
     return "task_start"
+
+
+def route_after_executor(state: PlanExecuteState):
+    """Skip the expensive Re-Planner on the normal success path.
+
+    A completed task with remaining pending work can continue directly in the
+    existing order. Re-planning is reserved for failures (or an explicit
+    future ``needs_replan`` signal), which removes one model call per task.
+    """
+    tasks = state.get("tasks", [])
+    if state.get("needs_replan"):
+        return "replanner"
+    if state.get("iteration", 0) >= state.get("max_iterations", PLAN_MAX_ITERATIONS):
+        return "summarizer"
+    if any(task.get("status") in {"pending", "in_progress"} for task in tasks):
+        return "task_start"
+    return "summarizer"
 
 
 def plan_summarizer_node(state: PlanExecuteState):
@@ -4075,6 +4384,8 @@ def plan_summarizer_node(state: PlanExecuteState):
             ),
             "result": task.get("result"),
             "error": task.get("error"),
+            "source_urls": task.get("source_urls", []),
+            "search_results": task.get("search_results", []),
         }
         for task in state.get("tasks", [])
     ]
@@ -4084,16 +4395,17 @@ def plan_summarizer_node(state: PlanExecuteState):
 保留有效来源链接。数学公式使用 $...$ 或 $$...$$。
 不要描述内部隐藏思维链。
 
-最终报告必须先给出“## 执行总览”表格，至少包含：
-| 子任务 | 负责专家 | 状态 | 核心产出 |
-随后再按统一报告结构综合所有成果。不要简单拼接各任务原文。
+最终报告开头用 2-4 条文字概括执行结论，可用简短项目符号列出已完成的子任务，
+不要强制生成“执行总览”表格。随后按统一报告结构综合所有成果，不要简单拼接各任务原文。
+报告结尾必须是“## 结论与下一步”，并且以文字或项目符号收束，不能用表格结尾。
 """ + MARKDOWN_REPORT_FORMAT
     try:
         final_response = plan_llm_invoke(
             system_prompt,
-            f"总目标：\n{state['user_task']}\n\n任务成果：\n"
+            f"总目标：\n{state['user_task']}\n\n任务成果（含可用资料链接）：\n"
             f"{json.dumps(task_results, ensure_ascii=False)}",
             timeout=180,
+            stream=True,
         )
     except Exception as exc:
         print(f"[Node: Final Summarizer] 汇总失败: {exc}")
@@ -4122,7 +4434,11 @@ def get_plan_execute_app():
     workflow.add_edge(START, "planner")
     workflow.add_edge("planner", "task_start")
     workflow.add_edge("task_start", "executor")
-    workflow.add_edge("executor", "replanner")
+    workflow.add_conditional_edges(
+        "executor",
+        route_after_executor,
+        {"replanner": "replanner", "task_start": "task_start", "summarizer": "summarizer"},
+    )
     workflow.add_conditional_edges(
         "replanner",
         route_after_replan,
@@ -4132,6 +4448,32 @@ def get_plan_execute_app():
     plan_execute_app = workflow.compile()
     print("[System] Plan-and-Execute LangGraph 编译完成")
     return plan_execute_app
+
+
+def _run_plan_graph(
+    inputs: PlanExecuteState,
+    event_queue: "queue.Queue[Dict[str, Any]]",
+) -> None:
+    """Run the synchronous LangGraph loop off the event loop thread."""
+    sink_token = _PLAN_EVENT_SINK.set(event_queue.put)
+    try:
+        # REALTIME_PLAN_GRAPH_LOOP
+        for event in get_plan_execute_app().stream(
+            inputs,
+            config={"recursion_limit": 50},
+        ):
+            for node_name, output in event.items():
+                if output:
+                    event_queue.put({
+                        "event_type": "node_snapshot",
+                        "node_name": node_name,
+                        "output": output,
+                    })
+        event_queue.put({"event_type": "graph_complete"})
+    except Exception as exc:
+        event_queue.put({"event_type": "graph_error", "error": str(exc)})
+    finally:
+        _PLAN_EVENT_SINK.reset(sink_token)
 
 
 async def generate_plan_execute_events(
@@ -4161,6 +4503,8 @@ async def generate_plan_execute_events(
         "replan_message": "",
         "should_finish": False,
         "final_response": "",
+        "search_cache": {},
+        "needs_replan": False,
     }
     latest_tasks: List[Dict[str, Any]] = []
     phase_by_node = {
@@ -4177,7 +4521,55 @@ async def generate_plan_execute_events(
             else "正在生成自主任务计划..."
         )
         yield sse_format("system_status", {"message": status_message})
-        for event in get_plan_execute_app().stream(
+        event_queue: queue.Queue[Dict[str, Any]] = queue.Queue()
+        graph_task = asyncio.create_task(asyncio.to_thread(_run_plan_graph, inputs, event_queue))
+        try:
+            while True:
+                runtime_event = await asyncio.to_thread(event_queue.get)
+                event_type = str(runtime_event.get("event_type") or "")
+                if event_type in {"search_started", "search_completed", "task_started", "task_delta", "task_completed", "report_delta"}:
+                    payload = {key: value for key, value in runtime_event.items() if key != "event_type"}
+                    payload["type"] = event_type
+                    yield sse_format(event_type, payload)
+                    continue
+                if event_type == "graph_error":
+                    raise RuntimeError(str(runtime_event.get("error") or "plan graph failed"))
+                if event_type == "graph_complete":
+                    break
+                if event_type != "node_snapshot":
+                    continue
+                node_name = str(runtime_event.get("node_name") or "")
+                output = runtime_event.get("output") or {}
+                if not isinstance(output, dict):
+                    continue
+                if "tasks" in output:
+                    latest_tasks = output["tasks"]
+                phase = phase_by_node.get(node_name, "executing")
+                yield sse_format("plan_update", {
+                    "type": "plan_update",
+                    "phase": phase,
+                    "tasks": latest_tasks,
+                    "current_task_id": output.get("current_task_id"),
+                    "active_task_ids": output.get("active_task_ids", []),
+                    "iteration": output.get("iteration", 0),
+                    "message": output.get("replan_message") or {
+                        "planner": "初始任务计划已生成",
+                        "task_start": "开始执行当前任务批次",
+                        "executor": "当前任务执行完成",
+                        "replanner": "已根据最新结果更新计划",
+                        "summarizer": "所有任务已结束，报告生成完成",
+                    }.get(node_name, ""),
+                })
+                if output.get("final_response"):
+                    yield sse_format("done", {
+                        "answer": output["final_response"],
+                        "reasoning_steps": output.get("iteration", 0),
+                        "mode": "distributed_plan" if execution_mode == "distributed" else "plan",
+                    })
+        finally:
+            await graph_task
+        """
+            for event in get_plan_execute_app().stream(
             inputs,
             config={"recursion_limit": 50},
         ):
@@ -4188,6 +4580,7 @@ async def generate_plan_execute_events(
                     latest_tasks = output["tasks"]
                 phase = phase_by_node.get(node_name, "executing")
                 yield sse_format("plan_update", {
+                    "type": "plan_update",
                     "phase": phase,
                     "tasks": latest_tasks,
                     "current_task_id": output.get("current_task_id"),
@@ -4210,6 +4603,7 @@ async def generate_plan_execute_events(
                             else "plan"
                         ),
                     })
+        """
         yield sse_format("plan_done", {
             "status": "success",
             "mode": (
@@ -5034,9 +5428,21 @@ async def _download_image(url: str, asset_id: str, batch_id: str) -> dict[str, A
     except ValueError as exc:
         if "不安全" in str(exc):
             raise
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=False) as client:
+    # News/article image CDNs frequently return one or two redirects. Follow
+    # them, then re-check the final host before writing bytes to disk.
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
         response = await client.get(url)
         response.raise_for_status()
+    final_url = response.url
+    final_host = (final_url.host or "").lower()
+    if final_url.scheme != "https" or not final_host or final_host in {"localhost", "localhost.localdomain"} or final_host.endswith(".local"):
+        raise ValueError("图片地址重定向到不安全主机")
+    try:
+        if ipaddress.ip_address(final_host).is_private or ipaddress.ip_address(final_host).is_loopback or ipaddress.ip_address(final_host).is_link_local:
+            raise ValueError("图片地址重定向到不安全主机")
+    except ValueError as exc:
+        if "不安全" in str(exc):
+            raise
     content_type = response.headers.get("content-type", "image/png").split(";", 1)[0]
     if content_type not in {"image/png", "image/jpeg", "image/webp"}:
         raise ValueError("供应商返回的不是受支持的图片格式")
@@ -5169,6 +5575,7 @@ class ResearchFigureJobRequest(BaseModel):
     max_images: int = Field(default=4, ge=2, le=10)
     policy: Literal["economy", "balanced", "quality"] = "economy"
     context_mode: Literal["preceding", "mixed"] = "mixed"
+    source_urls: list[str] = Field(default_factory=list, max_length=24)
 
 
 RESEARCH_FIGURE_TASKS: dict[str, asyncio.Task] = {}
@@ -5176,8 +5583,59 @@ RESEARCH_FIGURE_SEMAPHORE = asyncio.Semaphore(2)
 RESEARCH_FIGURE_MAX_IN_FLIGHT = 8
 
 
-def _research_report_hash(report: str) -> str:
-    return hashlib.sha256(report.encode("utf-8")).hexdigest()[:32]
+def _research_report_hash(report: str, source_urls: list[str] | None = None) -> str:
+    source_suffix = "\n".join(sorted({_safe_source_url(url) or "" for url in (source_urls or []) if url}))
+    return hashlib.sha256(f"{report}\n{source_suffix}".encode("utf-8")).hexdigest()[:32]
+
+
+def _safe_source_url(value: str) -> str | None:
+    parsed = urlparse(str(value).strip())
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+    hostname = (parsed.hostname or "").lower()
+    if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".local"):
+        return None
+    try:
+        if ipaddress.ip_address(hostname).is_private or ipaddress.ip_address(hostname).is_loopback or ipaddress.ip_address(hostname).is_link_local:
+            return None
+    except ValueError:
+        pass
+    return parsed.geturl()[:1200]
+
+
+def _extract_source_image_url(page_url: str) -> str | None:
+    """Extract a source page's canonical editorial image without another model call."""
+    safe_page = _safe_source_url(page_url)
+    if not safe_page:
+        return None
+    try:
+        response = requests.get(
+            safe_page,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; AutonomousResearch/1.0)"},
+            timeout=(3, 8),
+            allow_redirects=False,
+        )
+        if response.status_code >= 400:
+            return None
+        html = response.text[:1_500_000]
+        patterns = [
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, html, flags=re.IGNORECASE)
+            if match:
+                image_url = _safe_source_url(urljoin(safe_page, match.group(1)))
+                if image_url:
+                    return image_url
+        for match in re.finditer(r'<img[^>]+(?:src|data-src)=["\']([^"\']+)', html, flags=re.IGNORECASE):
+            image_url = _safe_source_url(urljoin(safe_page, match.group(1)))
+            if image_url and not re.search(r'logo|icon|avatar|sprite|pixel|tracking', image_url, flags=re.IGNORECASE):
+                return image_url
+    except Exception:
+        return None
+    return None
 
 
 def _research_context(value: str, limit: int) -> str:
@@ -5196,7 +5654,7 @@ def _research_figure_type(section: str, index: int) -> str:
     return ("concept", "editorial", "scene")[index % 3]
 
 
-def plan_research_figures(report: str, max_images: int, context_mode: str = "mixed") -> list[dict[str, Any]]:
+def plan_research_figures(report: str, max_images: int, context_mode: str = "mixed", source_urls: list[str] | None = None) -> list[dict[str, Any]]:
     """Create 2-10 spread-out figure slots without spending a planner-model call."""
     cleaned = re.sub(r"```[\s\S]*?```", " ", report)
     cleaned = re.sub(r"\|[^\n]+\|", " ", cleaned)
@@ -5210,6 +5668,8 @@ def plan_research_figures(report: str, max_images: int, context_mode: str = "mix
     if not sections:
         sections = [cleaned[i:i + 1800] for i in range(0, len(cleaned), 1800)] or [cleaned]
     slots: list[dict[str, Any]] = []
+    safe_source_urls = [safe for url in (source_urls or []) if (safe := _safe_source_url(url))]
+    figure_types = ("timeline", "process", "comparison", "evidence", "technical_diagram", "editorial")
     for index in range(count):
         section_index = min(len(sections) - 1, round(((index + 0.5) * len(sections)) / count - 0.5))
         section = sections[section_index]
@@ -5222,10 +5682,14 @@ def plan_research_figures(report: str, max_images: int, context_mode: str = "mix
         before = _research_context(body, 200)
         after = _research_context(body[200:], 110) if context_mode == "mixed" and len(body) > 200 else ""
         figure_type = _research_figure_type(section, index)
-        caption = f"{section_title}：{['概念关系示意', '关键场景插图', '研究过程图解'][index % 3]}"
+        if figure_type == "concept":
+            figure_type = figure_types[index % len(figure_types)]
+        source_url = safe_source_urls[section_index % len(safe_source_urls)] if safe_source_urls else None
+        caption = f"{section_title}：{['证据趋势图', '机制流程图', '方案比较图', '专业资料图'][index % 4]}"
         prompt = (
-            f"为一篇中文研究报告生成配图，主题是“{section_title}”。"
-            f"配图类型：{figure_type}。画面用于正文插图，不要生成大段文字、数字、logo或水印；"
+            f"为一篇中文研究报告制作一张具有解释作用的专业配图，主题是“{section_title}”。"
+            f"配图类型：{figure_type}。必须帮助读者理解机制、证据、时间演进、方案差异或真实场景，"
+            f"不要生成泛泛的装饰图、星空背景或与正文无关的概念画面；不要生成大段文字、数字、logo或水印；"
             f"风格简洁、专业、信息层次清晰，适合白底报告页面。上下文：{before}"
             + (f" 补充上下文：{after}" if after else "")
         )
@@ -5239,6 +5703,7 @@ def plan_research_figures(report: str, max_images: int, context_mode: str = "mix
             "prompt": prompt,
             "context_before": before,
             "context_after": after or None,
+            "source_url": source_url,
         })
     return slots
 
@@ -5307,36 +5772,52 @@ def _resume_research_figure_task(job_id: str) -> None:
 async def _run_research_figure_job(job_id: str, report: str, policy: str) -> None:
     try:
         with sqlite3.connect(SESSION_DB_PATH) as connection:
-            row = connection.execute("SELECT session_id, report_version, max_images, context_mode, target_ordinal FROM research_figure_jobs WHERE id = ?", (job_id,)).fetchone()
+            row = connection.execute("SELECT session_id, report_version, max_images, context_mode, target_ordinal, source_urls_json FROM research_figure_jobs WHERE id = ?", (job_id,)).fetchone()
         if not row:
             return
-        session_id, report_version, max_images, context_mode, target_ordinal = row
-        slots = plan_research_figures(report, int(max_images), str(context_mode))
+        session_id, report_version, max_images, context_mode, target_ordinal, source_urls_json = row
+        try:
+            source_urls = json.loads(source_urls_json or "[]")
+            source_urls = source_urls if isinstance(source_urls, list) else []
+        except Exception:
+            source_urls = []
+        slots = plan_research_figures(report, int(max_images), str(context_mode), source_urls)
         if target_ordinal is not None:
             slots = [slot for slot in slots if slot["ordinal"] == int(target_ordinal)]
         model = _research_figure_model(policy)
+        source_image_map: dict[str, str | None] = {}
+        unique_source_urls = sorted({slot.get("source_url") for slot in slots if slot.get("source_url")})
+        if unique_source_urls:
+            resolved = await asyncio.gather(*(asyncio.to_thread(_extract_source_image_url, url) for url in unique_source_urls), return_exceptions=True)
+            source_image_map = {url: (value if isinstance(value, str) else None) for url, value in zip(unique_source_urls, resolved)}
         now = time.time()
         with sqlite3.connect(SESSION_DB_PATH) as connection:
             for slot in slots:
                 connection.execute(
-                    "INSERT OR IGNORE INTO research_figures (id, job_id, session_id, report_version, ordinal, batch_index, batch_title, section_title, figure_type, caption, prompt, context_before, context_after, status, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (str(uuid.uuid4()), job_id, session_id, report_version, slot["ordinal"], slot["batch_index"], slot["batch_title"], slot["section_title"], slot["figure_type"], slot["caption"], slot["prompt"], slot["context_before"], slot["context_after"], "queued", model, now),
+                    "INSERT OR IGNORE INTO research_figures (id, job_id, session_id, report_version, ordinal, batch_index, batch_title, section_title, figure_type, caption, prompt, context_before, context_after, status, model, source_url, source_image_url, image_origin, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), job_id, session_id, report_version, slot["ordinal"], slot["batch_index"], slot["batch_title"], slot["section_title"], slot["figure_type"], slot["caption"], slot["prompt"], slot["context_before"], slot["context_after"], "queued", model, slot.get("source_url"), source_image_map.get(slot.get("source_url")), "source" if source_image_map.get(slot.get("source_url")) else "generated", now),
                 )
             connection.execute("UPDATE research_figure_jobs SET status = ?, progress = ? WHERE id = ?", ("generating", 0, job_id))
             connection.commit()
         async def generate_one(index: int, slot: dict[str, Any]) -> None:
             with sqlite3.connect(SESSION_DB_PATH) as connection:
-                current = connection.execute("SELECT id, status FROM research_figures WHERE job_id = ? AND ordinal = ?", (job_id, slot["ordinal"])).fetchone()
+                current = connection.execute("SELECT id, status, source_image_url, image_origin, source_url FROM research_figures WHERE job_id = ? AND ordinal = ?", (job_id, slot["ordinal"])).fetchone()
                 job_status = connection.execute("SELECT status FROM research_figure_jobs WHERE id = ?", (job_id,)).fetchone()
             if not current or (job_status and job_status[0] == "cancelled"):
                 return
-            figure_id, current_status = current
+            figure_id, current_status, source_image_url, image_origin, source_url = current
             if current_status == "succeeded":
                 return
             with sqlite3.connect(SESSION_DB_PATH) as connection:
                 connection.execute("UPDATE research_figures SET status = ? WHERE id = ?", ("generating", figure_id)); connection.commit()
             try:
                 async with RESEARCH_FIGURE_SEMAPHORE:
+                    if image_origin == "source" and source_image_url:
+                        asset = await _download_image(source_image_url, str(uuid.uuid4()), f"research-{job_id}")
+                        with sqlite3.connect(SESSION_DB_PATH) as connection:
+                            connection.execute("INSERT INTO image_generation_assets (id, batch_id, local_path, mime_type, created_at) VALUES (?, ?, ?, ?, ?)", (asset["id"], job_id, asset["local_path"], asset["mime_type"], time.time()))
+                            connection.execute("UPDATE research_figures SET status = ?, asset_id = ?, image_url = ?, completed_at = ? WHERE id = ?", ("succeeded", asset["id"], asset["url"], time.time(), figure_id)); connection.execute("UPDATE research_figure_jobs SET progress = progress + 1 WHERE id = ?", (job_id,)); connection.commit()
+                        return
                     if model == "z-image-turbo":
                         remote_urls = await _call_dashscope_multimodal_image(model, slot["prompt"][:900], 1, "4:3", prompt_extend=False)
                     else:
@@ -5382,7 +5863,8 @@ async def _run_research_figure_job(job_id: str, report: str, policy: str) -> Non
 @app.post("/api/research/figures/jobs")
 @app.post("/api/plan/figures/jobs")
 async def create_research_figure_job(request: ResearchFigureJobRequest):
-    report_hash = _research_report_hash(request.report)
+    source_urls = [safe for url in request.source_urls if (safe := _safe_source_url(url))]
+    report_hash = _research_report_hash(request.report, source_urls)
     with sqlite3.connect(SESSION_DB_PATH) as connection:
         connection.row_factory = sqlite3.Row
         existing = connection.execute("SELECT id FROM research_figure_jobs WHERE session_id IS ? AND report_hash = ? AND policy = ? ORDER BY created_at DESC LIMIT 1", (request.session_id, report_hash, request.policy)).fetchone()
@@ -5392,7 +5874,7 @@ async def create_research_figure_job(request: ResearchFigureJobRequest):
             return payload
     job_id = str(uuid.uuid4())
     with sqlite3.connect(SESSION_DB_PATH) as connection:
-        connection.execute("INSERT INTO research_figure_jobs (id, session_id, report_version, report_hash, report_text, policy, max_images, context_mode, target_ordinal, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (job_id, request.session_id, request.report_version, report_hash, request.report, request.policy, request.max_images, request.context_mode, None, "queued", time.time())); connection.commit()
+        connection.execute("INSERT INTO research_figure_jobs (id, session_id, report_version, report_hash, report_text, policy, max_images, context_mode, target_ordinal, source_urls_json, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (job_id, request.session_id, request.report_version, report_hash, request.report, request.policy, request.max_images, request.context_mode, None, json.dumps(source_urls, ensure_ascii=False), "queued", time.time())); connection.commit()
     if len(RESEARCH_FIGURE_TASKS) >= RESEARCH_FIGURE_MAX_IN_FLIGHT:
         with sqlite3.connect(SESSION_DB_PATH) as connection:
             connection.execute("UPDATE research_figure_jobs SET status = ?, error_message = ?, completed_at = ? WHERE id = ?", ("failed", "当前研究配图任务较多，请稍后重试", time.time(), job_id)); connection.commit()
@@ -5426,13 +5908,13 @@ async def cancel_research_figure_job(job_id: str):
 async def retry_research_figure(figure_id: str):
     with sqlite3.connect(SESSION_DB_PATH) as connection:
         row = connection.execute(
-            "SELECT f.ordinal, j.session_id, j.report_version, j.report_hash, j.report_text, j.policy, j.max_images, j.context_mode "
+            "SELECT f.ordinal, j.session_id, j.report_version, j.report_hash, j.report_text, j.policy, j.max_images, j.context_mode, j.source_urls_json "
             "FROM research_figures f JOIN research_figure_jobs j ON j.id = f.job_id WHERE f.id = ?",
             (figure_id,),
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="研究配图不存在")
-    ordinal, session_id, report_version, report_hash, report_text, policy, max_images, context_mode = row
+    ordinal, session_id, report_version, report_hash, report_text, policy, max_images, context_mode, source_urls_json = row
     if not report_text:
         raise HTTPException(status_code=409, detail="该配图任务没有可恢复的报告正文")
     if len(RESEARCH_FIGURE_TASKS) >= RESEARCH_FIGURE_MAX_IN_FLIGHT:
@@ -5440,8 +5922,8 @@ async def retry_research_figure(figure_id: str):
     job_id = str(uuid.uuid4())
     with sqlite3.connect(SESSION_DB_PATH) as connection:
         connection.execute(
-            "INSERT INTO research_figure_jobs (id, session_id, report_version, report_hash, report_text, policy, max_images, context_mode, target_ordinal, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (job_id, session_id, f"{report_version}:retry:{ordinal}:{job_id[:8]}", report_hash, report_text, policy, max_images, context_mode, ordinal, "queued", time.time()),
+            "INSERT INTO research_figure_jobs (id, session_id, report_version, report_hash, report_text, policy, max_images, context_mode, target_ordinal, source_urls_json, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (job_id, session_id, f"{report_version}:retry:{ordinal}:{job_id[:8]}", report_hash, report_text, policy, max_images, context_mode, ordinal, source_urls_json, "queued", time.time()),
         )
         connection.commit()
     RESEARCH_FIGURE_TASKS[job_id] = asyncio.create_task(_run_research_figure_job(job_id, report_text, policy))

@@ -34,6 +34,7 @@ def test_plan_report_document_supports_tables_charts_and_figures():
     assert "<thead className=\"bg-slate-100\"> <" not in document
     assert "正在生成配图" in document
     assert "重试配图" in document
+    assert "结论与下一步" in document
 
 
 def test_plan_progress_is_persisted_during_stream_and_final_message():
@@ -52,3 +53,5 @@ def test_plan_figures_restore_existing_jobs_and_have_timeout_retry_contract():
     assert "getPlanFigureJob(existingJobId)" in workspace
     assert "retryPlanFigure" in workspace
     assert "/api/plan/figures/jobs" in api
+    assert "source_urls" in api
+    assert "source_image_url" in api

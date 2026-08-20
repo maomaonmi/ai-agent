@@ -10,6 +10,8 @@ from main import (
     plan_llm_invoke,
     resolve_plan_agent,
     run_plan_web_search,
+    plan_research_figures,
+    _safe_source_url,
     task_executor_node,
 )
 
@@ -56,6 +58,22 @@ class PlanExecuteContractTests(unittest.TestCase):
         self.assertEqual([task["status"] for task in tasks], ["pending", "pending"])
         self.assertTrue(tasks[0]["requires_web"])
         self.assertFalse(tasks[1]["requires_web"])
+
+    def test_report_prompt_avoids_table_heavy_tail(self):
+        self.assertIn("最多 2 张 Markdown 表格", MARKDOWN_REPORT_FORMAT)
+        self.assertIn("## 结论与下一步", MARKDOWN_REPORT_FORMAT)
+        self.assertIn("禁止以表格、代码块或图表数据结尾", MARKDOWN_REPORT_FORMAT)
+
+    def test_figure_slots_keep_source_url_and_meaningful_figure_prompt(self):
+        slots = plan_research_figures(
+            "## 第一章 趋势\n" + "这是一段有足够上下文的研究材料。" * 40,
+            2,
+            source_urls=["https://example.com/article"],
+        )
+        self.assertEqual(len(slots), 2)
+        self.assertEqual(slots[0]["source_url"], "https://example.com/article")
+        self.assertIn("帮助读者理解", slots[0]["prompt"])
+        self.assertEqual(_safe_source_url("http://localhost/private"), None)
 
     def test_discards_tasks_without_titles(self):
         tasks = normalize_plan_tasks([{"description": "缺少标题"}, "invalid"])
