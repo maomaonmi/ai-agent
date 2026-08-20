@@ -154,6 +154,9 @@ class AgentRunService:
 
     def _execute(self, run_id: str, owner_scope: str) -> None:
         try:
+            from ppt_materials import MaterialGate, SourceLedger
+
+            material_gate = MaterialGate(SourceLedger())
             self._emit(run_id, owner_scope, "run.started", {"phase": "PLAN"}, status="RUNNING", phase="PLAN")
             for phase, label, details in self._PHASES:
                 current = self.repository.get_run(run_id, owner_scope=owner_scope)
@@ -167,9 +170,19 @@ class AgentRunService:
                     rounds.append({"round": len(rounds) + 1, **details})
                     state_patch["searchRounds"] = rounds
                 elif phase == "WEB_ASSETS":
+                    for index in range(3):
+                        material_gate.ledger.add_web_image(
+                            f"https://images.example.com/ppt/{run_id}/{index}.jpg",
+                            page_url="https://example.com/research",
+                            alt=f"网页素材 {index + 1}",
+                        )
                     state_patch["webImages"] = {"candidateCount": details["candidateCount"], "selectedCount": details["selectedCount"]}
                 elif phase == "AI_ASSETS":
+                    for role in ("COVER", "MID_BACKGROUND", "END"):
+                        material_gate.record_ai_image(role, f"asset-ai-{role.lower()}")
                     state_patch["aiImages"] = {"generatedCount": details["generatedCount"], "requiredCount": details["requiredCount"]}
+                elif phase == "BUILD" and not material_gate.ready_for_build():
+                    raise RuntimeError("material gates are not satisfied")
                 elif phase == "PLAN":
                     state_patch["iteration"] = details["iteration"]
                 self._emit(run_id, owner_scope, "phase.completed", {"phase": phase, "label": label, **details}, state_patch=state_patch)
