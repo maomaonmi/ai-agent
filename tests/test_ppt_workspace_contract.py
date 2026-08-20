@@ -1,0 +1,55 @@
+from pathlib import Path
+
+
+FRONTEND = Path(__file__).resolve().parents[1] / "frontend" / "ai-agent" / "src"
+
+
+def test_ppt_workspace_route_and_core_editor_controls_exist() -> None:
+    route = FRONTEND / "app" / "ppt" / "workspace" / "[presentationId]" / "page.tsx"
+    workspace = FRONTEND / "features" / "ppt" / "workspace" / "PptWorkspace.tsx"
+
+    assert route.exists()
+    assert workspace.exists()
+    assert (FRONTEND / "app" / "api" / "ppt" / "export" / "route.ts").exists()
+    assert "await params" in route.read_text(encoding="utf-8")
+
+    source = workspace.read_text(encoding="utf-8")
+    assert 'searchParams.get("source") === "sidebar"' in source
+    assert 'templateId = freshFromSidebar ? "blank"' in source
+    assert '新建 AI PPT' in source
+
+    for contract_marker in (
+        'data-ppt-workspace',
+        'aria-label="AI 工作流"',
+        'AI PPT 助手',
+        'AI 工作流链路',
+        'AI PPT 对话输入',
+        '发送 PPT 需求',
+        '调整 AI 对话区宽度',
+        'aria-label="幻灯片缩略图"',
+        '新建幻灯片',
+        '插入文本',
+        '插入图形',
+        '插入图片',
+        '插入图表',
+        '插入表格',
+        '演讲者备注',
+        '导出 PPTX',
+    ):
+        assert contract_marker in source
+    assert 'useState(false)' in source
+
+
+def test_workspace_exposes_agent_progress_and_asset_provenance() -> None:
+    workspace = FRONTEND / "features" / "ppt" / "workspace" / "PptWorkspace.tsx"
+    source = workspace.read_text(encoding="utf-8")
+
+    for contract_marker in (
+        '联网检索',
+        '每次不超过 20 条',
+        '网页图片',
+        'AI 生成图片',
+        '素材来源',
+        '逐页搭建',
+    ):
+        assert contract_marker in source

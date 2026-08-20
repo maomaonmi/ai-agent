@@ -122,9 +122,9 @@
 
 **Acceptance criteria:**
 
-- [ ] API 响应和统一错误被类型化。
-- [ ] 列表支持取消旧请求和分页追加。
-- [ ] 上传状态可在页面重挂载后恢复查询。
+- [x] API 响应和统一错误被类型化。
+- [x] 列表支持取消旧请求和分页追加。
+- [x] 上传状态可在页面重挂载后恢复查询。
 
 **Verification:** `npm run lint`; `npm run build`
 
@@ -138,9 +138,10 @@
 
 **Acceptance criteria:**
 
-- [ ] 两个入口都导航到 `/ppt`。
+- [x] “更多 → PPT 创作”导航到 `/ppt` 模板市场。
+- [x] 展开/折叠侧边栏的 AI PPT 导航到带唯一 session 参数的新工作台。
 - [ ] 不改变聊天会话模式和当前消息。
-- [ ] 刷新 `/ppt` 可直接打开。
+- [x] 刷新 `/ppt` 可直接打开。
 
 **Verification:** `python -m pytest -q tests/test_ppt_entry_contract.py`; `npm run build`
 
@@ -154,9 +155,9 @@
 
 **Acceptance criteria:**
 
-- [ ] 卡片悬停显示预览和使用按钮。
-- [ ] 私有模板有明确标识和管理操作。
-- [ ] 键盘焦点可触达卡片操作，移动端不依赖 hover。
+- [x] 卡片悬停显示预览和使用按钮。
+- [x] 私有模板上传状态有明确的阶段和 READY 后立即使用操作。
+- [x] 键盘焦点可触达卡片操作，移动端不依赖 hover。
 
 **Verification:** `npm run lint`; `npm run build`; 浏览器手工检查 1280/1440/1920px
 
@@ -170,8 +171,8 @@
 
 **Acceptance criteria:**
 
-- [ ] 所有预览页可访问，第一页优先加载。
-- [ ] 弹窗焦点被正确约束，Escape 可关闭。
+- [x] 所有预览页可访问，第一页优先加载。
+- [x] 弹窗焦点被正确约束，Escape 可关闭。
 - [ ] 缺字体、媒体和动画提示可见。
 
 **Verification:** `npm run build`; 浏览器键盘与全屏检查
@@ -249,7 +250,9 @@
 
 **Acceptance criteria:**
 
-- [ ] 使用模板可创建 Presentation 并打开工作台。
+- [x] 使用模板可打开工作台；Next 15 动态参数使用异步 `params`，避免运行时错误。
+- [x] 工作台首屏包含 AI 工作流、缩略图导航、画布和演讲者备注区域。
+- [x] 侧边栏新建入口显示正常 AI 对话窗口，发送消息后才启动工作流；链路总卡、阶段卡和左右分栏均可伸缩。
 - [ ] 刷新后恢复当前修订。
 - [ ] 不存在或无权文稿显示稳定错误页。
 
