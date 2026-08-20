@@ -109,10 +109,11 @@ def _normalize_search_response(payload: Mapping[str, object]) -> list[dict[str, 
         if not isinstance(url, str):
             continue
         item: dict[str, object] = {"title": str(candidate.get("title", ""))[:500], "url": url}
-        image_url = candidate.get("imageUrl") or candidate.get("image_url") or candidate.get("thumbnail")
+        metadata = candidate.get("metadata") if isinstance(candidate.get("metadata"), Mapping) else {}
+        image_url = candidate.get("imageUrl") or candidate.get("image_url") or candidate.get("thumbnail") or candidate.get("image") or metadata.get("image")
         if isinstance(image_url, str):
             item["imageUrl"] = image_url
-        page_url = candidate.get("pageUrl") or candidate.get("page_url")
+        page_url = candidate.get("pageUrl") or candidate.get("page_url") or metadata.get("pageUrl")
         if isinstance(page_url, str):
             item["pageUrl"] = page_url
         normalized.append(item)
