@@ -26,6 +26,26 @@ def test_runtime_raises_stable_error_when_libreoffice_is_missing(tmp_path: Path)
     assert exc_info.value.code == "LIBREOFFICE_NOT_AVAILABLE"
 
 
+def test_runtime_discovers_user_scoped_ai_ppt_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = (
+        tmp_path
+        / "Programs"
+        / "LibreOffice-26.2.5-AIPPT"
+        / "program"
+        / "soffice.com"
+    )
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"placeholder")
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+
+    runtime = LibreOfficeRuntime(candidates=())
+
+    assert runtime.resolve_executable() == executable.resolve()
+
+
 def test_convert_command_uses_isolated_user_profile(tmp_path: Path) -> None:
     executable = tmp_path / "soffice.exe"
     executable.write_bytes(b"placeholder")
@@ -66,4 +86,3 @@ def test_probe_returns_version_without_exposing_process_details(tmp_path: Path, 
     assert status.available is True
     assert status.version == "LibreOffice 26.2.4.2"
     assert status.executable == str(executable.resolve())
-

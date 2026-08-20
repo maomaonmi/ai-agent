@@ -13,7 +13,9 @@ from typing import Iterable
 
 _ALLOWED_TARGET_FORMATS = frozenset({"pdf"})
 _WINDOWS_CANDIDATES = (
+    Path(r"C:\Program Files\LibreOffice\program\soffice.com"),
     Path(r"C:\Program Files\LibreOffice\program\soffice.exe"),
+    Path(r"C:\Program Files (x86)\LibreOffice\program\soffice.com"),
     Path(r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"),
 )
 
@@ -67,6 +69,20 @@ class LibreOfficeRuntime:
             resolved = candidate.resolve()
             if resolved.is_file():
                 return resolved
+        local_app_data = os.getenv("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            programs_dir = Path(local_app_data) / "Programs"
+            local_candidates = [
+                programs_dir / "LibreOffice-AIPPT" / "program" / "soffice.com",
+                *sorted(
+                    programs_dir.glob("LibreOffice-*-AIPPT/program/soffice.com"),
+                    reverse=True,
+                ),
+            ]
+            for candidate in local_candidates:
+                resolved = candidate.resolve()
+                if resolved.is_file():
+                    return resolved
         return None
 
     def require_executable(self) -> Path:
@@ -156,4 +172,3 @@ class LibreOfficeRuntime:
         if result.returncode != 0 or not target.is_file():
             raise LibreOfficeRuntimeError("LIBREOFFICE_CONVERSION_FAILED", "LibreOffice 无法转换该 PPT 文件")
         return target
-
