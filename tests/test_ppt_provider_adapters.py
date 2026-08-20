@@ -16,6 +16,7 @@ from ppt_materials import (
     UnsafeSourceUrl,
     generate_required_ai_images,
     WebPageImageExtractor,
+    _streaming_json_request,
 )
 
 
@@ -98,6 +99,64 @@ def test_settings_native_search_adapter_uses_glm_web_search_contract() -> None:
     assert calls[0][0] == "https://open.bigmodel.cn/api/paas/v4/chat/completions"
     assert calls[0][1]["Authorization"] == "Bearer glm-key"
     assert calls[0][2]["tools"]
+    assert calls[0][2]["stream"] is True
+
+
+def test_settings_native_search_adapter_matches_qwen_native_mode_contract() -> None:
+    calls: list[tuple[str, dict[str, str], dict[str, object]]] = []
+
+    def request_json(endpoint: str, headers: dict[str, str], payload: dict[str, object]):
+        calls.append((endpoint, headers, payload))
+        return {
+            "search_info": {
+                "search_results": [
+                    {"index": 1, "title": "Qwen source", "url": "https://example.com/qwen"}
+                ]
+            }
+        }
+
+    adapter = OpenAICompatibleNativeSearchAdapter(
+        "qwen",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key="qwen-key",
+        model="qwen3.7-plus",
+        request_json=request_json,
+    )
+
+    assert adapter("native search", 20) == [{"title": "Qwen source", "url": "https://example.com/qwen"}]
+    assert calls[0][0] == "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    assert calls[0][2]["stream"] is True
+    assert calls[0][2]["enable_search"] is True
+    assert calls[0][2]["search_options"] == {
+        "search_strategy": "turbo",
+        "forced_search": True,
+    }
+
+
+def test_streaming_native_request_collects_search_info_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return (
+                b"data: {\"choices\": [{\"delta\": {\"content\": \"answer\"}}]}\n\n"
+                b"data: {\"search_info\": {\"search_results\": [{\"title\": \"Source\", \"url\": \"https://example.com/source\"}]}}\n\n"
+                b"data: [DONE]\n\n"
+            )
+
+    monkeypatch.setattr("ppt_materials.urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+    result = _streaming_json_request(
+        "https://example.com/chat/completions",
+        {"Authorization": "Bearer test"},
+        {"stream": True},
+    )
+
+    assert len(result["stream_frames"]) == 2
+    assert result["stream_frames"][1]["search_info"]["search_results"][0]["url"] == "https://example.com/source"
 
 
 def test_safe_image_downloader_rejects_private_dns_and_enforces_bytes_and_mime() -> None:

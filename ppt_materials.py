@@ -101,6 +101,62 @@ def _default_json_request(endpoint: str, headers: dict[str, str], payload: dict[
     return _request_json_with_timeout(endpoint, headers, payload, timeout_seconds=max(5, min(60, int(os.getenv("PPT_PROVIDER_TIMEOUT_SECONDS", "12")))))
 
 
+def _streaming_json_request(endpoint: str, headers: dict[str, str], payload: dict[str, object]) -> Mapping[str, object]:
+    """Read the same SSE contract used by the normal native-search chat mode.
+
+    Qwen exposes ``search_info`` on streaming chunks (including chunks without
+    choices); GLM may expose citations in tool/annotation chunks.  A regular
+    JSON POST can therefore return a perfectly valid answer while losing every
+    source.  Keep the transport small and dependency-free so the PPT worker can
+    consume the provider stream without importing the application module.
+    """
+
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    timeout_seconds = max(30, min(180, int(os.getenv("PPT_PROVIDER_TIMEOUT_SECONDS", "120"))))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read(_MAX_JSON_BYTES + 1)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise ProviderRequestFailed("provider request failed") from exc
+    if len(raw) > _MAX_JSON_BYTES:
+        raise ProviderRequestFailed("provider response exceeded size limit")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProviderRequestFailed("provider returned invalid UTF-8") from exc
+
+    # Some compatible gateways ignore stream=true and return one JSON object.
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError:
+        decoded = None
+    if isinstance(decoded, Mapping):
+        return decoded
+
+    frames: list[Mapping[str, object]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            frame = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(frame, Mapping):
+            frames.append(frame)
+    if not frames:
+        raise ProviderRequestFailed("provider returned an invalid streaming response")
+    return {"stream_frames": frames}
+
+
 def _image_json_request(endpoint: str, headers: dict[str, str], payload: dict[str, object]) -> Mapping[str, object]:
     # GLM-Image HD generation is documented to take about 20 seconds; the
     # hosted endpoint can be slower on a cold request, so allow two minutes.
@@ -201,6 +257,8 @@ class OpenAICompatibleNativeSearchAdapter:
         base_url: str,
         api_key: str,
         model: str,
+        temperature: float = 1.0,
+        max_tokens: int = 16_000,
         request_json: JsonRequest | None = None,
     ) -> None:
         if provider not in {"qwen", "glm"}:
@@ -209,7 +267,9 @@ class OpenAICompatibleNativeSearchAdapter:
         self.endpoint = base_url.rstrip("/") if base_url.rstrip("/").endswith("/chat/completions") else f"{base_url.rstrip('/')}/chat/completions"
         self.api_key = api_key
         self.model = model
-        self.request_json = request_json or _default_json_request
+        self.temperature = max(0.0, min(2.0, float(temperature)))
+        self.max_tokens = max(1, min(65_536, int(max_tokens)))
+        self.request_json = request_json
 
     def __call__(self, query: str, limit: int) -> list[dict[str, object]]:
         if not self.api_key or not self.endpoint:
@@ -218,7 +278,11 @@ class OpenAICompatibleNativeSearchAdapter:
         payload: dict[str, object] = {
             "model": self.model,
             "messages": [{"role": "user", "content": query}],
-            "stream": False,
+            "max_tokens": self.max_tokens,
+            "temperature": self.temperature,
+            # Match the normal app's native-search route.  Search citations are
+            # delivered on streaming chunks, not reliably in a non-stream body.
+            "stream": True,
         }
         if self.provider == "qwen":
             payload.update({
@@ -226,7 +290,6 @@ class OpenAICompatibleNativeSearchAdapter:
                 "search_options": {
                     "search_strategy": "turbo",
                     "forced_search": True,
-                    "result_type": "search_result",
                 },
             })
         else:
@@ -244,7 +307,8 @@ class OpenAICompatibleNativeSearchAdapter:
                 }],
                 "tool_choice": "auto",
             })
-        response = self.request_json(
+        request_json = self.request_json or _streaming_json_request
+        response = request_json(
             self.endpoint,
             {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
             payload,
@@ -334,6 +398,8 @@ def build_settings_search_adapters(*, request_json: JsonRequest | None = None) -
                     base_url=settings.base_url,
                     api_key=settings.api_key,
                     model=settings.model_id,
+                    temperature=settings.temperature,
+                    max_tokens=settings.max_tokens,
                     request_json=request_json,
                 )
     return adapters
