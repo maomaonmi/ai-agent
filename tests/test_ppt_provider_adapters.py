@@ -9,6 +9,8 @@ from ppt_materials import (
     FirecrawlSearchAdapter,
     NativeSearchAdapter,
     OpenAICompatibleNativeSearchAdapter,
+    QwenDashScopeSearchAdapter,
+    GlmWebSearchAdapter,
     SettingsAiImageAdapter,
     ProviderNotConfigured,
     SafeImageDownloader,
@@ -17,6 +19,7 @@ from ppt_materials import (
     generate_required_ai_images,
     WebPageImageExtractor,
     _streaming_json_request,
+    build_settings_search_adapters,
 )
 
 
@@ -131,6 +134,83 @@ def test_settings_native_search_adapter_matches_qwen_native_mode_contract() -> N
         "search_strategy": "turbo",
         "forced_search": True,
     }
+
+
+def test_qwen_dashscope_search_adapter_returns_native_sources() -> None:
+    calls: list[tuple[str, dict[str, str], dict[str, object]]] = []
+
+    def request_json(endpoint: str, headers: dict[str, str], payload: dict[str, object]):
+        calls.append((endpoint, headers, payload))
+        return {
+            "output": {
+                "search_info": {
+                    "search_results": [
+                        {"index": 1, "title": "Qwen native source", "url": "https://example.com/qwen-native", "snippet": "摘要"}
+                    ]
+                }
+            }
+        }
+
+    adapter = QwenDashScopeSearchAdapter(
+        api_key="qwen-key",
+        model="qwen3.7-plus",
+        request_json=request_json,
+    )
+
+    assert adapter("native search", 20) == [{"title": "Qwen native source", "url": "https://example.com/qwen-native"}]
+    assert calls[0][0] == "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
+    assert calls[0][1]["X-DashScope-SSE"] == "enable"
+    assert calls[0][2]["model"] == "qwen-plus"
+    assert calls[0][2]["parameters"]["enable_search"] is True
+    assert calls[0][2]["parameters"]["search_options"]["enable_source"] is True
+
+
+def test_glm_web_search_adapter_returns_structured_sources() -> None:
+    calls: list[tuple[str, dict[str, str], dict[str, object]]] = []
+
+    def request_json(endpoint: str, headers: dict[str, str], payload: dict[str, object]):
+        calls.append((endpoint, headers, payload))
+        return {"search_result": [{"title": "GLM source", "link": "https://example.com/glm", "content": "摘要"}]}
+
+    adapter = GlmWebSearchAdapter(api_key="glm-key", request_json=request_json)
+
+    assert adapter("native search", 20) == [{"title": "GLM source", "url": "https://example.com/glm"}]
+    assert calls[0][0] == "https://open.bigmodel.cn/api/paas/v4/web_search"
+    assert calls[0][2] == {
+        "search_query": "native search",
+        "search_engine": "search_pro",
+        "search_intent": False,
+        "count": 20,
+        "search_recency_filter": "noLimit",
+        "content_size": "high",
+    }
+
+
+def test_settings_factory_uses_structured_native_search_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
+    class ServiceStore:
+        def load(self):
+            return type("Service", (), {"firecrawl_api_key": ""})()
+
+    class ModelStore:
+        def load(self, provider: str):
+            return type(
+                "Model",
+                (),
+                {
+                    "api_key": f"{provider}-key",
+                    "model_id": "qwen-plus" if provider == "qwen" else "glm-5.1",
+                    "base_url": "https://example.com/v1",
+                    "temperature": 1.0,
+                    "max_tokens": 1000,
+                },
+            )()
+
+    monkeypatch.setattr("model_settings.ServiceSettingsStore", ServiceStore)
+    monkeypatch.setattr("model_settings.ModelSettingsStore", ModelStore)
+    adapters = build_settings_search_adapters(request_json=lambda *_args: {})
+
+    assert isinstance(adapters["qwen"], QwenDashScopeSearchAdapter)
+    assert isinstance(adapters["glm"], GlmWebSearchAdapter)
 
 
 def test_streaming_native_request_collects_search_info_frames(monkeypatch: pytest.MonkeyPatch) -> None:

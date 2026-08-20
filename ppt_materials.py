@@ -46,6 +46,17 @@ _MAX_JSON_BYTES = 2 * 1024 * 1024
 _DEFAULT_IMAGE_MAX_BYTES = 8 * 1024 * 1024
 _IMAGE_MIME_TYPES = frozenset({"image/jpeg", "image/png", "image/webp", "image/gif"})
 _AI_IMAGE_ROLES = ("COVER", "MID_BACKGROUND", "END")
+_QWEN_DASHSCOPE_SEARCH_MODELS = frozenset({
+    "qwen-plus",
+    "qwen-plus-latest",
+    "qwen-flash",
+    "qwen-flash-latest",
+    "qwen3.8-max",
+    "qwen3.7-max",
+    "qwen3.5-plus",
+    "qwen3.5-flash",
+    "qwen3-max",
+})
 
 
 def _validate_https_url(raw: str) -> str:
@@ -164,7 +175,7 @@ def _image_json_request(endpoint: str, headers: dict[str, str], payload: dict[st
 
 
 def _normalize_search_response(payload: Mapping[str, object]) -> list[dict[str, object]]:
-    candidates: object = payload.get("data", payload.get("results", []))
+    candidates: object = payload.get("data", payload.get("results", payload.get("search_result", [])))
     if isinstance(candidates, Mapping):
         candidates = candidates.get("results", [])
     if not isinstance(candidates, Sequence) or isinstance(candidates, (str, bytes, bytearray)):
@@ -245,6 +256,106 @@ class NativeSearchAdapter:
             {"query": query, "limit": min(limit, _MAX_SEARCH_RESULTS)},
         )
         return _normalize_search_response(payload)
+
+
+class QwenDashScopeSearchAdapter:
+    """Qwen's native DashScope search route, including source metadata.
+
+    The OpenAI-compatible Chat Completions route can use web search but does
+    not return the source list. PPT requires auditable URLs, so this adapter
+    deliberately uses DashScope's native text-generation contract.
+    """
+
+    provider = "qwen"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        endpoint: str | None = None,
+        request_json: JsonRequest | None = None,
+    ) -> None:
+        self.endpoint = endpoint or os.getenv(
+            "QWEN_NATIVE_SEARCH_URL",
+            "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
+        )
+        self.api_key = api_key
+        # Some profiles use the OpenAI-compatible-only qwen3.7-plus alias.
+        # DashScope's source-returning route supports qwen-plus instead; keep
+        # the user's chat model untouched and use the closest native search
+        # model for this source-collection job.
+        self.model = model if model in _QWEN_DASHSCOPE_SEARCH_MODELS else "qwen-plus"
+        self.request_json = request_json
+
+    def __call__(self, query: str, limit: int) -> list[dict[str, object]]:
+        if not self.api_key or not self.endpoint:
+            raise ProviderNotConfigured("qwen provider is not configured")
+        _validate_https_url(self.endpoint)
+        payload: dict[str, object] = {
+            "model": self.model,
+            "input": {"messages": [{"role": "user", "content": query}]},
+            "parameters": {
+                "result_format": "message",
+                "incremental_output": True,
+                "enable_search": True,
+                "search_options": {
+                    "search_strategy": "turbo",
+                    "forced_search": True,
+                    "enable_source": True,
+                    "prepend_search_result": True,
+                },
+            },
+        }
+        request_json = self.request_json or _streaming_json_request
+        response = request_json(
+            self.endpoint,
+            {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "X-DashScope-SSE": "enable",
+            },
+            payload,
+        )
+        return _normalize_native_chat_response(response, query=query, limit=limit)
+
+
+class GlmWebSearchAdapter:
+    """GLM's structured Web Search API, returning source URLs directly."""
+
+    provider = "glm"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        endpoint: str | None = None,
+        request_json: JsonRequest | None = None,
+    ) -> None:
+        self.endpoint = endpoint or os.getenv(
+            "GLM_WEB_SEARCH_URL",
+            "https://open.bigmodel.cn/api/paas/v4/web_search",
+        )
+        self.api_key = api_key
+        self.request_json = request_json or _default_json_request
+
+    def __call__(self, query: str, limit: int) -> list[dict[str, object]]:
+        if not self.api_key or not self.endpoint:
+            raise ProviderNotConfigured("glm provider is not configured")
+        _validate_https_url(self.endpoint)
+        response = self.request_json(
+            self.endpoint,
+            {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            {
+                "search_query": query[:70],
+                "search_engine": "search_pro",
+                "search_intent": False,
+                "count": min(limit, _MAX_SEARCH_RESULTS),
+                "search_recency_filter": "noLimit",
+                "content_size": "high",
+            },
+        )
+        return _normalize_search_response(response)
 
 
 class OpenAICompatibleNativeSearchAdapter:
@@ -392,6 +503,17 @@ def build_settings_search_adapters(*, request_json: JsonRequest | None = None) -
             endpoint = os.getenv(f"{provider.upper()}_SEARCH_URL")
             if endpoint:
                 adapters[provider] = NativeSearchAdapter(provider, endpoint=endpoint, api_key=settings.api_key, request_json=request_json)
+            elif provider == "qwen":
+                adapters[provider] = QwenDashScopeSearchAdapter(
+                    api_key=settings.api_key,
+                    model=settings.model_id,
+                    request_json=request_json,
+                )
+            elif provider == "glm":
+                adapters[provider] = GlmWebSearchAdapter(
+                    api_key=settings.api_key,
+                    request_json=request_json,
+                )
             else:
                 adapters[provider] = OpenAICompatibleNativeSearchAdapter(
                     provider,
