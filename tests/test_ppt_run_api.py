@@ -47,8 +47,15 @@ def test_run_is_idempotent_and_events_are_replayable_as_sse(tmp_path: Path) -> N
 
     first = client.post("/api/ppt/runs", headers=headers, json=payload)
     second = client.post("/api/ppt/runs", headers=headers, json=payload)
+    conflicting = client.post(
+        "/api/ppt/runs",
+        headers=headers,
+        json={**payload, "prompt": "另一个任务"},
+    )
     assert first.status_code == 201
     assert second.status_code == 200
+    assert conflicting.status_code == 409
+    assert conflicting.json()["error"]["code"] == "PPT_RUN_CONFLICT"
     assert second.json()["runId"] == "run-api-001"
 
     time.sleep(0.35)

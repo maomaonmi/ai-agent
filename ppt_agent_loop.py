@@ -92,6 +92,8 @@ class AgentRunService:
         resolved_id = run_id or f"run-{uuid.uuid4().hex}"
         existing = self.repository.get_run(resolved_id, owner_scope=owner_scope)
         if existing is not None:
+            if existing.presentation_id != presentation_id or existing.state.get("prompt") != prompt:
+                raise RepositoryConflict("runId is already bound to a different task")
             return existing, False
         state = {
             "prompt": prompt,
