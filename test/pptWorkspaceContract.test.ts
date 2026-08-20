@@ -17,6 +17,7 @@ test("new PPT workspaces do not render the workflow chain before a request", asy
   assert.match(source, /选择生成模型/);
   assert.match(source, /搜索参数/);
   assert.match(source, /searchLimit/);
+  assert.match(source, /演示文稿视觉素材.*fill priority/);
   assert.doesNotMatch(source, /targetWorkflowStep/);
   assert.doesNotMatch(source, /window\.setTimeout\(\(\) => setWorkflowStep/);
 });

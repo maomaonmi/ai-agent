@@ -366,7 +366,7 @@ function SlideSurface({
   const mutedClass = dark ? "text-white/65" : "text-slate-500";
   return (
     <div className={`relative aspect-video w-full overflow-hidden bg-[#111827] ${dark ? "" : "bg-[#f4efe8]"}`}>
-      <Image src={slide.image} alt="演示文稿视觉素材" fill sizes={compact ? "220px" : "(max-width: 1024px) 100vw, 65vw"} className={`object-cover ${dark ? "opacity-75" : "opacity-55"}`} />
+      <Image src={slide.image} alt="演示文稿视觉素材" fill priority sizes={compact ? "220px" : "(max-width: 1024px) 100vw, 65vw"} className={`object-cover ${dark ? "opacity-75" : "opacity-55"}`} />
       <div className={`absolute inset-0 ${dark ? "bg-slate-950/45" : "bg-white/35"}`} />
       <div className={`absolute inset-y-0 left-0 ${compact ? "w-[76%] p-[7%]" : "w-[72%] p-[7.5%]"}`}>
         <p className={`${mutedClass} ${compact ? "text-[5px]" : "text-[clamp(8px,0.72vw,12px)]"} font-semibold tracking-[0.22em]`}>{slide.eyebrow}</p>
