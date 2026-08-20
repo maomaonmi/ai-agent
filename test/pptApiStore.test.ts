@@ -130,6 +130,45 @@ test("run API starts, polls, and cancels a durable agent loop", async () => {
 });
 
 
+test("run event API parses chunked SSE and resumes from the last event id", async () => {
+  const originalFetch = globalThis.fetch;
+  const api = createPptApi("http://ppt.test");
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const encoder = new TextEncoder();
+  const chunks = [
+    "id: 4\nevent: phase.started\ndata: {\"phase\":\"SEARCH_1\"}\n\n",
+    "id: 5\nevent: phase.completed\ndata: {\"phase\":\"SEARCH_1\",\n",
+    "data: \"resultCount\": 3}\n\n",
+    "event: end\ndata: {}\n\n",
+  ];
+  try {
+    globalThis.fetch = async (input, init) => {
+      calls.push({ url: String(input), init });
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream" } });
+    };
+
+    const events: Array<{ id: number; type: string; data: Record<string, unknown> }> = [];
+    await api.subscribeRunEvents("run-1", (event) => events.push(event), { after: 3 });
+
+    assert.deepEqual(events, [
+      { id: 4, type: "phase.started", data: { phase: "SEARCH_1" } },
+      { id: 5, type: "phase.completed", data: { phase: "SEARCH_1", resultCount: 3 } },
+      { id: 0, type: "end", data: {} },
+    ]);
+    assert.equal(calls[0].url, "http://ppt.test/api/ppt/runs/run-1/events?follow=true");
+    assert.equal(new Headers(calls[0].init?.headers).get("Last-Event-ID"), "3");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
 test("market store cancels stale list requests before applying results", async () => {
   const pending: Array<{
     signal: AbortSignal;

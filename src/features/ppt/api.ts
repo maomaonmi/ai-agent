@@ -80,6 +80,17 @@ export interface PptRunResponse {
   updatedAt: string;
 }
 
+export interface PptRunEvent {
+  id: number;
+  type: string;
+  data: Record<string, unknown>;
+}
+
+export interface PptRunEventOptions {
+  after?: number;
+  signal?: AbortSignal;
+}
+
 export interface CreatePptRunInput {
   runId?: string;
   presentationId: string;
@@ -141,7 +152,76 @@ export interface PptApi {
   applyOperations(presentationId: string, input: ApplyPptOperationsInput, signal?: AbortSignal): Promise<PptPresentationResponse>;
   createRun(input: CreatePptRunInput, signal?: AbortSignal): Promise<PptRunResponse>;
   getRun(runId: string, signal?: AbortSignal): Promise<PptRunResponse>;
+  subscribeRunEvents(runId: string, onEvent: (event: PptRunEvent) => void, options?: PptRunEventOptions): Promise<void>;
   cancelRun(runId: string): Promise<PptRunResponse>;
+}
+
+async function consumeSse(
+  response: Response,
+  onEvent: (event: PptRunEvent) => void,
+): Promise<void> {
+  if (!response.body) return;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventId = 0;
+  let eventType = "message";
+  let dataLines: string[] = [];
+
+  const dispatch = () => {
+    if (dataLines.length === 0) {
+      eventType = "message";
+      eventId = 0;
+      return;
+    }
+    const raw = dataLines.join("\n");
+    let data: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      data = parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : { value: parsed };
+    } catch {
+      data = { value: raw };
+    }
+    onEvent({ id: eventId, type: eventType, data });
+    eventType = "message";
+    eventId = 0;
+    dataLines = [];
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const rawLine = buffer.slice(0, newlineIndex).replace(/\r$/, "");
+      buffer = buffer.slice(newlineIndex + 1);
+      if (rawLine === "") dispatch();
+      else if (!rawLine.startsWith(":")) {
+        const separator = rawLine.indexOf(":");
+        const field = separator >= 0 ? rawLine.slice(0, separator) : rawLine;
+        const valueText = separator >= 0 ? rawLine.slice(separator + 1).replace(/^ /, "") : "";
+        if (field === "id") {
+          const parsedId = Number(valueText);
+          if (Number.isFinite(parsedId)) eventId = parsedId;
+        } else if (field === "event") eventType = valueText;
+        else if (field === "data") dataLines.push(valueText);
+      }
+      newlineIndex = buffer.indexOf("\n");
+    }
+    if (done) break;
+  }
+  if (buffer.trim() || dataLines.length > 0) {
+    if (buffer) {
+      const rawLine = buffer.replace(/\r$/, "");
+      const separator = rawLine.indexOf(":");
+      const field = separator >= 0 ? rawLine.slice(0, separator) : rawLine;
+      const valueText = separator >= 0 ? rawLine.slice(separator + 1).replace(/^ /, "") : "";
+      if (field === "data") dataLines.push(valueText);
+    }
+    dispatch();
+  }
 }
 
 export function createPptApi(baseUrl = DEFAULT_API_BASE_URL): PptApi {
@@ -209,6 +289,26 @@ export function createPptApi(baseUrl = DEFAULT_API_BASE_URL): PptApi {
       `/api/ppt/runs/${encodeURIComponent(runId)}`,
       { signal },
     ),
+    subscribeRunEvents: async (runId, onEvent, options = {}) => {
+      const search = new URLSearchParams({ follow: "true" });
+      const headers = new Headers();
+      if (options.after && options.after > 0) headers.set("Last-Event-ID", String(options.after));
+      const response = await fetch(`${baseUrl.replace(/\/$/, "")}/api/ppt/runs/${encodeURIComponent(runId)}/events?${search}`, {
+        signal: options.signal,
+        headers,
+      });
+      if (!response.ok) {
+        const payload = await jsonOrEmpty(response);
+        const apiError = (payload ?? {}) as ApiErrorPayload;
+        throw new PptApiError(
+          apiError.error?.code ?? "PPT_EVENT_STREAM_FAILED",
+          apiError.error?.message ?? `PPT event stream failed (${response.status})`,
+          response.status,
+          apiError.error?.details,
+        );
+      }
+      await consumeSse(response, onEvent);
+    },
     cancelRun: (runId) => request<PptRunResponse>(
       `/api/ppt/runs/${encodeURIComponent(runId)}/cancel`,
       { method: "POST" },
