@@ -458,7 +458,7 @@ function WorkflowPanel({
     <aside aria-label="AI 工作流" className="flex min-h-0 w-full flex-col border-r border-slate-200 bg-white">
       <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4">
         <div className="flex items-center gap-2"><span className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-100 text-violet-700"><WandSparkles size={16} /></span><div><p className="text-sm font-semibold text-slate-950">AI PPT 助手</p><p className="text-[10px] text-slate-400">对话驱动的演示创作</p></div></div>
-        <button type="button" onClick={onToggle} aria-label={running ? "暂停生成" : "继续生成"} className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50">{running ? <Pause size={15} /> : <Play size={15} />}</button>
+        <button type="button" onClick={onToggle} aria-label={started ? (running ? "暂停生成" : "继续生成") : "等待你的指令"} disabled={!started} className="flex h-9 w-9 items-center justify-center rounded-full border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300">{running ? <Pause size={15} /> : <Play size={15} />}</button>
       </div>
 
       <div ref={messagesRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
@@ -469,7 +469,7 @@ function WorkflowPanel({
             </div>
           ))}
 
-          <section className="rounded-2xl border border-slate-200 bg-white shadow-sm">
+          {started && <section aria-label="AI 工作流链路" className="rounded-2xl border border-slate-200 bg-white shadow-sm">
             <button type="button" aria-expanded={workflowOpen} onClick={() => setWorkflowOpen((value) => !value)} className="flex w-full items-center gap-3 px-4 py-3 text-left">
               <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-100 text-violet-700"><FileSearch size={15} /></span>
               <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-900">AI 工作流链路</span><span className="mt-0.5 block text-[11px] text-slate-500">{started ? `${Math.min(step + 1, workflow.length)} / ${workflow.length} 阶段 · ${running ? "正在执行" : "已暂停"}` : "等待你的指令后开始"} · 每次不超过 20 条</span></span>
@@ -493,7 +493,7 @@ function WorkflowPanel({
               </div>
               <div className="mt-3 border-t border-slate-100 pt-3"><div className="flex items-center justify-between"><span className="text-[11px] font-semibold text-slate-700">素材来源</span><span className="text-[10px] text-slate-400">可追溯</span></div><div className="mt-2 grid grid-cols-3 gap-2">{generatedAssets.map((asset, index) => <div key={asset} className="relative aspect-square overflow-hidden rounded-lg bg-slate-100"><Image src={asset} alt={index === 0 ? "AI 生成封面" : "视觉素材"} fill priority sizes="96px" className="object-cover" /><span className="absolute inset-x-1 bottom-1 rounded bg-slate-950/70 px-1 py-0.5 text-center text-[8px] text-white">{index === 1 ? "网页图片" : "AI 生成图片"}</span></div>)}</div><p className="mt-2 flex items-center gap-1.5 text-[10px] text-slate-500"><FileSearch size={11} />3 个带图网页 · 3 张 AI 图片</p></div>
             </div>}
-          </section>
+          </section>}
         </div>
       </div>
 
@@ -502,7 +502,7 @@ function WorkflowPanel({
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} aria-label="AI PPT 对话输入" placeholder="描述你想制作的 PPT…" rows={2} className="w-full resize-none bg-transparent px-2 py-1 text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400" />
           <div className="flex items-center justify-between px-1"><span className="text-[10px] text-slate-400">Enter 发送 · Shift + Enter 换行</span><button type="button" onClick={submit} aria-label="发送 PPT 需求" disabled={!draft.trim()} className="flex h-8 w-8 items-center justify-center rounded-full bg-violet-600 text-white hover:bg-violet-500 disabled:bg-slate-200 disabled:text-slate-400"><ArrowRight size={15} /></button></div>
         </div>
-        <button type="button" onClick={onRestart} className="mt-2 flex h-8 w-full items-center justify-center gap-2 rounded-lg text-[11px] font-medium text-slate-500 hover:bg-slate-50"><RefreshCcw size={12} /> 重新规划并生成</button>
+        {started && <button type="button" onClick={onRestart} className="mt-2 flex h-8 w-full items-center justify-center gap-2 rounded-lg text-[11px] font-medium text-slate-500 hover:bg-slate-50"><RefreshCcw size={12} /> 重新规划并生成</button>}
       </div>
     </aside>
   );
