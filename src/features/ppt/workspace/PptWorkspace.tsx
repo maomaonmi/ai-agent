@@ -42,7 +42,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 
-import { PptApiError, pptApi, type PptPresentationResponse } from "../api.ts";
+import { PptApiError, pptApi, type PptPresentationResponse, type PptRunEvent } from "../api.ts";
 import type { PresentationDocument } from "../types.ts";
 
 type CanvasItem =
@@ -427,6 +427,7 @@ function WorkflowPanel({
   step,
   running,
   started,
+  details,
   messages,
   onToggle,
   onRestart,
@@ -435,6 +436,7 @@ function WorkflowPanel({
   step: number;
   running: boolean;
   started: boolean;
+  details: Record<string, string>;
   messages: ChatMessage[];
   onToggle: () => void;
   onRestart: () => void;
@@ -485,7 +487,7 @@ function WorkflowPanel({
                   return <div key={item.id} className="rounded-xl border border-transparent hover:border-slate-200">
                     <button type="button" aria-expanded={expanded} onClick={() => setExpandedSteps((current) => ({ ...current, [item.id]: !expanded }))} className="flex w-full items-center gap-2 px-2.5 py-2 text-left">
                       <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full border ${complete ? "border-violet-600 bg-violet-600 text-white" : active ? "border-violet-300 bg-violet-50 text-violet-700" : "border-slate-200 text-slate-300"}`}>{complete ? <Check size={12} /> : active ? <LoaderCircle size={12} className={running ? "animate-spin" : ""} /> : <Circle size={7} />}</span>
-                      <span className={`min-w-0 flex-1 truncate text-xs font-semibold ${complete || active ? "text-slate-900" : "text-slate-400"}`}>{item.label}</span><span className="shrink-0 text-[10px] text-slate-400">{item.meta}</span><ChevronDown size={12} className={`shrink-0 text-slate-300 transition ${expanded ? "rotate-180" : ""}`} />
+                      <span className={`min-w-0 flex-1 truncate text-xs font-semibold ${complete || active ? "text-slate-900" : "text-slate-400"}`}>{item.label}</span><span className="shrink-0 text-[10px] text-slate-400">{details[item.id] ?? item.meta}</span><ChevronDown size={12} className={`shrink-0 text-slate-300 transition ${expanded ? "rotate-180" : ""}`} />
                     </button>
                     {expanded && <div className="ml-10 mr-2 pb-2 text-[11px] leading-5 text-slate-500"><p>{item.description}</p>{active && item.id.startsWith("search") && <div className="mt-2 space-y-1 text-violet-700">{["行业研究与权威报告", "产品案例与数据证据", "关键观点交叉验证"].map((label) => <div key={label} className="flex items-center gap-1.5"><Search size={10} />{label}</div>)}</div>}</div>}
                   </div>;
@@ -518,9 +520,8 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const [activeSlideId, setActiveSlideId] = useState(() => freshFromSidebar ? freshSlides[0].id : initialSlides[0].id);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
   const [workflowStep, setWorkflowStep] = useState(0);
-  const [targetWorkflowStep, setTargetWorkflowStep] = useState(0);
+  const [workflowDetails, setWorkflowDetails] = useState<Record<string, string>>({});
   const [running, setRunning] = useState(false);
-  const [runTerminal, setRunTerminal] = useState(false);
   const [zoom, setZoom] = useState(82);
   const [exporting, setExporting] = useState(false);
   const [mobileWorkflowOpen, setMobileWorkflowOpen] = useState(false);
@@ -536,7 +537,8 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const canvasRef = useRef<HTMLDivElement>(null);
   const serverPresentationRef = useRef<PptPresentationResponse | null>(null);
   const persistenceQueueRef = useRef(Promise.resolve());
-  const runPollRef = useRef<number | null>(null);
+  const runEventControllerRef = useRef<AbortController | null>(null);
+  const lastRunEventIdRef = useRef(0);
   const clientPresentationIdRef = useRef(presentationId === "new" ? `presentation-${crypto.randomUUID?.() ?? `${Date.now()}-${Math.round(Math.random() * 1000)}`}` : presentationId);
   const activeSlide = slides.find((slide) => slide.id === activeSlideId) ?? slides[0];
   const activeIndex = slides.findIndex((slide) => slide.id === activeSlide.id);
@@ -581,20 +583,8 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   }, [freshFromSidebar, presentationId, router, templateId]);
 
   useEffect(() => () => {
-    if (runPollRef.current !== null) window.clearTimeout(runPollRef.current);
+    runEventControllerRef.current?.abort();
   }, []);
-
-  useEffect(() => {
-    if (!running) return;
-    if (workflowStep < targetWorkflowStep) {
-      const timer = window.setTimeout(() => setWorkflowStep((value) => Math.min(targetWorkflowStep, value + 1)), 720);
-      return () => window.clearTimeout(timer);
-    }
-    if (runTerminal && workflowStep >= targetWorkflowStep) {
-      const timer = window.setTimeout(() => setRunning(false), 720);
-      return () => window.clearTimeout(timer);
-    }
-  }, [runTerminal, running, targetWorkflowStep, workflowStep]);
 
   const statusText = useMemo(() => {
     if (!started) return "等待你的指令";
@@ -634,6 +624,9 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const startAgentRun = async (prompt: string) => {
     const currentPresentation = serverPresentationRef.current;
     if (!currentPresentation) return;
+    runEventControllerRef.current?.abort();
+    const eventController = new AbortController();
+    runEventControllerRef.current = eventController;
     try {
       const run = await pptApi.createRun({
         presentationId: currentPresentation.presentationId,
@@ -641,34 +634,73 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         maxIterations: 3,
       });
       setRunId(run.runId);
-      setTargetWorkflowStep(workflowStepForPhase(run.phase));
-      const poll = async () => {
-        try {
-          const snapshot = await pptApi.getRun(run.runId);
-          setTargetWorkflowStep((current) => Math.max(current, workflowStepForPhase(snapshot.phase)));
-          if (snapshot.status === "COMPLETED" || snapshot.status === "CANCELLED" || snapshot.status === "FAILED") {
-            runPollRef.current = null;
-            setRunTerminal(true);
-            return;
-          }
-          runPollRef.current = window.setTimeout(() => void poll(), 220);
-        } catch {
-          runPollRef.current = null;
+      lastRunEventIdRef.current = 0;
+      setWorkflowStep(workflowStepForPhase(run.phase));
+      setRunning(run.status === "RUNNING" || run.status === "QUEUED");
+
+      const handleRunEvent = (event: PptRunEvent) => {
+        if (event.id > 0) lastRunEventIdRef.current = Math.max(lastRunEventIdRef.current, event.id);
+        const phase = typeof event.data.phase === "string" ? event.data.phase : "";
+        const phaseStep = phase ? workflowStepForPhase(phase) : null;
+        if (event.type === "phase.started" && phaseStep !== null) {
+          setWorkflowStep(phaseStep);
+          setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: "执行中" }));
+          setRunning(true);
+          return;
+        }
+        if (event.type === "phase.completed" && phaseStep !== null) {
+          setWorkflowStep(Math.min(workflow.length - 1, phaseStep + 1));
+          const resultCount = typeof event.data.resultCount === "number" ? event.data.resultCount : null;
+          const candidateCount = typeof event.data.candidateCount === "number" ? event.data.candidateCount : null;
+          const selectedCount = typeof event.data.selectedCount === "number" ? event.data.selectedCount : null;
+          const downloadedCount = typeof event.data.downloadedCount === "number" ? event.data.downloadedCount : null;
+          const generatedCount = typeof event.data.generatedCount === "number" ? event.data.generatedCount : null;
+          const requiredCount = typeof event.data.requiredCount === "number" ? event.data.requiredCount : null;
+          const slideCount = typeof event.data.slideCount === "number" ? event.data.slideCount : null;
+          const mode = event.data.mode === "provider" ? "实时 provider" : event.data.mode === "demo-fallback" ? "未配置 provider" : null;
+          const meta = resultCount !== null ? `${resultCount} 条${mode ? ` · ${mode}` : ""}`
+            : candidateCount !== null && selectedCount !== null ? `${candidateCount} 张候选 · ${selectedCount} 张采用${downloadedCount !== null ? ` · 已下载 ${downloadedCount}` : ""}`
+              : generatedCount !== null && requiredCount !== null ? `${generatedCount} / ${requiredCount} 张${mode ? ` · ${mode}` : ""}`
+                : slideCount !== null ? `${slideCount} 页大纲` : "已完成";
+          setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: meta }));
+          return;
+        }
+        if (event.type === "run.completed") {
+          setWorkflowStep(workflow.length - 1);
+          setRunning(false);
+          setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "已完成实时搭建。你可以在右侧继续编辑每一页，或导出 PPTX。" }]);
+          return;
+        }
+        if (event.type === "run.cancelled") {
+          setRunning(false);
+          setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "这次生成已暂停，你可以继续编辑当前页面或重新规划。" }]);
+          return;
+        }
+        if (event.type === "run.failed") {
+          setRunning(false);
+          const message = typeof event.data.message === "string" ? event.data.message : "实时生成失败，请检查服务配置后重试。";
+          setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: message }]);
         }
       };
-      runPollRef.current = window.setTimeout(() => void poll(), 120);
-    } catch {
-      // The staged client animation remains the offline fallback when the API is unavailable.
-      setTargetWorkflowStep(workflow.length - 1);
-      setRunTerminal(true);
+
+      await pptApi.subscribeRunEvents(run.runId, handleRunEvent, {
+        after: lastRunEventIdRef.current,
+        signal: eventController.signal,
+      });
+    } catch (error) {
+      if (eventController.signal.aborted) return;
+      setRunning(false);
+      const message = error instanceof PptApiError
+        ? `${error.message}（实时事件流已断开）`
+        : "实时事件流连接失败，请检查后端服务后重试。";
+      setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: message }]);
     }
   };
 
   const sendChatMessage = (message: string) => {
     setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: message }, { id: nextId("assistant"), role: "assistant", text: "收到。我会先拆解需求，再进行多轮检索和素材收集；你可以在右侧实时看到每一页的搭建过程。" }]);
     setWorkflowStep(0);
-    setTargetWorkflowStep(0);
-    setRunTerminal(false);
+    setWorkflowDetails({});
     setRunning(true);
     void startAgentRun(message);
   };
@@ -676,8 +708,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const restartWorkflow = () => {
     setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "我会重新规划这一版结构，并从第一轮资料检索开始。" }]);
     setWorkflowStep(0);
-    setTargetWorkflowStep(0);
-    setRunTerminal(false);
+    setWorkflowDetails({});
     setRunning(true);
     void startAgentRun("重新规划当前演示文稿");
   };
@@ -814,11 +845,11 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <div className="hidden min-h-0 shrink-0 lg:flex" style={{ width: leftWidth }}><WorkflowPanel step={workflowStep} running={running} started={started} messages={chatMessages} onToggle={() => setRunning((value) => !value)} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /></div>
+        <div className="hidden min-h-0 shrink-0 lg:flex" style={{ width: leftWidth }}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} messages={chatMessages} onToggle={() => setRunning((value) => !value)} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /></div>
         <div role="separator" aria-label="调整 AI 对话区宽度" aria-orientation="vertical" onPointerDown={beginResize} className="hidden w-1 shrink-0 cursor-col-resize bg-slate-200 transition hover:bg-violet-300 lg:block" />
         {mobileWorkflowOpen && (
           <div className="fixed inset-0 z-50 flex bg-slate-950/30 lg:hidden" onClick={() => setMobileWorkflowOpen(false)}>
-            <div className="relative flex h-full w-[min(92vw,430px)]" onClick={(event) => event.stopPropagation()}><WorkflowPanel step={workflowStep} running={running} started={started} messages={chatMessages} onToggle={() => setRunning((value) => !value)} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /><button type="button" aria-label="关闭工作流" onClick={() => setMobileWorkflowOpen(false)} className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500 shadow"><X size={15} /></button></div>
+            <div className="relative flex h-full w-[min(92vw,430px)]" onClick={(event) => event.stopPropagation()}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} messages={chatMessages} onToggle={() => setRunning((value) => !value)} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /><button type="button" aria-label="关闭工作流" onClick={() => setMobileWorkflowOpen(false)} className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500 shadow"><X size={15} /></button></div>
           </div>
         )}
 

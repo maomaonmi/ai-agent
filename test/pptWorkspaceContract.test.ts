@@ -10,7 +10,9 @@ test("new PPT workspaces do not render the workflow chain before a request", asy
   assert.match(source, /\{started && <section aria-label="AI 工作流链路"/);
   assert.match(source, /disabled=\{!started\}/);
   assert.match(source, /\{started && <button type="button" onClick=\{onRestart\}/);
-  assert.match(source, /targetWorkflowStep/);
-  assert.match(source, /workflowStep < targetWorkflowStep/);
-  assert.doesNotMatch(source, /setWorkflowStep\(workflowStepForPhase\(snapshot\.phase\)\)/);
+  assert.match(source, /subscribeRunEvents/);
+  assert.match(source, /event\.type === "phase\.started"/);
+  assert.match(source, /event\.type === "phase\.completed"/);
+  assert.doesNotMatch(source, /targetWorkflowStep/);
+  assert.doesNotMatch(source, /window\.setTimeout\(\(\) => setWorkflowStep/);
 });
