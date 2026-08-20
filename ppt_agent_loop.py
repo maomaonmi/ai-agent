@@ -302,7 +302,9 @@ class AgentRunService:
                 self._emit(run_id, owner_scope, "phase.completed", {"phase": phase, "label": label, **phase_details}, state_patch=state_patch)
             self._emit(run_id, owner_scope, "run.completed", {"slideCount": 16}, status="COMPLETED", phase="REVIEW")
         except Exception as exc:  # pragma: no cover - defensive worker boundary
-            self._emit(run_id, owner_scope, "run.failed", {"message": str(exc)[:500]}, status="FAILED", phase="REVIEW")
+            current = self.repository.get_run(run_id, owner_scope=owner_scope)
+            failed_phase = current.phase if current is not None else "REVIEW"
+            self._emit(run_id, owner_scope, "run.failed", {"phase": failed_phase, "message": str(exc)[:500]}, status="FAILED", phase=failed_phase)
 
     def get(self, run_id: str, *, owner_scope: str) -> RunRecord:
         record = self.repository.get_run(run_id, owner_scope=owner_scope)
