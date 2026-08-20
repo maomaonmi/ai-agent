@@ -75,6 +75,7 @@ type ChatMessage = { id: string; role: "user" | "assistant"; text: string };
 type ModelProvider = "deepseek" | "qwen" | "glm";
 type SearchProvider = "auto" | "firecrawl" | "qwen" | "glm";
 type SearchSource = { title: string; url: string; imageUrl?: string; pageUrl?: string };
+type AssetProvenance = { imageUrl: string; pageUrl?: string; alt?: string };
 type RunConfig = { modelProvider: ModelProvider; searchProvider: SearchProvider; searchLimit: number };
 
 
@@ -345,6 +346,23 @@ function imageUrlsFromRunState(value: unknown): string[] {
   });
 }
 
+function assetProvenanceFromRunState(value: unknown): AssetProvenance[] {
+  if (!value || typeof value !== "object") return [];
+  const assets = (value as Record<string, unknown>).assets;
+  if (!Array.isArray(assets)) return [];
+  return assets.flatMap((asset) => {
+    if (!asset || typeof asset !== "object") return [];
+    const item = asset as Record<string, unknown>;
+    const imageUrl = typeof item.imageUrl === "string" && /^https?:\/\//.test(item.imageUrl) ? item.imageUrl : "";
+    if (!imageUrl) return [];
+    return [{
+      imageUrl,
+      ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}),
+      ...(typeof item.alt === "string" ? { alt: item.alt } : {}),
+    }];
+  });
+}
+
 function searchSourcesFromRunState(value: unknown): Record<string, SearchSource[]> {
   if (!Array.isArray(value)) return {};
   const sources: Record<string, SearchSource[]> = {};
@@ -498,6 +516,7 @@ function WorkflowPanel({
   details,
   searchSources,
   assetSources,
+  assetProvenance,
   runConfig,
   messages,
   onCancel,
@@ -510,6 +529,7 @@ function WorkflowPanel({
   details: Record<string, string>;
   searchSources: Record<string, SearchSource[]>;
   assetSources: Record<string, string[]>;
+  assetProvenance: Record<string, AssetProvenance[]>;
   runConfig: RunConfig;
   messages: ChatMessage[];
   onCancel: () => void;
@@ -536,8 +556,9 @@ function WorkflowPanel({
   const materialPreviews = [...(assetSources["web-assets"] ?? []), ...(assetSources["ai-assets"] ?? [])].slice(0, 6);
   const renderAssetThumbnails = (stepId: string, label: string) => {
     const assets = assetSources[stepId] ?? [];
+    const provenance = assetProvenance[stepId] ?? [];
     if (assets.length === 0) return <div className="mt-2 rounded-lg bg-slate-50 px-3 py-3 text-[10px] text-slate-400">{label}完成后会在这里显示缩略图</div>;
-    return <div className="mt-2 grid grid-cols-3 gap-1.5">{assets.slice(0, 6).map((asset, index) => <img key={`${asset}-${index}`} src={asset} alt={`${label} ${index + 1}`} loading="lazy" className="aspect-video w-full rounded-md border border-slate-100 bg-slate-100 object-cover" />)}</div>;
+    return <div className="mt-2 grid grid-cols-3 gap-1.5">{assets.slice(0, 6).map((asset, index) => { const source = provenance[index]; const image = <img src={asset} alt={source?.alt || `${label} ${index + 1}`} loading="lazy" className="aspect-video w-full rounded-md border border-slate-100 bg-slate-100 object-cover" />; return source?.pageUrl ? <a key={`${asset}-${index}`} href={source.pageUrl} target="_blank" rel="noreferrer" title="打开素材来源页面">{image}</a> : <span key={`${asset}-${index}`}>{image}</span>; })}</div>;
   };
   return (
     <aside aria-label="AI 工作流" className="flex min-h-0 w-full flex-col border-r border-slate-200 bg-white">
@@ -576,7 +597,7 @@ function WorkflowPanel({
                   </div>;
                 })}
               </div>
-              <div className="mt-3 border-t border-slate-100 pt-3"><div className="flex items-center justify-between"><span className="text-[11px] font-semibold text-slate-700">素材来源</span><span className="text-[10px] text-slate-400">可追溯</span></div><div className="mt-2 grid grid-cols-3 gap-2">{materialPreviews.length > 0 ? materialPreviews.map((asset, index) => <div key={`${asset}-${index}`} className="relative aspect-square overflow-hidden rounded-lg bg-slate-100"><img src={asset} alt={index < (assetSources["web-assets"] ?? []).length ? "网页图片素材" : "AI 生成图片"} className="h-full w-full object-cover" /><span className="absolute inset-x-1 bottom-1 rounded bg-slate-950/70 px-1 py-0.5 text-center text-[8px] text-white">{index < (assetSources["web-assets"] ?? []).length ? "网页图片" : "AI 图片"}</span></div>) : <div className="col-span-3 rounded-lg bg-slate-50 px-3 py-4 text-center text-[11px] text-slate-400">等待真实素材下载或生成后显示</div>}</div><p className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500"><FileSearch size={11} />网页：{webAssetsMeta} · AI：{aiAssetsMeta}</p></div>
+              <div className="mt-3 border-t border-slate-100 pt-3"><div className="flex items-center justify-between"><span className="text-[11px] font-semibold text-slate-700">素材来源</span><span className="text-[10px] text-slate-400">可追溯</span></div><div className="mt-2 grid grid-cols-3 gap-2">{materialPreviews.length > 0 ? materialPreviews.map((asset, index) => <div key={`${asset}-${index}`} className="relative aspect-square overflow-hidden rounded-lg bg-slate-100"><img src={asset} alt={index < (assetSources["web-assets"] ?? []).length ? "网页图片素材" : "AI 生成图片"} className="h-full w-full object-cover" /><span className="absolute inset-x-1 bottom-1 rounded bg-slate-950/70 px-1 py-0.5 text-center text-[8px] text-white">{index < (assetSources["web-assets"] ?? []).length ? "网页图片" : "AI 图片"}</span></div>) : <div className="col-span-3 rounded-lg bg-slate-50 px-3 py-4 text-center text-[11px] text-slate-400">等待真实素材下载或生成后显示</div>}</div><div className="mt-2 space-y-1">{[...(assetProvenance["web-assets"] ?? []), ...(assetProvenance["ai-assets"] ?? [])].slice(0, 6).map((source, index) => <a key={`${source.imageUrl}-${index}`} href={source.pageUrl || source.imageUrl} target="_blank" rel="noreferrer" className="block truncate text-[10px] text-violet-700 hover:underline">{index + 1}. {source.pageUrl || source.imageUrl}</a>)}</div><p className="mt-2 flex flex-wrap items-center gap-1.5 text-[10px] text-slate-500"><FileSearch size={11} />网页：{webAssetsMeta} · AI：{aiAssetsMeta}</p></div>
             </div>}
           </section>}
         </div>
@@ -608,6 +629,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const [workflowDetails, setWorkflowDetails] = useState<Record<string, string>>({});
   const [searchSources, setSearchSources] = useState<Record<string, SearchSource[]>>({});
   const [assetSources, setAssetSources] = useState<Record<string, string[]>>({});
+  const [assetProvenance, setAssetProvenance] = useState<Record<string, AssetProvenance[]>>({});
   const [runConfig, setRunConfig] = useState<RunConfig>({ modelProvider: "deepseek", searchProvider: "auto", searchLimit: 20 });
   const [running, setRunning] = useState(false);
   const [zoom, setZoom] = useState(82);
@@ -798,6 +820,11 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
               return typeof candidate.imageUrl === "string" && /^https?:\/\//.test(candidate.imageUrl) ? [candidate.imageUrl] : [];
             });
             setAssetSources((current) => ({ ...current, [workflow[phaseStep].id]: urls }));
+            setAssetProvenance((current) => ({ ...current, [workflow[phaseStep].id]: assets.flatMap((asset) => {
+              if (!asset || typeof asset !== "object") return [];
+              const item = asset as Record<string, unknown>;
+              return typeof item.imageUrl === "string" ? [{ imageUrl: item.imageUrl, ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}), ...(typeof item.alt === "string" ? { alt: item.alt } : {}) }] : [];
+            }) }));
           }
           return;
         }
@@ -821,6 +848,11 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
               return typeof candidate.imageUrl === "string" && /^https?:\/\//.test(candidate.imageUrl) ? [candidate.imageUrl] : [];
             });
             setAssetSources((current) => ({ ...current, [workflow[phaseStep].id]: urls }));
+            setAssetProvenance((current) => ({ ...current, [workflow[phaseStep].id]: assets.flatMap((asset) => {
+              if (!asset || typeof asset !== "object") return [];
+              const item = asset as Record<string, unknown>;
+              return typeof item.imageUrl === "string" ? [{ imageUrl: item.imageUrl, ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}), ...(typeof item.alt === "string" ? { alt: item.alt } : {}) }] : [];
+            }) }));
           }
           return;
         }
@@ -874,6 +906,10 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           "web-assets": imageUrlsFromRunState(state.webImages),
           "ai-assets": imageUrlsFromRunState(state.aiImages),
         });
+        setAssetProvenance({
+          "web-assets": assetProvenanceFromRunState(state.webImages),
+          "ai-assets": assetProvenanceFromRunState(state.aiImages),
+        });
         const nextConfig: RunConfig = {
           modelProvider: state.modelProvider === "qwen" || state.modelProvider === "glm" ? state.modelProvider : "deepseek",
           searchProvider: state.searchProvider === "firecrawl" || state.searchProvider === "qwen" || state.searchProvider === "glm" ? state.searchProvider : "auto",
@@ -900,6 +936,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     setWorkflowDetails({});
     setSearchSources({});
     setAssetSources({});
+    setAssetProvenance({});
     setRunning(true);
     void startAgentRun(message, config);
   };
@@ -910,6 +947,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     setWorkflowDetails({});
     setSearchSources({});
     setAssetSources({});
+    setAssetProvenance({});
     setRunning(true);
     void startAgentRun("重新规划当前演示文稿", runConfig);
   };
@@ -1057,11 +1095,11 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <div className="hidden min-h-0 shrink-0 lg:flex" style={{ width: leftWidth }}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} searchSources={searchSources} assetSources={assetSources} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /></div>
+        <div className="hidden min-h-0 shrink-0 lg:flex" style={{ width: leftWidth }}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} searchSources={searchSources} assetSources={assetSources} assetProvenance={assetProvenance} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /></div>
         <div role="separator" aria-label="调整 AI 对话区宽度" aria-orientation="vertical" onPointerDown={beginResize} className="hidden w-1 shrink-0 cursor-col-resize bg-slate-200 transition hover:bg-violet-300 lg:block" />
         {mobileWorkflowOpen && (
           <div className="fixed inset-0 z-50 flex bg-slate-950/30 lg:hidden" onClick={() => setMobileWorkflowOpen(false)}>
-            <div className="relative flex h-full w-[min(92vw,430px)]" onClick={(event) => event.stopPropagation()}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} searchSources={searchSources} assetSources={assetSources} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /><button type="button" aria-label="关闭工作流" onClick={() => setMobileWorkflowOpen(false)} className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500 shadow"><X size={15} /></button></div>
+            <div className="relative flex h-full w-[min(92vw,430px)]" onClick={(event) => event.stopPropagation()}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} searchSources={searchSources} assetSources={assetSources} assetProvenance={assetProvenance} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /><button type="button" aria-label="关闭工作流" onClick={() => setMobileWorkflowOpen(false)} className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500 shadow"><X size={15} /></button></div>
           </div>
         )}
 
