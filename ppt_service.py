@@ -37,8 +37,32 @@ class TemplatePage:
 
 
 class PptService:
+    DEFAULT_SYSTEM_TEMPLATES = (
+        ("aurora-strategy", "极光战略发布", "适合商业策略、产品发布与年度汇报", "BUSINESS", 18),
+        ("quiet-editorial", "静谧编辑叙事", "杂志感图文排版，适合作品集与品牌故事", "CREATIVE", 16),
+        ("future-data", "未来数据洞察", "科技数据与研究结论的高密度呈现", "TECHNOLOGY", 20),
+        ("brand-growth", "品牌增长提案", "从市场机会到执行路径的一体化方案", "MARKETING", 14),
+        ("course-framework", "课程知识框架", "清晰的章节结构与教学重点呈现", "EDUCATION", 22),
+        ("research-brief", "研究简报", "适合调研结论、案例分析与学术分享", "RESEARCH", 17),
+    )
+
     def __init__(self, repository: PptRepository) -> None:
         self.repository = repository
+
+    def ensure_system_templates(self) -> None:
+        for template_id, name, description, scene, page_count in self.DEFAULT_SYSTEM_TEMPLATES:
+            if self.repository.get_template(template_id, owner_scope="system") is not None:
+                continue
+            self.repository.create_template(
+                template_id=template_id,
+                owner_scope="system",
+                name=name,
+                description=description,
+                scene=scene,
+                source="SYSTEM",
+                status="READY",
+                manifest={"pageCount": page_count, "theme": "Aurora"},
+            )
 
     @staticmethod
     def _now() -> str:

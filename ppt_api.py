@@ -102,6 +102,7 @@ def create_ppt_router(
 ) -> APIRouter:
     repository.initialize()
     service = PptService(repository)
+    service.ensure_system_templates()
     router = APIRouter(prefix="/api/ppt", tags=["ppt"])
 
     @router.post("/presentations", status_code=status.HTTP_201_CREATED, response_model=None)
