@@ -239,7 +239,12 @@ class AgentRunService:
             material_gate = MaterialGate(SourceLedger())
             search_coordinator = SearchCoordinator(self.search_adapters)
             self._emit(run_id, owner_scope, "run.started", {"phase": "PLAN"}, status="RUNNING", phase="PLAN")
-            for phase, label, details in self._PHASES:
+            phase_order = {name: index for index, (name, _label, _details) in enumerate(self._PHASES)}
+            restored = self.repository.get_run(run_id, owner_scope=owner_scope)
+            start_index = phase_order.get(restored.phase if restored is not None else "PLAN", 0)
+            for phase_index, (phase, label, details) in enumerate(self._PHASES):
+                if phase_index < start_index:
+                    continue
                 current = self.repository.get_run(run_id, owner_scope=owner_scope)
                 if current is None or current.status == "CANCELLED":
                     return
@@ -470,7 +475,15 @@ class AgentRunService:
                     raise RuntimeError("material gates are not satisfied")
                 elif phase == "PLAN":
                     state_patch["iteration"] = details["iteration"]
-                self._emit(run_id, owner_scope, "phase.completed", {"phase": phase, "label": label, **phase_details}, state_patch=state_patch)
+                next_phase = self._PHASES[min(phase_index + 1, len(self._PHASES) - 1)][0]
+                self._emit(
+                    run_id,
+                    owner_scope,
+                    "phase.completed",
+                    {"phase": phase, "label": label, **phase_details},
+                    phase=next_phase,
+                    state_patch=state_patch,
+                )
             self._emit(run_id, owner_scope, "run.completed", {"slideCount": 16}, status="COMPLETED", phase="REVIEW")
         except Exception as exc:  # pragma: no cover - defensive worker boundary
             current = self.repository.get_run(run_id, owner_scope=owner_scope)
