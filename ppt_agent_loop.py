@@ -69,6 +69,7 @@ class AgentRunService:
     ) -> None:
         self.repository = repository
         self._locks: dict[str, threading.Lock] = {}
+        self._settings_backed = search_adapters is None
         # Providers are optional at runtime: use the same persisted settings as
         # the settings UI first, then fall back to environment variables for
         # headless deployments. Credentials never enter the durable run state.
@@ -91,6 +92,22 @@ class AgentRunService:
             image_downloader = SafeImageDownloader()
         self.ai_image_adapter = ai_image_adapter
         self.image_downloader = image_downloader
+
+    def _refresh_settings_backed_adapters(self) -> None:
+        """Reload persisted provider profiles for every run after a settings save."""
+
+        if not self._settings_backed:
+            return
+        from ppt_materials import build_default_search_adapters, build_settings_ai_image_adapter, build_settings_search_adapters
+
+        self.search_adapters = build_settings_search_adapters()
+        if not self.search_adapters:
+            self.search_adapters = build_default_search_adapters()
+        self.ai_image_adapter = build_settings_ai_image_adapter()
+        if self.ai_image_adapter is None and os.getenv("AI_IMAGE_API_KEY") and os.getenv("AI_IMAGE_URL"):
+            from ppt_materials import AiImageAdapter
+
+            self.ai_image_adapter = AiImageAdapter()
 
     def _lock(self, run_id: str) -> threading.Lock:
         return self._locks.setdefault(run_id, threading.Lock())
@@ -185,6 +202,7 @@ class AgentRunService:
 
     def _execute(self, run_id: str, owner_scope: str) -> None:
         try:
+            self._refresh_settings_backed_adapters()
             from ppt_materials import MaterialGate, SearchCoordinator, SourceLedger, generate_required_ai_images
 
             material_gate = MaterialGate(SourceLedger())
