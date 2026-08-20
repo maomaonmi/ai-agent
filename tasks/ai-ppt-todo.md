@@ -66,9 +66,9 @@
 
 **Acceptance criteria:**
 
-- [ ] 新增/删除/排序页与全部元素操作可归约。
-- [ ] 重复 operationId 不重复应用。
-- [ ] 过期 baseRevision 返回冲突而不覆盖数据。
+- [x] 新增/删除/排序页与全部元素操作可归约。
+- [x] 重复 operationId 不重复应用。
+- [x] 过期 baseRevision 返回冲突而不覆盖数据。
 
 **Verification:** `python -m pytest -q tests/test_ppt_operations.py`
 
