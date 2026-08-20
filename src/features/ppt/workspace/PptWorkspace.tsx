@@ -485,7 +485,7 @@ function WorkflowPanel({
           {started && <section aria-label="AI 工作流链路" className="rounded-2xl border border-slate-200 bg-white shadow-sm">
             <button type="button" aria-expanded={workflowOpen} onClick={() => setWorkflowOpen((value) => !value)} className="flex w-full items-center gap-3 px-4 py-3 text-left">
               <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-100 text-violet-700"><FileSearch size={15} /></span>
-              <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-900">AI 工作流链路</span><span className="mt-0.5 block text-[11px] text-slate-500">{started ? `${Math.min(step + 1, workflow.length)} / ${workflow.length} 阶段 · ${running ? "正在执行" : "已暂停"}` : "等待你的指令后开始"} · 每次不超过 20 条</span></span>
+              <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-900">AI 工作流链路</span><span className="mt-0.5 block text-[11px] text-slate-500">{started ? `${Math.min(step + 1, workflow.length)} / ${workflow.length} 阶段 · ${running ? "正在执行" : "已暂停"}` : "等待你的指令后开始"} · 每次不超过 {runConfig.searchLimit} 条</span></span>
               <ChevronDown size={15} className={`text-slate-400 transition ${workflowOpen ? "rotate-180" : ""}`} />
             </button>
             {workflowOpen && <div className="border-t border-slate-100 px-4 pb-3 pt-3">
