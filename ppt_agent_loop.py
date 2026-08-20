@@ -216,6 +216,11 @@ class AgentRunService:
             state = {**current.state, **(state_patch or {})}
             next_status = status or current.status
             next_phase = phase or current.phase
+            # A worker may begin just after a user cancels a queued run. Do
+            # not let its late ``run.started`` event resurrect that terminal
+            # run (and make it appear resumable again).
+            if current.status in TERMINAL_RUN_STATUSES and next_status not in TERMINAL_RUN_STATUSES:
+                return current
             self.repository.append_run_event(
                 run_id=run_id,
                 sequence=self._next_sequence(run_id),
@@ -385,8 +390,14 @@ class AgentRunService:
                             )
                     downloaded_count = 0
                     web_assets: list[dict[str, object]] = []
+                    selection_rounds: list[dict[str, Any]] = []
+                    if len(real_sources) >= 9:
+                        selection_round_count = min(4, max(3, (len(real_sources) + 11) // 12))
+                    else:
+                        selection_round_count = max(1, (len(real_sources) + 2) // 3)
 
-                    def persist_web_progress(*, candidate_count: int, failed_count: int = 0) -> None:
+                    def persist_web_progress(*, round_number: int | None = None, round_selected_count: int = 0, candidate_count: int | None = None, failed_count: int = 0) -> None:
+                        candidate_total = len(real_sources) if candidate_count is None else candidate_count
                         self._emit(
                             run_id,
                             owner_scope,
@@ -394,17 +405,23 @@ class AgentRunService:
                             {
                                 "phase": phase,
                                 "label": label,
-                                "candidateCount": candidate_count,
+                                "candidateCount": candidate_total,
                                 "selectedCount": len(web_assets),
                                 "downloadedCount": downloaded_count,
+                                "selectionRound": round_number,
+                                "selectionRoundCount": selection_round_count,
+                                "roundSelectedCount": round_selected_count,
                                 "failedCount": failed_count,
                                 "assets": list(web_assets),
                             },
                             state_patch={
                                 "webImages": {
-                                    "candidateCount": max(details["candidateCount"], candidate_count),
+                                    "candidateCount": max(details["candidateCount"], candidate_total),
                                     "selectedCount": len(web_assets),
                                     "downloadedCount": downloaded_count,
+                                    "selectionRound": round_number,
+                                    "selectionRoundCount": selection_round_count,
+                                    "selectionRounds": list(selection_rounds),
                                     "failedCount": failed_count,
                                     "mode": "provider" if downloaded_count >= 3 else "collecting",
                                     "assets": list(web_assets),
@@ -413,22 +430,30 @@ class AgentRunService:
                         )
 
                     if self.image_downloader is not None:
-                        for source in real_sources:
-                            if downloaded_count >= 3:
+                        source_index = 0
+                        for round_number in range(1, selection_round_count + 1):
+                            round_assets: list[dict[str, object]] = []
+                            failed_count = 0
+                            while len(round_assets) < 3 and source_index < len(real_sources):
+                                source = real_sources[source_index]
+                                source_index += 1
+                                try:
+                                    material_gate.ledger.add_downloaded_web_image(
+                                        source["imageUrl"],
+                                        page_url=str(source.get("pageUrl") or source["url"]),
+                                        downloader=self.image_downloader,
+                                        alt=str(source.get("title", "")),
+                                    )
+                                    web_assets = list(material_gate.ledger.web_images)
+                                    round_assets.append(web_assets[-1])
+                                    downloaded_count += 1
+                                except Exception:
+                                    failed_count += 1
+                                persist_web_progress(round_number=round_number, round_selected_count=len(round_assets), failed_count=failed_count)
+                            if round_assets:
+                                selection_rounds.append({"round": round_number, "selectedCount": len(round_assets), "assets": list(round_assets)})
+                            if not round_assets and source_index >= len(real_sources):
                                 break
-                            try:
-                                material_gate.ledger.add_downloaded_web_image(
-                                    source["imageUrl"],
-                                    page_url=str(source.get("pageUrl") or source["url"]),
-                                    downloader=self.image_downloader,
-                                    alt=str(source.get("title", "")),
-                                )
-                                web_assets = list(material_gate.ledger.web_images)
-                                downloaded_count += 1
-                            except Exception:
-                                persist_web_progress(candidate_count=len(real_sources), failed_count=max(0, len(real_sources) - downloaded_count - len(web_assets)))
-                                continue
-                            persist_web_progress(candidate_count=len(real_sources), failed_count=0)
                     if downloaded_count < 3:
                         if not self.allow_demo_materials:
                             raise RuntimeError(f"网页图片素材不足：仅成功下载 {downloaded_count} / 3 张（候选 {len(real_sources)} 个）")
@@ -437,11 +462,14 @@ class AgentRunService:
                         for index in range(3 - downloaded_count):
                             material_gate.ledger.add_web_image(f"https://images.example.com/ppt/{run_id}/{index}.jpg", page_url="https://example.com/research", alt=f"网页素材 {index + 1}")
                         web_assets = list(material_gate.ledger.web_images)
+                        selection_rounds = [{"round": 1, "selectedCount": len(web_assets), "assets": list(web_assets)}]
                     state_patch["searchRounds"] = rounds
                     state_patch["webImages"] = {
                         "candidateCount": max(details["candidateCount"], len(real_sources)),
                         "selectedCount": len(material_gate.ledger.web_images),
                         "downloadedCount": downloaded_count,
+                        "selectionRoundCount": selection_round_count,
+                        "selectionRounds": list(selection_rounds),
                         "mode": "provider" if downloaded_count >= 3 else "demo-fallback",
                         "assets": list(web_assets),
                     }

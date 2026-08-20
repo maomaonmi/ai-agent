@@ -87,7 +87,7 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
     assert snapshot.state["searchProvider"] == "firecrawl"
     assert snapshot.state["searchLimit"] == 3
     assert snapshot.state["searchRounds"][0]["resultCount"] == 3
-    assert snapshot.state["webImages"]["downloadedCount"] == 3
+    assert snapshot.state["webImages"]["downloadedCount"] == 9
     assert snapshot.state["webImages"]["mode"] == "provider"
     assert snapshot.state["aiImages"]["mode"] == "provider"
     assert len(calls) == 3
@@ -101,8 +101,9 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
         {"title": "Source 2", "url": "https://example.com/article-12", "imageUrl": "https://cdn.example/image-12.png"},
     ]
     web_complete = next(event for event in events if event.event_type == "phase.completed" and event.payload.get("phase") == "WEB_ASSETS")
-    assert web_complete.payload["downloadedCount"] == 3
-    assert len(web_complete.payload["assets"]) == 3
+    assert web_complete.payload["downloadedCount"] == 9
+    assert len(web_complete.payload["assets"]) == 9
+    assert [item["selectedCount"] for item in web_complete.payload["selectionRounds"]] == [3, 3, 3]
 
 
 def test_agent_run_falls_back_to_firecrawl_when_native_search_times_out(tmp_path: Path) -> None:
@@ -304,3 +305,65 @@ def test_idempotent_create_restarts_an_unfinished_worker_after_process_restore(t
     assert created is False
     assert restored.status == "RUNNING"
     assert calls == ["run-worker-restore-001:owner-a"]
+
+
+def test_web_assets_are_selected_in_four_rounds_of_three_from_the_candidate_pool(tmp_path: Path) -> None:
+    repository = PptRepository(tmp_path / "ppt.db")
+    repository.initialize()
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    document["presentationId"] = "presentation-web-rounds-001"
+    repository.create_presentation(
+        presentation_id="presentation-web-rounds-001",
+        owner_scope="owner-a",
+        title="Web asset rounds",
+        document=document,
+        template_id=None,
+    )
+
+    def search(query: str, _limit: int):
+        offset = 0 if "概念定义" in query else 9 if "行业研究" in query else 18
+        return [
+            {
+                "title": f"Image source {offset + index}",
+                "url": f"https://example.com/article-{offset + index}",
+                "imageUrl": f"https://cdn.example/image-{offset + index}.png",
+            }
+            for index in range(9)
+        ]
+
+    class Downloader:
+        def download(self, image_url: str) -> DownloadedImage:
+            return DownloadedImage(image_url, "image/png", b"image", "a" * 64)
+
+    class ImageAdapter:
+        def generate(self, *, role: str, prompt: str):
+            return {"role": role, "assetId": f"asset-{role.lower()}", "imageUrl": f"https://cdn.example/{role.lower()}.png"}
+
+    service = AgentRunService(
+        repository,
+        search_adapters={"firecrawl": search, "qwen": search, "glm": search},
+        ai_image_adapter=ImageAdapter(),
+        image_downloader=Downloader(),
+    )
+    run, _ = service.create(
+        run_id="run-web-rounds-001",
+        presentation_id="presentation-web-rounds-001",
+        owner_scope="owner-a",
+        prompt="web rounds",
+        max_iterations=3,
+        search_limit=20,
+    )
+
+    for _ in range(500):
+        snapshot = service.get(run.id, owner_scope="owner-a")
+        if snapshot.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+            break
+        time.sleep(0.01)
+
+    assert snapshot.status == "COMPLETED"
+    web_images = snapshot.state["webImages"]
+    assert web_images["candidateCount"] == 27
+    assert web_images["selectedCount"] == 9
+    assert web_images["downloadedCount"] == 9
+    assert len(web_images["selectionRounds"]) == 3
+    assert [round_state["selectedCount"] for round_state in web_images["selectionRounds"]] == [3, 3, 3]

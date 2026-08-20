@@ -209,8 +209,8 @@ def test_settings_factory_uses_structured_native_search_adapters(monkeypatch: py
     monkeypatch.setattr("model_settings.ModelSettingsStore", ModelStore)
     adapters = build_settings_search_adapters(request_json=lambda *_args: {})
 
-    assert isinstance(adapters["qwen"], QwenDashScopeSearchAdapter)
-    assert isinstance(adapters["glm"], GlmWebSearchAdapter)
+    assert isinstance(adapters["qwen"], OpenAICompatibleNativeSearchAdapter)
+    assert isinstance(adapters["glm"], OpenAICompatibleNativeSearchAdapter)
 
 
 def test_streaming_native_request_collects_search_info_frames(monkeypatch: pytest.MonkeyPatch) -> None:

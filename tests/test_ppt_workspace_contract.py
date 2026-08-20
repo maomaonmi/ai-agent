@@ -63,3 +63,7 @@ def test_workspace_resumes_durable_runs_and_does_not_claim_uncreated_ai_assets()
     assert "/api/ppt/runs/resumable" in api
     assert "runId" in workspace and "listResumableRuns" in workspace
     assert 'meta: "3 / 3 张"' not in workspace
+    assert "searchSourcesFromRunState" in workspace
+    assert "imageUrlsFromRunState" in workspace
+    assert "selectionRoundCount" in workspace
+    assert 'loading="lazy"' in workspace

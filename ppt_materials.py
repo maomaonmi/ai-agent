@@ -499,31 +499,26 @@ def build_settings_search_adapters(*, request_json: JsonRequest | None = None) -
         adapters["deepseek"] = adapters["firecrawl"]
     for provider in ("qwen", "glm"):
         settings = models.load(provider)
-        if settings.api_key:
-            endpoint = os.getenv(f"{provider.upper()}_SEARCH_URL")
-            if endpoint:
-                adapters[provider] = NativeSearchAdapter(provider, endpoint=endpoint, api_key=settings.api_key, request_json=request_json)
-            elif provider == "qwen":
-                adapters[provider] = QwenDashScopeSearchAdapter(
-                    api_key=settings.api_key,
-                    model=settings.model_id,
-                    request_json=request_json,
-                )
-            elif provider == "glm":
-                adapters[provider] = GlmWebSearchAdapter(
-                    api_key=settings.api_key,
-                    request_json=request_json,
-                )
-            else:
-                adapters[provider] = OpenAICompatibleNativeSearchAdapter(
-                    provider,
-                    base_url=settings.base_url,
-                    api_key=settings.api_key,
-                    model=settings.model_id,
-                    temperature=settings.temperature,
-                    max_tokens=settings.max_tokens,
-                    request_json=request_json,
-                )
+        if not settings.api_key:
+            continue
+        # Keep PPT on the exact same native-search transport as the regular
+        # chat route.  The persisted model profile already contains the
+        # provider-specific base URL and model; using it here is important
+        # because Qwen and GLM keys are valid on their chat-compatible native
+        # search protocol, but not necessarily on a separate search endpoint.
+        endpoint = os.getenv(f"{provider.upper()}_SEARCH_URL")
+        if endpoint:
+            adapters[provider] = NativeSearchAdapter(provider, endpoint=endpoint, api_key=settings.api_key, request_json=request_json)
+        else:
+            adapters[provider] = OpenAICompatibleNativeSearchAdapter(
+                provider,
+                base_url=settings.base_url,
+                api_key=settings.api_key,
+                model=settings.model_id,
+                temperature=settings.temperature,
+                max_tokens=settings.max_tokens,
+                request_json=request_json,
+            )
     return adapters
 
 
