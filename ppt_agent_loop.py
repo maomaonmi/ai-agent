@@ -222,8 +222,21 @@ class AgentRunService:
                     rounds = list(current.state.get("searchRounds", []))
                     configured_adapter = search_coordinator.adapters.get(provider)
                     if configured_adapter is not None:
-                        results = search_coordinator.search_round(provider=provider, query=query, limit=details["limit"])
-                        phase_details.update({"resultCount": len(results), "mode": "provider"})
+                        try:
+                            results = search_coordinator.search_round(provider=provider, query=query, limit=details["limit"])
+                            phase_details.update({"resultCount": len(results), "mode": "provider"})
+                        except Exception as provider_error:
+                            fallback_adapter = search_coordinator.adapters.get("firecrawl")
+                            if provider == "firecrawl" or fallback_adapter is None:
+                                raise
+                            results = search_coordinator.search_round(provider="firecrawl", query=query, limit=details["limit"])
+                            phase_details.update({
+                                "provider": "firecrawl",
+                                "requestedProvider": provider,
+                                "resultCount": len(results),
+                                "mode": "provider-fallback",
+                                "fallbackReason": type(provider_error).__name__,
+                            })
                         rounds.append({"round": len(rounds) + 1, **phase_details, "results": results})
                     else:
                         phase_details["mode"] = "demo-fallback"

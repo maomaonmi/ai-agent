@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from ppt_agent_loop import AgentRunService, SearchBatch, SearchBatchLimitExceeded
-from ppt_materials import DownloadedImage
+from ppt_materials import DownloadedImage, ProviderRequestFailed
 from ppt_repository import PptRepository
 
 
@@ -91,3 +91,53 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
     assert search_complete.payload["mode"] == "provider"
     web_complete = next(event for event in events if event.event_type == "phase.completed" and event.payload.get("phase") == "WEB_ASSETS")
     assert web_complete.payload["downloadedCount"] == 3
+
+
+def test_agent_run_falls_back_to_firecrawl_when_native_search_times_out(tmp_path: Path) -> None:
+    repository = PptRepository(tmp_path / "ppt.db")
+    repository.initialize()
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    document["presentationId"] = "presentation-fallback-001"
+    repository.create_presentation(
+        presentation_id="presentation-fallback-001",
+        owner_scope="owner-a",
+        title="Fallback test",
+        document=document,
+        template_id=None,
+    )
+
+    def firecrawl(_query: str, _limit: int):
+        return [{"title": "Source", "url": "https://example.com/source"}]
+
+    def native_failure(_query: str, _limit: int):
+        raise ProviderRequestFailed("provider request failed")
+
+    class ImageAdapter:
+        def generate(self, *, role: str, prompt: str):
+            return {"role": role, "assetId": f"provider-{role.lower()}", "imageUrl": "https://cdn.example/generated.png"}
+
+    service = AgentRunService(
+        repository,
+        search_adapters={"firecrawl": firecrawl, "qwen": native_failure, "glm": native_failure},
+        ai_image_adapter=ImageAdapter(),
+        image_downloader=None,
+    )
+    run, _ = service.create(
+        run_id="run-fallback-001",
+        presentation_id="presentation-fallback-001",
+        owner_scope="owner-a",
+        prompt="fallback",
+        max_iterations=3,
+    )
+    for _ in range(100):
+        snapshot = service.get(run.id, owner_scope="owner-a")
+        if snapshot.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+            break
+        time.sleep(0.01)
+
+    assert snapshot.status == "COMPLETED"
+    events = repository.list_run_events(run.id, after_sequence=0, limit=200)
+    second_search = next(event for event in events if event.event_type == "phase.completed" and event.payload.get("phase") == "SEARCH_2")
+    assert second_search.payload["mode"] == "provider-fallback"
+    assert second_search.payload["provider"] == "firecrawl"
+    assert second_search.payload["requestedProvider"] == "qwen"

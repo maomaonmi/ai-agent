@@ -80,7 +80,8 @@ def _default_json_request(endpoint: str, headers: dict[str, str], payload: dict[
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
+        timeout_seconds = max(5, min(60, int(os.getenv("PPT_PROVIDER_TIMEOUT_SECONDS", "12"))))
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             raw = response.read(_MAX_JSON_BYTES + 1)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ProviderRequestFailed("provider request failed") from exc
