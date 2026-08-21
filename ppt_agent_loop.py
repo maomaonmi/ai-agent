@@ -534,6 +534,31 @@ class AgentRunService:
             limit=limit,
         )
 
+    def history(self, *, owner_scope: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Return every durable PPT run, including terminal history entries.
+
+        The main chat sidebar needs a compact record to navigate back to a
+        specific presentation/run pair. Full workflow state remains available
+        through ``GET /runs/{run_id}``; keeping it out of this list keeps the
+        sidebar payload small while preserving the durable source of truth.
+        """
+        history: list[dict[str, Any]] = []
+        for run in self.repository.list_runs(owner_scope=owner_scope, limit=limit):
+            presentation = self.repository.get_presentation(run.presentation_id, owner_scope=owner_scope)
+            prompt = run.state.get("prompt") if isinstance(run.state, dict) else None
+            history.append({
+                "runId": run.id,
+                "presentationId": run.presentation_id,
+                "title": presentation.title if presentation is not None else "AI PPT",
+                "templateId": presentation.template_id if presentation is not None else None,
+                "status": run.status,
+                "phase": run.phase,
+                "prompt": prompt if isinstance(prompt, str) else "",
+                "createdAt": run.created_at,
+                "updatedAt": run.updated_at,
+            })
+        return history
+
     def cancel(self, run_id: str, *, owner_scope: str) -> RunRecord:
         with self._lock(run_id):
             current = self.get(run_id, owner_scope=owner_scope)

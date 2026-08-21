@@ -132,3 +132,39 @@ def test_resumable_runs_are_listed_in_updated_order_and_exclude_terminal_runs(tm
     assert resumable.status_code == 200
     assert [run["runId"] for run in resumable.json()["runs"]] == ["run-resume-002"]
     assert resumable.json()["runs"][0]["state"]["prompt"] == "另一个未完成进度"
+
+
+def test_ppt_history_lists_terminal_and_active_runs_with_presentation_binding(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    headers = {"x-test-owner": "owner-a"}
+    first = client.post(
+        "/api/ppt/runs",
+        headers=headers,
+        json={
+            "runId": "run-history-001",
+            "presentationId": "presentation-run-001",
+            "prompt": "记录已完成的历史 PPT",
+        },
+    )
+    second = client.post(
+        "/api/ppt/runs",
+        headers=headers,
+        json={
+            "runId": "run-history-002",
+            "presentationId": "presentation-run-001",
+            "prompt": "记录仍在执行的历史 PPT",
+        },
+    )
+    assert first.status_code == 201
+    assert second.status_code == 201
+    client.post("/api/ppt/runs/run-history-001/cancel", headers=headers)
+
+    history = client.get("/api/ppt/runs/history?limit=50", headers=headers)
+
+    assert history.status_code == 200
+    records = {item["runId"]: item for item in history.json()["runs"]}
+    assert {"run-history-001", "run-history-002"}.issubset(records)
+    assert records["run-history-001"]["presentationId"] == "presentation-run-001"
+    assert records["run-history-001"]["title"] == "Run test"
+    assert records["run-history-001"]["prompt"] == "记录已完成的历史 PPT"
+    assert records["run-history-001"]["status"] == "CANCELLED"
