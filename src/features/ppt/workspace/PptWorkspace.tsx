@@ -1008,7 +1008,12 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: prompt }, { id: nextId("assistant"), role: "assistant", text: "已恢复这条 AI PPT 历史会话，已保存的搜索、素材和搭建进度正在载入。" }]);
         setWorkflowStep(workflowStepForPhase(run.phase));
         setRunning(run.status === "RUNNING" || run.status === "QUEUED" || run.status === "PAUSED");
-        await startAgentRun(prompt, nextConfig, run.runId);
+        const terminal = run.status === "COMPLETED" || run.status === "CANCELLED";
+        // Non-terminal history may have been interrupted mid-phase.  Audit
+        // its durable state before resuming so a stale SEARCH_2/AI_ASSETS
+        // cursor cannot trigger a duplicate provider call.  Completed history
+        // is only hydrated for viewing and does not start new work.
+        await startAgentRun(prompt, nextConfig, run.runId, !terminal);
       } catch {
         resumeStartedRef.current = false;
       }
