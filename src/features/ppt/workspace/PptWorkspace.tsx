@@ -151,7 +151,7 @@ const workflow: WorkflowStep[] = [
   { id: "web-assets", label: "网页图片素材收集", description: "筛选带图网页并保留授权与素材来源", meta: "等待执行" },
   { id: "ai-assets", label: "AI 生成图片", description: "生成封面、中段背景与结尾主视觉", meta: "等待执行" },
   { id: "outline", label: "叙事与视觉方案", description: "统一主题、配色、字体和页面节奏", meta: "等待执行" },
-  { id: "build", label: "逐页搭建", description: "一个组件一个组件写入可编辑画布", meta: "等待执行" },
+  { id: "build", label: "逐页搭建", description: "按章节生成正文、要点与讲稿，再逐页写入画布", meta: "等待执行" },
   { id: "review", label: "质量检查与导出", description: "检查溢出、引用、可读性与兼容性", meta: "等待执行" },
 ];
 
