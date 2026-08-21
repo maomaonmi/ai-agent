@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { usePathname } from "next/navigation";
@@ -492,7 +491,7 @@ function SlideSurface({
   const mutedClass = dark ? "text-white/65" : "text-slate-500";
   return (
     <div className={`relative aspect-video w-full overflow-hidden bg-[#111827] ${dark ? "" : "bg-[#f4efe8]"}`}>
-      <Image src={slide.image} alt="演示文稿视觉素材" fill priority={!compact} sizes={compact ? "220px" : "(max-width: 1024px) 100vw, 65vw"} className={`object-cover ${dark ? "opacity-75" : "opacity-55"}`} />
+      <img src={slide.image} alt="演示文稿视觉素材" loading={compact ? "lazy" : "eager"} className={`absolute inset-0 h-full w-full object-cover ${dark ? "opacity-75" : "opacity-55"}`} />
       <div className={`absolute inset-0 ${dark ? "bg-slate-950/45" : "bg-white/35"}`} />
       <div className={`absolute inset-y-0 left-0 ${compact ? "w-[76%] p-[7%]" : "w-[72%] p-[7.5%]"}`}>
         <p className={`${mutedClass} ${compact ? "text-[5px]" : "text-[clamp(8px,0.72vw,12px)]"} font-semibold tracking-[0.22em]`}>{slide.eyebrow}</p>
@@ -535,7 +534,7 @@ function SlideSurface({
         >
           {item.kind === "text" && <span className={`block text-[clamp(10px,1.2vw,18px)] font-medium ${titleClass}`}>{item.text}</span>}
           {item.kind === "shape" && <span className={`block h-full w-full border-2 border-violet-400 bg-violet-500/25 ${item.shape === "ellipse" ? "rounded-full" : "rounded-xl"}`} />}
-          {item.kind === "image" && <Image src={item.src} alt={item.alt} fill sizes="320px" className="object-cover" />}
+          {item.kind === "image" && <img src={item.src} alt={item.alt} loading="lazy" className="h-full w-full object-cover" />}
           {item.kind === "table" && (
             <span className="grid h-full grid-cols-3 overflow-hidden rounded-md border border-white/50 bg-white/85 text-[9px] text-slate-700">
               {Array.from({ length: 9 }, (_, index) => <i key={index} className="border-b border-r border-slate-300 p-1 not-italic">{index < 3 ? `Q${index + 1}` : index * 12}</i>)}
