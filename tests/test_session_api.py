@@ -58,6 +58,21 @@ class SessionApiTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 404)
 
+    def test_session_can_be_renamed_from_sidebar_menu(self):
+        created = self.client.post("/api/sessions", json={"mode": "standard", "title": "旧标题"}).json()
+
+        renamed = self.client.patch(
+            f"/api/sessions/{created['session_id']}",
+            json={"title": "宇宙广阔与文明探讨"},
+        )
+
+        self.assertEqual(renamed.status_code, 200)
+        self.assertEqual(renamed.json()["session"]["title"], "宇宙广阔与文明探讨")
+        self.assertEqual(
+            self.client.get("/api/sessions").json()["sessions"][0]["title"],
+            "宇宙广阔与文明探讨",
+        )
+
     def test_code_mode_session_can_be_created_and_restored(self):
         created_response = self.client.post(
             "/api/sessions",

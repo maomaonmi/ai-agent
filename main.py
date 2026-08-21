@@ -1752,6 +1752,10 @@ class SaveSessionSnapshotRequest(BaseModel):
     generate_title: bool = False
 
 
+class RenameSessionRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=40)
+
+
 class PublishCodeProjectRequest(BaseModel):
     source_session_id: Optional[str] = Field(default=None, min_length=8, max_length=64)
     title: str = Field(min_length=1, max_length=80)
@@ -6957,6 +6961,15 @@ async def delete_session(session_id: str):
     except SessionNotFoundError:
         raise HTTPException(status_code=404, detail="会话不存在。")
     return {"status": "success", "deleted": session_id}
+
+
+@app.patch("/api/sessions/{session_id}")
+async def rename_session(session_id: str, request: RenameSessionRequest):
+    try:
+        session = session_store.update_title(session_id, request.title)
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="会话不存在。")
+    return {"status": "success", "session": session.to_dict()}
 
 
 @app.delete("/api/sessions")
