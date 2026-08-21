@@ -1075,6 +1075,19 @@ class AgentRunService:
                                 evidence=selected_evidence,
                                 previous_sections=previous_sections,
                             )
+                        if isinstance(generated, Mapping):
+                            # Do not let a model invent citation URLs. Notes
+                            # may only reference the durable search ledger.
+                            allowed_urls = {
+                                str(item.get("url"))
+                                for item in selected_evidence
+                                if isinstance(item, Mapping) and isinstance(item.get("url"), str)
+                            }
+                            generated = dict(generated)
+                            generated["sourceUrls"] = [
+                                str(url) for url in (generated.get("sourceUrls") or [])
+                                if str(url) in allowed_urls
+                            ][:5]
                         built = {
                             **slide,
                             **(generated if isinstance(generated, Mapping) else {}),
