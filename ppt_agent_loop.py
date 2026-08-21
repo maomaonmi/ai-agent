@@ -468,7 +468,7 @@ class AgentRunService:
         if not isinstance(outline, Mapping) or int(outline.get("slideCount", 0) or 0) < 1:
             return "OUTLINE"
         build = state.get("build") if isinstance(state, Mapping) else None
-        if not isinstance(build, Mapping) or build.get("status") != "completed" or int(build.get("contentVersion", 0) or 0) < 2:
+        if not isinstance(build, Mapping) or build.get("status") != "completed" or int(build.get("contentVersion", 0) or 0) < 3:
             return "BUILD"
         review = state.get("qualityReport") if isinstance(state, Mapping) else None
         if not isinstance(review, Mapping):
@@ -572,7 +572,12 @@ class AgentRunService:
         return {"status": "passed" if passed else "needs_attention", "checks": checks, "slideCount": len(slides) if isinstance(slides, list) else 0, "outlineCount": int((outline or {}).get("slideCount", 0)), "referenceCount": references}
 
     @staticmethod
-    def _slide_from_outline(slide: Mapping[str, Any], index: int, asset_id: str | None = None) -> dict[str, Any]:
+    def _slide_from_outline(
+        slide: Mapping[str, Any],
+        index: int,
+        asset_id: str | None = None,
+        background_asset_id: str | None = None,
+    ) -> dict[str, Any]:
         slide_id = f"ai-slide-{index + 1}"
         dark = index % 2 == 0
         text_color = "#FFFFFF" if dark else "#111827"
@@ -594,7 +599,7 @@ class AgentRunService:
         return {
             "id": slide_id,
             "order": index,
-            "background": {"type": "SOLID", "color": "#0B1020" if dark else "#F4EFE8"},
+            "background": ({"type": "IMAGE", "assetId": background_asset_id, "opacity": 1, "fit": "COVER"} if background_asset_id else {"type": "SOLID", "color": "#0B1020" if dark else "#F4EFE8"}),
             "elements": elements,
             "animations": [],
             "notes": (notes + (f"\n素材线索：{slide.get('sourceHint')}" if slide.get("sourceHint") else ""))[:2_000],
@@ -969,16 +974,13 @@ class AgentRunService:
                         built = {**slide, "status": "built", "componentCount": 4}
                         built_slides.append(built)
                         if index == 0:
-                            asset_id = ai_asset_ids.get("COVER")
+                            background_asset_id = ai_asset_ids.get("COVER")
                         elif index == len(planned_slides) - 1:
-                            asset_id = ai_asset_ids.get("END")
-                        elif index == len(planned_slides) // 2:
-                            asset_id = ai_asset_ids.get("MID_BACKGROUND")
-                        elif web_asset_ids:
-                            asset_id = web_asset_ids[(index - 1) % len(web_asset_ids)]
+                            background_asset_id = ai_asset_ids.get("END")
                         else:
-                            asset_id = ai_asset_ids.get("MID_BACKGROUND")
-                        working_document["slides"].append(self._slide_from_outline(built, index, asset_id))
+                            background_asset_id = ai_asset_ids.get("MID_BACKGROUND")
+                        asset_id = web_asset_ids[(index - 1) % len(web_asset_ids)] if web_asset_ids and index not in {0, len(planned_slides) - 1} else None
+                        working_document["slides"].append(self._slide_from_outline(built, index, asset_id, background_asset_id))
                         working_document["revision"] = presentation.current_revision + 1
                         working_document.setdefault("metadata", {})["updatedAt"] = time.time()
                         operation_id = f"ppt-agent-build-{run_id}-{index + 1}"
@@ -1001,7 +1003,7 @@ class AgentRunService:
                             "phase.progress",
                             {"phase": phase, "label": label, "completedSlides": index + 1, "slideCount": len(planned_slides), "slide": built},
                         )
-                    state_patch["build"] = {"status": "completed", "contentVersion": 2, "slideCount": len(built_slides), "slides": built_slides, "completedAt": time.time()}
+                    state_patch["build"] = {"status": "completed", "contentVersion": 3, "slideCount": len(built_slides), "slides": built_slides, "completedAt": time.time()}
                     phase_details.update({"slideCount": len(built_slides), "componentMode": "incremental", "completedSlides": len(built_slides)})
                 elif phase == "REVIEW":
                     presentation = self.repository.get_presentation(current.presentation_id, owner_scope=owner_scope)

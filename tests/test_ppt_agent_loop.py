@@ -437,7 +437,7 @@ def test_continue_audit_resumes_from_first_missing_artifact(tmp_path: Path) -> N
     state = {
         "prompt": "continue audit",
         "searchRounds": [{"results": [{"url": "https://example.com/1"}]}, {"results": [{"url": "https://example.com/2"}]}, {"results": [{"url": "https://example.com/3"}]}],
-        "webImages": {"selectedCount": 3, "assets": [{"imageUrl": f"/api/ppt/assets/web-{index}", "pageUrl": "https://example.com"} for index in range(3)]},
+        "webImages": {"selectedCount": 3, "assets": [{"assetId": f"web-{index}", "imageUrl": f"/api/ppt/assets/web-{index}", "pageUrl": "https://example.com"} for index in range(3)]},
         "aiImages": {"generatedCount": 3, "requiredCount": 3, "assets": [{"role": role, "assetId": f"asset-{role}"} for role in ("COVER", "MID_BACKGROUND", "END")]},
     }
     repository.create_run(
@@ -468,11 +468,12 @@ def test_continue_audit_resumes_from_first_missing_artifact(tmp_path: Path) -> N
     assert snapshot.status == "COMPLETED"
     assert snapshot.state["outline"]["slideCount"] == 16
     assert snapshot.state["build"]["status"] == "completed"
-    assert snapshot.state["build"]["contentVersion"] == 2
+    assert snapshot.state["build"]["contentVersion"] == 3
     assert "qualityReport" in snapshot.state
     presentation = repository.get_presentation("presentation-continue-001", owner_scope="owner-a")
     assert presentation is not None
     assert len(presentation.document["slides"]) == 16
+    assert all(slide.get("background", {}).get("type") == "IMAGE" for slide in presentation.document["slides"])
     assert any(element.get("type") == "IMAGE" for slide in presentation.document["slides"] for element in slide.get("elements", []))
     assert all(any(element.get("id", "").endswith("-body") and len(element.get("text", "")) > 20 for element in slide.get("elements", [])) for slide in presentation.document["slides"])
 
