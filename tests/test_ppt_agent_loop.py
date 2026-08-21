@@ -420,3 +420,56 @@ def test_web_assets_are_selected_in_four_rounds_of_three_from_the_candidate_pool
     assert len(web_images["candidateSources"]) == 27
     assert len(web_images["selectionRounds"]) == 3
     assert [round_state["selectedCount"] for round_state in web_images["selectionRounds"]] == [3, 3, 3]
+
+
+def test_continue_audit_resumes_from_first_missing_artifact(tmp_path: Path) -> None:
+    repository = PptRepository(tmp_path / "ppt.db")
+    repository.initialize()
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    document["presentationId"] = "presentation-continue-001"
+    repository.create_presentation(
+        presentation_id="presentation-continue-001",
+        owner_scope="owner-a",
+        title="Continue test",
+        document=document,
+        template_id=None,
+    )
+    state = {
+        "prompt": "continue audit",
+        "searchRounds": [{"results": [{"url": "https://example.com/1"}]}, {"results": [{"url": "https://example.com/2"}]}, {"results": [{"url": "https://example.com/3"}]}],
+        "webImages": {"selectedCount": 3, "assets": [{"imageUrl": f"/api/ppt/assets/web-{index}", "pageUrl": "https://example.com"} for index in range(3)]},
+        "aiImages": {"generatedCount": 3, "requiredCount": 3, "assets": [{"role": role, "assetId": f"asset-{role}"} for role in ("COVER", "MID_BACKGROUND", "END")]},
+    }
+    repository.create_run(
+        run_id="run-continue-001",
+        presentation_id="presentation-continue-001",
+        owner_scope="owner-a",
+        status="COMPLETED",
+        phase="REVIEW",
+        state=state,
+    )
+    service = AgentRunService(repository, search_adapters={}, image_downloader=None, web_image_extractor=None, allow_demo_materials=True)
+    resumed, created = service.create(
+        run_id="run-continue-001",
+        presentation_id="presentation-continue-001",
+        owner_scope="owner-a",
+        prompt="continue audit",
+        max_iterations=3,
+        resume=True,
+    )
+    assert created is False
+    assert resumed.status == "QUEUED"
+    assert resumed.phase == "OUTLINE"
+    for _ in range(500):
+        snapshot = service.get(resumed.id, owner_scope="owner-a")
+        if snapshot.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+            break
+        time.sleep(0.01)
+    assert snapshot.status == "COMPLETED"
+    assert snapshot.state["outline"]["slideCount"] == 16
+    assert snapshot.state["build"]["status"] == "completed"
+    assert "qualityReport" in snapshot.state
+    presentation = repository.get_presentation("presentation-continue-001", owner_scope="owner-a")
+    assert presentation is not None
+    assert len(presentation.document["slides"]) == 16
+    assert any(element.get("type") == "IMAGE" for slide in presentation.document["slides"] for element in slide.get("elements", []))

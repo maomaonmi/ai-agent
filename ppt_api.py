@@ -74,6 +74,7 @@ class CreateRunRequest(BaseModel):
     model_provider: Literal["deepseek", "qwen", "glm"] = "deepseek"
     search_provider: Literal["auto", "firecrawl", "qwen", "glm"] = "auto"
     search_limit: int = Field(default=20, ge=1, le=20)
+    resume: bool = False
 
 
 def _error(code: str, message: str, *, status_code: int, details: Any | None = None) -> JSONResponse:
@@ -258,6 +259,7 @@ def create_ppt_router(
                 model_provider=create.model_provider,
                 search_provider=create.search_provider,
                 search_limit=create.search_limit,
+                resume=create.resume,
             )
         except PresentationForRunNotFound:
             return _error("PPT_PRESENTATION_NOT_FOUND", "演示文稿不存在", status_code=404)
