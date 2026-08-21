@@ -468,6 +468,7 @@ def test_continue_audit_resumes_from_first_missing_artifact(tmp_path: Path) -> N
     assert snapshot.status == "COMPLETED"
     assert snapshot.state["outline"]["slideCount"] == 16
     assert snapshot.state["build"]["status"] == "completed"
+    assert snapshot.state["build"]["contentVersion"] == 2
     assert "qualityReport" in snapshot.state
     presentation = repository.get_presentation("presentation-continue-001", owner_scope="owner-a")
     assert presentation is not None

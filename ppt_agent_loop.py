@@ -468,7 +468,7 @@ class AgentRunService:
         if not isinstance(outline, Mapping) or int(outline.get("slideCount", 0) or 0) < 1:
             return "OUTLINE"
         build = state.get("build") if isinstance(state, Mapping) else None
-        if not isinstance(build, Mapping) or build.get("status") != "completed":
+        if not isinstance(build, Mapping) or build.get("status") != "completed" or int(build.get("contentVersion", 0) or 0) < 2:
             return "BUILD"
         review = state.get("qualityReport") if isinstance(state, Mapping) else None
         if not isinstance(review, Mapping):
@@ -488,6 +488,13 @@ class AgentRunService:
             if isinstance(round_state, dict)
             for result in round_state.get("results", [])
             if isinstance(result, dict)
+        ]
+        source_urls = [
+            str(result.get("url"))
+            for round_state in search_rounds
+            if isinstance(round_state, dict)
+            for result in round_state.get("results", [])
+            if isinstance(result, dict) and isinstance(result.get("url"), str)
         ]
         beats = [
             ("封面", "提出主题与核心问题"),
@@ -514,6 +521,17 @@ class AgentRunService:
                 "title": prompt.strip()[:80] if index == 0 else title,
                 "direction": direction,
                 "sourceHint": source_titles[index % len(source_titles)] if source_titles else None,
+                "body": (
+                    f"本页围绕“{prompt.strip()[:36]}”展开，先建立问题背景，再把资料转化为可执行判断。"
+                    if index == 0
+                    else f"{direction}。结合公开资料与案例，提炼对团队最有价值的判断。"
+                ),
+                "keyPoints": [
+                    f"核心观察：{direction}",
+                    f"资料线索：{source_titles[index % len(source_titles)]}" if source_titles else "资料线索：等待来源补充",
+                    "行动建议：明确下一步、责任人与验证指标",
+                ],
+                "sourceUrls": source_urls[index:index + 3],
                 "status": "planned",
             }
             for index, (title, direction) in enumerate(beats[: max(1, min(slide_count, len(beats)))])
@@ -554,25 +572,32 @@ class AgentRunService:
         return {"status": "passed" if passed else "needs_attention", "checks": checks, "slideCount": len(slides) if isinstance(slides, list) else 0, "outlineCount": int((outline or {}).get("slideCount", 0)), "referenceCount": references}
 
     @staticmethod
-    def _slide_from_outline(slide: Mapping[str, Any], index: int, asset_ids: list[str] | None = None) -> dict[str, Any]:
+    def _slide_from_outline(slide: Mapping[str, Any], index: int, asset_id: str | None = None) -> dict[str, Any]:
         slide_id = f"ai-slide-{index + 1}"
         dark = index % 2 == 0
         text_color = "#FFFFFF" if dark else "#111827"
+        key_points = slide.get("keyPoints") if isinstance(slide.get("keyPoints"), list) else []
+        body = str(slide.get("body") or "").strip()
+        if not body:
+            body = "从资料、观点到下一步行动。"
+        body_text = "\n".join(f"• {str(item).strip()}" for item in key_points[:3] if str(item).strip())
         elements: list[dict[str, Any]] = [
             {"type": "TEXT", "id": f"{slide_id}-eyebrow", "x": 0.07, "y": 0.08, "width": 0.65, "height": 0.05, "rotation": 0, "zIndex": 3, "opacity": 1, "isLocked": False, "isHidden": False, "text": f"{index + 1:02d} · AI PPT", "style": {"fontFamily": "Microsoft YaHei", "fontSize": 14, "color": text_color, "bold": True, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "MIDDLE"}},
             {"type": "TEXT", "id": f"{slide_id}-title", "x": 0.07, "y": 0.18, "width": 0.62, "height": 0.25, "rotation": 0, "zIndex": 3, "opacity": 1, "isLocked": False, "isHidden": False, "text": str(slide.get("title") or slide.get("section") or f"第 {index + 1} 页"), "style": {"fontFamily": "Microsoft YaHei", "fontSize": 28, "color": text_color, "bold": True, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "MIDDLE"}},
             {"type": "TEXT", "id": f"{slide_id}-subtitle", "x": 0.07, "y": 0.58, "width": 0.62, "height": 0.14, "rotation": 0, "zIndex": 2, "opacity": 1, "isLocked": False, "isHidden": False, "text": str(slide.get("direction") or "从资料、观点到下一步行动。"), "style": {"fontFamily": "Microsoft YaHei", "fontSize": 14, "color": text_color, "bold": False, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "MIDDLE"}},
+            {"type": "TEXT", "id": f"{slide_id}-body", "x": 0.07, "y": 0.72, "width": 0.58, "height": 0.18, "rotation": 0, "zIndex": 2, "opacity": 1, "isLocked": False, "isHidden": False, "text": body_text or body, "style": {"fontFamily": "Microsoft YaHei", "fontSize": 15, "color": text_color, "bold": False, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "TOP"}},
         ]
-        if asset_ids:
-            asset_id = asset_ids[index % len(asset_ids)]
+        if asset_id:
             elements.append({"type": "IMAGE", "id": f"{slide_id}-material", "x": 0.73, "y": 0.18, "width": 0.21, "height": 0.45, "rotation": 0, "zIndex": 1, "opacity": 0.94, "isLocked": False, "isHidden": False, "assetId": asset_id, "alt": "AI 工作流素材", "fit": "COVER"})
+        source_urls = slide.get("sourceUrls") if isinstance(slide.get("sourceUrls"), list) else []
+        notes = "[Sources]\n" + "\n".join(str(url) for url in source_urls[:5] if str(url).startswith("http"))
         return {
             "id": slide_id,
             "order": index,
             "background": {"type": "SOLID", "color": "#0B1020" if dark else "#F4EFE8"},
             "elements": elements,
             "animations": [],
-            "notes": str(slide.get("sourceHint") or "")[:2_000],
+            "notes": (notes + (f"\n素材线索：{slide.get('sourceHint')}" if slide.get("sourceHint") else ""))[:2_000],
         }
 
     def _emit(self, run_id: str, owner_scope: str, event_type: str, payload: dict[str, Any], *, status: str | None = None, phase: str | None = None, state_patch: dict[str, Any] | None = None) -> RunRecord | None:
@@ -928,17 +953,32 @@ class AgentRunService:
                     working_document = copy.deepcopy(presentation.document)
                     working_document["title"] = str(current.state.get("prompt", "新建 AI PPT"))[:500]
                     working_document["slides"] = []
-                    material_asset_ids = [
+                    web_asset_ids = [
                         str(asset.get("assetId"))
-                        for asset in [*material_gate.ledger.web_images, *material_gate.ai_images]
+                        for asset in material_gate.ledger.web_images
                         if isinstance(asset, dict) and isinstance(asset.get("assetId"), str) and asset.get("assetId")
                     ]
+                    ai_asset_ids = {
+                        str(asset.get("role")): str(asset.get("assetId"))
+                        for asset in material_gate.ai_images
+                        if isinstance(asset, dict) and isinstance(asset.get("role"), str) and isinstance(asset.get("assetId"), str)
+                    }
                     for index, slide in enumerate(planned_slides if isinstance(planned_slides, list) else []):
                         if not isinstance(slide, dict):
                             continue
                         built = {**slide, "status": "built", "componentCount": 4}
                         built_slides.append(built)
-                        working_document["slides"].append(self._slide_from_outline(built, index, material_asset_ids))
+                        if index == 0:
+                            asset_id = ai_asset_ids.get("COVER")
+                        elif index == len(planned_slides) - 1:
+                            asset_id = ai_asset_ids.get("END")
+                        elif index == len(planned_slides) // 2:
+                            asset_id = ai_asset_ids.get("MID_BACKGROUND")
+                        elif web_asset_ids:
+                            asset_id = web_asset_ids[(index - 1) % len(web_asset_ids)]
+                        else:
+                            asset_id = ai_asset_ids.get("MID_BACKGROUND")
+                        working_document["slides"].append(self._slide_from_outline(built, index, asset_id))
                         working_document["revision"] = presentation.current_revision + 1
                         working_document.setdefault("metadata", {})["updatedAt"] = time.time()
                         operation_id = f"ppt-agent-build-{run_id}-{index + 1}"
@@ -961,7 +1001,7 @@ class AgentRunService:
                             "phase.progress",
                             {"phase": phase, "label": label, "completedSlides": index + 1, "slideCount": len(planned_slides), "slide": built},
                         )
-                    state_patch["build"] = {"status": "completed", "slideCount": len(built_slides), "slides": built_slides, "completedAt": time.time()}
+                    state_patch["build"] = {"status": "completed", "contentVersion": 2, "slideCount": len(built_slides), "slides": built_slides, "completedAt": time.time()}
                     phase_details.update({"slideCount": len(built_slides), "componentMode": "incremental", "completedSlides": len(built_slides)})
                 elif phase == "REVIEW":
                     presentation = self.repository.get_presentation(current.presentation_id, owner_scope=owner_scope)
