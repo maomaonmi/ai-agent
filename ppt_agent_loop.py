@@ -958,6 +958,7 @@ class AgentRunService:
                     working_document = copy.deepcopy(presentation.document)
                     working_document["title"] = str(current.state.get("prompt", "新建 AI PPT"))[:500]
                     working_document["slides"] = []
+                    build_attempt_id = uuid.uuid4().hex[:12]
                     web_asset_ids = [
                         str(asset.get("assetId"))
                         for asset in material_gate.ledger.web_images
@@ -983,7 +984,11 @@ class AgentRunService:
                         working_document["slides"].append(self._slide_from_outline(built, index, asset_id, background_asset_id))
                         working_document["revision"] = presentation.current_revision + 1
                         working_document.setdefault("metadata", {})["updatedAt"] = time.time()
-                        operation_id = f"ppt-agent-build-{run_id}-{index + 1}"
+                        # A retried BUILD phase must not reuse operation ids
+                        # from an earlier partial attempt.  The revision
+                        # guard still serializes writes; this nonce only makes
+                        # a fresh attempt eligible to commit after a failure.
+                        operation_id = f"ppt-agent-build-v3-{run_id}-{build_attempt_id}-{index + 1}"
                         operation = {"operationId": operation_id, "type": "BUILD_SLIDE", "slideId": working_document["slides"][-1]["id"], "ordinal": index + 1}
                         self.repository.commit_revision(
                             presentation_id=presentation.id,
