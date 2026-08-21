@@ -325,8 +325,9 @@ function workspaceSlidesFromDocument(document: PresentationDocument, assetUrlsBy
       else if (element.type === "CHART") items.push({ ...base, kind: "chart" });
     }
     const backgroundColor = slide.background.type === "SOLID" ? slide.background.color : "#0F172A";
-    const imageElement = slide.elements.find((element) => element.type === "IMAGE");
-    const image = imageElement?.type === "IMAGE" ? assetUrlsById[imageElement.assetId] ?? generatedAssets[index % generatedAssets.length] : generatedAssets[index % generatedAssets.length];
+    const image = slide.background.type === "IMAGE"
+      ? assetUrlsById[slide.background.assetId] ?? generatedAssets[index % generatedAssets.length]
+      : generatedAssets[index % generatedAssets.length];
     return { id: slide.id, eyebrow, title, subtitle, image, tone: backgroundColor === "#F4EFE8" ? "light" : "dark", notes: slide.notes ?? "", items };
   });
 }
@@ -492,7 +493,7 @@ function SlideSurface({
   return (
     <div className={`relative aspect-video w-full overflow-hidden bg-[#111827] ${dark ? "" : "bg-[#f4efe8]"}`}>
       <img src={slide.image} alt="演示文稿视觉素材" loading={compact ? "lazy" : "eager"} className={`absolute inset-0 h-full w-full object-cover ${dark ? "opacity-75" : "opacity-55"}`} />
-      <div className={`absolute inset-0 ${dark ? "bg-slate-950/45" : "bg-white/35"}`} />
+      <div className={`absolute inset-0 ${dark ? "bg-slate-950/15" : "bg-white/20"}`} />
       <div className={`absolute inset-y-0 left-0 ${compact ? "w-[76%] p-[7%]" : "w-[72%] p-[7.5%]"}`}>
         <p className={`${mutedClass} ${compact ? "text-[5px]" : "text-[clamp(8px,0.72vw,12px)]"} font-semibold tracking-[0.22em]`}>{slide.eyebrow}</p>
         {compact ? (
