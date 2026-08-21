@@ -333,6 +333,27 @@ function workspaceSlidesFromDocument(document: PresentationDocument, assetUrlsBy
 }
 
 
+function workspaceSlideFromCanvasEvent(value: unknown, index: number, assetUrlsById: Record<string, string>): WorkspaceSlide | null {
+  if (!value || typeof value !== "object") return null;
+  const document = {
+    schemaVersion: 1,
+    presentationId: "ppt-live-build",
+    revision: 0,
+    title: "实时搭建",
+    aspectRatio: "16:9",
+    canvas: { width: 13.333, height: 7.5 },
+    theme: {
+      name: "Aurora",
+      colors: { background: "#0B1020", surface: "#151C33", text: "#F7F8FC", mutedText: "#AAB2C8", accent1: "#7657FF", accent2: "#39C6B4" },
+      fonts: { heading: "Microsoft YaHei", body: "Microsoft YaHei", mono: "Cascadia Mono" },
+    },
+    slides: [value],
+    metadata: { language: "zh-CN", createdAt: timestamp(), updatedAt: timestamp() },
+  } as unknown as PresentationDocument;
+  return workspaceSlidesFromDocument(document, assetUrlsById)[0] ?? null;
+}
+
+
 function workflowStepForPhase(phase: string): number {
   const index = ["PLAN", "SEARCH_1", "SEARCH_2", "SEARCH_3", "WEB_ASSETS", "AI_ASSETS", "OUTLINE", "BUILD", "REVIEW"].indexOf(phase);
   return index < 0 ? 0 : index;
@@ -458,7 +479,10 @@ function runDetailsFromState(state: Record<string, unknown>): Record<string, str
     const slideCount = typeof build.slideCount === "number" ? build.slideCount : 0;
     const completedSlides = typeof build.completedSlides === "number" ? build.completedSlides : slideCount;
     const provider = typeof build.writerProvider === "string" && build.writerProvider !== "demo" ? ` · ${build.writerProvider} 写作` : "";
-    details.build = build.status === "completed" ? `${slideCount} 页 · 逐页完成${provider}` : `${completedSlides} / ${slideCount} 页 · 正在分段写作${provider}`;
+    const activeSlide = build.activeSlide && typeof build.activeSlide === "object" ? build.activeSlide as Record<string, unknown> : null;
+    const component = activeSlide && typeof activeSlide.componentIndex === "number" && typeof activeSlide.componentCount === "number"
+      ? ` · 组件 ${activeSlide.componentIndex}/${activeSlide.componentCount}` : "";
+    details.build = build.status === "completed" ? `${slideCount} 页 · 逐页完成${provider}` : `${completedSlides} / ${slideCount} 页 · 正在分段写作${component}${provider}`;
   }
   const quality = state.qualityReport && typeof state.qualityReport === "object" ? state.qualityReport as Record<string, unknown> : null;
   if (quality) details.review = quality.status === "passed" ? "检查通过 · 可导出" : "存在待处理项 · 可继续检查";
@@ -942,9 +966,23 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           const writingTitle = typeof event.data.title === "string" && event.data.title.trim() ? event.data.title.trim() : null;
           const writerProvider = typeof event.data.writerProvider === "string" && event.data.writerProvider !== "demo" ? event.data.writerProvider : null;
           const phaseProgressMeta = completedSlides !== null && slideCount !== null
-            ? `${completedSlides} / ${slideCount} 页 · ${writingTitle ? `已写入「${writingTitle}」` : "逐页搭建"}${writerProvider ? ` · ${writerProvider}` : ""}`
+            ? `${completedSlides} / ${slideCount} 页 · ${typeof event.data.componentLabel === "string" ? `正在${event.data.componentLabel}` : writingTitle ? `已写入「${writingTitle}」` : "逐页搭建"}${typeof event.data.componentIndex === "number" && typeof event.data.componentCount === "number" ? ` · 组件 ${event.data.componentIndex}/${event.data.componentCount}` : ""}${writerProvider ? ` · ${writerProvider}` : ""}`
             : progressMeta;
           setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: phaseProgressMeta }));
+          const livePageNumber = typeof event.data.pageNumber === "number" ? event.data.pageNumber : null;
+          if (phase === "BUILD" && event.data.canvasSlide && livePageNumber !== null) {
+            const liveSlide = workspaceSlideFromCanvasEvent(event.data.canvasSlide, livePageNumber - 1, assetUrlsByIdRef.current);
+            if (liveSlide) {
+              setSlides((current) => {
+                const existingIndex = current.findIndex((item) => item.id === liveSlide.id);
+                if (existingIndex >= 0) return current.map((item, itemIndex) => itemIndex === existingIndex ? liveSlide : item);
+                const next = [...current];
+                next.splice(Math.min(Math.max(0, livePageNumber - 1), next.length), 0, liveSlide);
+                return next;
+              });
+              setActiveSlideId(liveSlide.id);
+            }
+          }
           if (phase === "WEB_ASSETS" || phase === "AI_ASSETS") {
             const assets = Array.isArray(event.data.assets) ? event.data.assets : [];
             registerRunAssets([event.data]);
