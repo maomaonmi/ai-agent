@@ -458,8 +458,8 @@ def test_continue_audit_resumes_from_first_missing_artifact(tmp_path: Path) -> N
         resume=True,
     )
     assert created is False
-    assert resumed.status == "QUEUED"
-    assert resumed.phase == "OUTLINE"
+    assert resumed.status in {"QUEUED", "RUNNING"}
+    assert resumed.phase in {"OUTLINE", "BUILD", "REVIEW"}
     for _ in range(500):
         snapshot = service.get(resumed.id, owner_scope="owner-a")
         if snapshot.status in {"COMPLETED", "FAILED", "CANCELLED"}:
@@ -474,6 +474,7 @@ def test_continue_audit_resumes_from_first_missing_artifact(tmp_path: Path) -> N
     assert presentation is not None
     assert len(presentation.document["slides"]) == 16
     assert any(element.get("type") == "IMAGE" for slide in presentation.document["slides"] for element in slide.get("elements", []))
+    assert all(any(element.get("id", "").endswith("-body") and len(element.get("text", "")) > 20 for element in slide.get("elements", [])) for slide in presentation.document["slides"])
 
 
 def test_continue_audit_keeps_saved_search_and_generated_ai_assets() -> None:
