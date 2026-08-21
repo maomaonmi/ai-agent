@@ -6,6 +6,7 @@ import { createStore } from "zustand/vanilla";
 import {
   PptApiError,
   createPptApi,
+  resolvePptAssetUrl,
   type PptPresentationResponse,
   type PptTemplateListResponse,
 } from "../src/features/ppt/api.ts";
@@ -124,6 +125,24 @@ test("run API starts, polls, and cancels a durable agent loop", async () => {
       "http://ppt.test/api/ppt/runs/run-1",
       "http://ppt.test/api/ppt/runs/run-1/cancel",
     ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test("PPT asset repair uses the durable local asset endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  const api = createPptApi("http://ppt.test");
+  try {
+    globalThis.fetch = async (input) => {
+      assert.equal(String(input), "http://ppt.test/api/ppt/runs/run-1/repair-assets");
+      return new Response(JSON.stringify({ runId: "run-1" }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    await api.repairRunAssets("run-1");
+    assert.equal(resolvePptAssetUrl("/api/ppt/assets/asset-1/content", "http://ppt.test"), "http://ppt.test/api/ppt/assets/asset-1/content");
+    assert.equal(resolvePptAssetUrl("https://cdn.example/image.png"), "https://cdn.example/image.png");
+    assert.equal(resolvePptAssetUrl("/not-a-ppt-asset"), "");
   } finally {
     globalThis.fetch = originalFetch;
   }

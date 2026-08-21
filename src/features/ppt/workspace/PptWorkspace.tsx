@@ -43,7 +43,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 
-import { PptApiError, pptApi, type PptPresentationResponse, type PptRunEvent } from "../api.ts";
+import { PptApiError, pptApi, resolvePptAssetUrl, type PptPresentationResponse, type PptRunEvent } from "../api.ts";
 import type { PresentationDocument } from "../types.ts";
 
 type CanvasItem =
@@ -343,7 +343,8 @@ function imageUrlsFromRunState(value: unknown): string[] {
   return assets.flatMap((asset) => {
     if (!asset || typeof asset !== "object") return [];
     const imageUrl = (asset as Record<string, unknown>).imageUrl;
-    return typeof imageUrl === "string" && /^https?:\/\//.test(imageUrl) ? [imageUrl] : [];
+    const resolved = resolvePptAssetUrl(imageUrl);
+    return resolved ? [resolved] : [];
   });
 }
 
@@ -354,7 +355,7 @@ function assetProvenanceFromRunState(value: unknown): AssetProvenance[] {
   return assets.flatMap((asset) => {
     if (!asset || typeof asset !== "object") return [];
     const item = asset as Record<string, unknown>;
-    const imageUrl = typeof item.imageUrl === "string" && /^https?:\/\//.test(item.imageUrl) ? item.imageUrl : "";
+    const imageUrl = resolvePptAssetUrl(item.imageUrl);
     if (!imageUrl) return [];
     return [{
       imageUrl,
@@ -371,7 +372,7 @@ function candidateProvenanceFromRunState(value: unknown): AssetProvenance[] {
   return candidates.flatMap((candidate) => {
     if (!candidate || typeof candidate !== "object") return [];
     const item = candidate as Record<string, unknown>;
-    const imageUrl = typeof item.imageUrl === "string" && /^https?:\/\//.test(item.imageUrl) ? item.imageUrl : "";
+    const imageUrl = resolvePptAssetUrl(item.imageUrl);
     if (!imageUrl) return [];
     return [{
       imageUrl,
@@ -396,7 +397,7 @@ function searchSourcesFromRunState(value: unknown): Record<string, SearchSource[
       return [{
         title: typeof item.title === "string" ? item.title : "未命名来源",
         url,
-        ...(typeof item.imageUrl === "string" ? { imageUrl: item.imageUrl } : {}),
+        ...(resolvePptAssetUrl(item.imageUrl) ? { imageUrl: resolvePptAssetUrl(item.imageUrl) } : {}),
         ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}),
       }];
     });
@@ -845,7 +846,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
               const candidate = source as Record<string, unknown>;
               const url = typeof candidate.url === "string" ? candidate.url : "";
               const title = typeof candidate.title === "string" ? candidate.title : "未命名来源";
-              return /^https?:\/\//.test(url) ? [{ title, url, ...(typeof candidate.imageUrl === "string" ? { imageUrl: candidate.imageUrl } : {}), ...(typeof candidate.pageUrl === "string" ? { pageUrl: candidate.pageUrl } : {}) }] : [];
+              return /^https?:\/\//.test(url) ? [{ title, url, ...(resolvePptAssetUrl(candidate.imageUrl) ? { imageUrl: resolvePptAssetUrl(candidate.imageUrl) } : {}), ...(typeof candidate.pageUrl === "string" ? { pageUrl: candidate.pageUrl } : {}) }] : [];
             });
             setSearchSources((current) => ({ ...current, [workflow[phaseStep].id]: sources }));
           }
@@ -854,20 +855,23 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
             const urls = assets.flatMap((asset) => {
               if (!asset || typeof asset !== "object") return [];
               const candidate = asset as Record<string, unknown>;
-              return typeof candidate.imageUrl === "string" && /^https?:\/\//.test(candidate.imageUrl) ? [candidate.imageUrl] : [];
+              const resolved = resolvePptAssetUrl(candidate.imageUrl);
+              return resolved ? [resolved] : [];
             });
             setAssetSources((current) => ({ ...current, [workflow[phaseStep].id]: urls }));
             setAssetProvenance((current) => ({ ...current, [workflow[phaseStep].id]: assets.flatMap((asset) => {
               if (!asset || typeof asset !== "object") return [];
               const item = asset as Record<string, unknown>;
-              return typeof item.imageUrl === "string" ? [{ imageUrl: item.imageUrl, ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}), ...(typeof item.alt === "string" ? { alt: item.alt } : {}) }] : [];
+              const resolved = resolvePptAssetUrl(item.imageUrl);
+              return resolved ? [{ imageUrl: resolved, ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}), ...(typeof item.alt === "string" ? { alt: item.alt } : {}) }] : [];
             }) }));
             if (phase === "WEB_ASSETS") {
               const candidates = Array.isArray(event.data.candidateSources) ? event.data.candidateSources : [];
               setCandidateSources((current) => ({ ...current, "web-assets": candidates.flatMap((candidate) => {
                 if (!candidate || typeof candidate !== "object") return [];
                 const item = candidate as Record<string, unknown>;
-                return typeof item.imageUrl === "string" ? [{ imageUrl: item.imageUrl, ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}), ...(typeof item.title === "string" ? { alt: item.title } : {}) }] : [];
+                const resolved = resolvePptAssetUrl(item.imageUrl);
+                return resolved ? [{ imageUrl: resolved, ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}), ...(typeof item.title === "string" ? { alt: item.title } : {}) }] : [];
               }) }));
             }
           }
@@ -890,20 +894,23 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
             const urls = assets.flatMap((asset) => {
               if (!asset || typeof asset !== "object") return [];
               const candidate = asset as Record<string, unknown>;
-              return typeof candidate.imageUrl === "string" && /^https?:\/\//.test(candidate.imageUrl) ? [candidate.imageUrl] : [];
+              const resolved = resolvePptAssetUrl(candidate.imageUrl);
+              return resolved ? [resolved] : [];
             });
             setAssetSources((current) => ({ ...current, [workflow[phaseStep].id]: urls }));
             setAssetProvenance((current) => ({ ...current, [workflow[phaseStep].id]: assets.flatMap((asset) => {
               if (!asset || typeof asset !== "object") return [];
               const item = asset as Record<string, unknown>;
-              return typeof item.imageUrl === "string" ? [{ imageUrl: item.imageUrl, ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}), ...(typeof item.alt === "string" ? { alt: item.alt } : {}) }] : [];
+              const resolved = resolvePptAssetUrl(item.imageUrl);
+              return resolved ? [{ imageUrl: resolved, ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}), ...(typeof item.alt === "string" ? { alt: item.alt } : {}) }] : [];
             }) }));
             if (phase === "WEB_ASSETS") {
               const candidates = Array.isArray(event.data.candidateSources) ? event.data.candidateSources : [];
               setCandidateSources((current) => ({ ...current, "web-assets": candidates.flatMap((candidate) => {
                 if (!candidate || typeof candidate !== "object") return [];
                 const item = candidate as Record<string, unknown>;
-                return typeof item.imageUrl === "string" ? [{ imageUrl: item.imageUrl, ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}), ...(typeof item.title === "string" ? { alt: item.title } : {}) }] : [];
+                const resolved = resolvePptAssetUrl(item.imageUrl);
+                return resolved ? [{ imageUrl: resolved, ...(typeof item.pageUrl === "string" ? { pageUrl: item.pageUrl } : {}), ...(typeof item.title === "string" ? { alt: item.title } : {}) }] : [];
               }) }));
             }
           }
@@ -950,7 +957,16 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     resumeStartedRef.current = true;
     const resume = async () => {
       try {
-        const run = await pptApi.getRun(resumeRunId);
+        let run: Awaited<ReturnType<typeof pptApi.getRun>>;
+        try {
+          // Older runs may still contain third-party URLs. Rehydrate those
+          // bytes before restoring the state so history thumbnails survive
+          // refreshes and provider URL expiry.
+          run = await pptApi.repairRunAssets(resumeRunId);
+        } catch (error) {
+          if (!(error instanceof PptApiError) || error.status !== 404) throw error;
+          run = await pptApi.getRun(resumeRunId);
+        }
         if (run.presentationId !== presentationId) return;
         const state = run.state;
         setSearchSources(searchSourcesFromRunState(state.searchRounds));

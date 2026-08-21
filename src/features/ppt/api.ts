@@ -2,6 +2,14 @@ import type { PresentationDocument } from "./types.ts";
 
 const DEFAULT_API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+/** Resolve durable PPT asset URLs without exposing the third-party origin. */
+export function resolvePptAssetUrl(value: unknown, baseUrl = DEFAULT_API_BASE_URL): string {
+  if (typeof value !== "string" || !value.trim()) return "";
+  if (/^(https?:|data:|blob:)/i.test(value)) return value;
+  if (value.startsWith("/api/ppt/")) return `${baseUrl.replace(/\/$/, "")}${value}`;
+  return "";
+}
+
 export type PptTemplateSource = "SYSTEM" | "PRIVATE";
 export type PptTemplateStatus = "UPLOADING" | "SCANNING" | "PARSING" | "RENDERING" | "READY" | "FAILED";
 
@@ -177,6 +185,7 @@ export interface PptApi {
   listResumableRuns(signal?: AbortSignal): Promise<PptRunListResponse>;
   listHistoryRuns(signal?: AbortSignal): Promise<PptHistoryResponse>;
   getRun(runId: string, signal?: AbortSignal): Promise<PptRunResponse>;
+  repairRunAssets(runId: string, signal?: AbortSignal): Promise<PptRunResponse>;
   subscribeRunEvents(runId: string, onEvent: (event: PptRunEvent) => void, options?: PptRunEventOptions): Promise<void>;
   cancelRun(runId: string): Promise<PptRunResponse>;
 }
@@ -321,6 +330,10 @@ export function createPptApi(baseUrl = DEFAULT_API_BASE_URL): PptApi {
     getRun: (runId, signal) => request<PptRunResponse>(
       `/api/ppt/runs/${encodeURIComponent(runId)}`,
       { signal },
+    ),
+    repairRunAssets: (runId, signal) => request<PptRunResponse>(
+      `/api/ppt/runs/${encodeURIComponent(runId)}/repair-assets`,
+      { method: "POST", signal },
     ),
     subscribeRunEvents: async (runId, onEvent, options = {}) => {
       const search = new URLSearchParams({ follow: "true" });
