@@ -2,6 +2,7 @@
 
 import { MODE_OPTIONS } from './ModeSelector';
 import { SessionSummary } from '../lib/api';
+import type { PptHistoryRun } from '../features/ppt/api';
 import { Activity, ChevronUp, Film, LogOut, Presentation, Puzzle, Settings, UserRound, Workflow } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
@@ -24,10 +25,31 @@ interface SessionSidebarProps {
   onOpenVideoStudio: () => void;
   onOpenVisualWorkflow: () => void;
   onOpenPpt: () => void;
+  pptHistory: PptHistoryRun[];
+  pptHistoryLoading: boolean;
+  onSelectPptHistory: (run: PptHistoryRun) => void;
 }
 
 function modeLabel(mode: SessionSummary['mode']) {
   return MODE_OPTIONS.find((option) => option.id === mode)?.label ?? mode;
+}
+
+function pptStatusLabel(status: PptHistoryRun['status']): string {
+  switch (status) {
+    case 'COMPLETED': return '已完成';
+    case 'RUNNING': return '制作中';
+    case 'QUEUED': return '排队中';
+    case 'PAUSED': return '已暂停';
+    case 'CANCELLED': return '已取消';
+    case 'FAILED': return '失败';
+    default: return status;
+  }
+}
+
+function formatPptHistoryDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(date);
 }
 
 export default function SessionSidebar({
@@ -49,6 +71,9 @@ export default function SessionSidebar({
   onOpenVideoStudio,
   onOpenVisualWorkflow,
   onOpenPpt,
+  pptHistory,
+  pptHistoryLoading,
+  onSelectPptHistory,
 }: SessionSidebarProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -135,7 +160,7 @@ export default function SessionSidebar({
             className="mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800"
           >
             <Workflow size={16} className="shrink-0 text-violet-500" />
-            AI 工作流
+            视频流工作台
           </button>
           <button
             type="button"
@@ -156,6 +181,40 @@ export default function SessionSidebar({
         </div>
 
         <nav className="min-h-0 flex-1 overflow-y-auto p-2">
+          <section aria-labelledby="ppt-history-heading" className="mb-3 border-b border-slate-100 pb-3">
+            <div className="flex items-center justify-between px-3 py-2">
+              <h3 id="ppt-history-heading" className="text-xs font-semibold text-slate-700">PPT 历史记录</h3>
+              <span className="text-[10px] text-slate-400">{pptHistoryLoading ? '加载中…' : `${pptHistory.length} 条`}</span>
+            </div>
+            {pptHistoryLoading ? (
+              <div role="status" aria-label="正在加载 PPT 历史记录" className="space-y-2 px-3 py-2">
+                <div className="h-10 animate-pulse rounded-lg bg-slate-100" />
+                <div className="h-10 animate-pulse rounded-lg bg-slate-100" />
+              </div>
+            ) : pptHistory.length === 0 ? (
+              <p className="px-3 py-3 text-xs text-slate-400">暂无 PPT 历史记录</p>
+            ) : (
+              <ul className="space-y-1" aria-label="PPT 历史会话列表">
+                {pptHistory.map((run) => (
+                  <li key={run.runId}>
+                    <button
+                      type="button"
+                      onClick={() => onSelectPptHistory(run)}
+                      aria-label={`打开 PPT 会话：${run.title}`}
+                      title={`presentationId: ${run.presentationId}\nrunId: ${run.runId}`}
+                      className="w-full rounded-lg px-3 py-2 text-left hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+                    >
+                      <span className="block truncate text-xs font-medium text-slate-800">{run.title}</span>
+                      <span className="mt-0.5 flex items-center justify-between gap-2 text-[10px] text-slate-400">
+                        <span className="truncate">{pptStatusLabel(run.status)} · {formatPptHistoryDate(run.updatedAt)}</span>
+                        <span className="shrink-0 font-mono">…{run.runId.slice(-6)}</span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
           {sessions.length === 0 ? (
             <div className="px-3 py-10 text-center text-sm text-slate-400">
               暂无历史会话
@@ -262,8 +321,8 @@ export default function SessionSidebar({
           </button>
           <button
             type="button"
-            aria-label="打开 AI 工作流"
-            title="AI 工作流"
+            aria-label="打开视频流工作台"
+            title="视频流工作台"
             onClick={onOpenVisualWorkflow}
             className="mt-3 flex h-9 w-9 items-center justify-center rounded-lg text-violet-600 hover:bg-violet-50 hover:text-violet-700"
           >

@@ -75,6 +75,7 @@ import ResearchWorkspace from '../features/deep-research/ResearchWorkspace';
 import PlanWorkspace from '../features/autonomous-plan/PlanWorkspace';
 import PlanChainTimeline from '../features/autonomous-plan/PlanChainTimeline';
 import ResearchDocumentCard from '../features/deep-research/ResearchDocumentCard';
+import { pptApi, type PptHistoryRun } from '../features/ppt/api';
 import { deriveReportTitle } from '../features/deep-research/report/researchReportAdapter';
 import { useTypewriterPacing } from '../lib/useTypewriterPacing';
 import type { CompiledWritingPrompt } from '../features/ai-writing/writingTypes';
@@ -404,6 +405,8 @@ export default function ChatInterface() {
   // Why: Code 模式需要感知当前模型是否支持多模态，决定是否开放粘贴/上传图片入口。
   const [currentModelSettings, setCurrentModelSettings] = useState<ModelSettings | null>(null);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [pptHistory, setPptHistory] = useState<PptHistoryRun[]>([]);
+  const [pptHistoryLoading, setPptHistoryLoading] = useState(true);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [selectedResearchMessageIndex, setSelectedResearchMessageIndex] = useState<number | null>(null);
   const [writingSessionRestore, setWritingSessionRestore] = useState<{
@@ -1252,6 +1255,24 @@ export default function ChatInterface() {
     setInput(draftPrompt);
     setView('image-studio');
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPptHistoryLoading(true);
+    void pptApi.listHistoryRuns()
+      .then((response) => {
+        if (!cancelled) setPptHistory(response.runs);
+      })
+      .catch(() => {
+        // The PPT history section remains usable when an older backend is
+        // still running; it will populate after the process is upgraded.
+        if (!cancelled) setPptHistory([]);
+      })
+      .finally(() => {
+        if (!cancelled) setPptHistoryLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
   const openImagePlaza = useCallback((draftPrompt = '') => {
     setInput(draftPrompt);
     setView('image-plaza');
@@ -1275,6 +1296,9 @@ export default function ChatInterface() {
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.round(Math.random() * 1_000_000)}`;
     window.location.assign(`/ppt/workspace/new?source=sidebar&session=${sessionId}`);
+  }, []);
+  const openPptHistory = useCallback((run: PptHistoryRun) => {
+    window.location.assign(`/ppt/workspace/${encodeURIComponent(run.presentationId)}?source=history&runId=${encodeURIComponent(run.runId)}&resume=1`);
   }, []);
 
   // Why: Create with agent（计划书 §3.1 D4）——关市场→新建会话→输入框预填随机提示词（不发送）。
@@ -2299,6 +2323,9 @@ export default function ChatInterface() {
         onOpenVideoStudio={() => openVideoWorkspace()}
         onOpenVisualWorkflow={openVisualWorkflow}
         onOpenPpt={openPptWorkspace}
+        pptHistory={pptHistory}
+        pptHistoryLoading={pptHistoryLoading}
+        onSelectPptHistory={openPptHistory}
       />
       <SettingsDialog
         open={isSettingsOpen}
