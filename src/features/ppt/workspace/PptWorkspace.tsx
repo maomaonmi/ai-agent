@@ -310,7 +310,7 @@ function presentationDocumentFromWorkspace(presentationId: string, templateId: s
 }
 
 
-function workspaceSlidesFromDocument(document: PresentationDocument): WorkspaceSlide[] {
+function workspaceSlidesFromDocument(document: PresentationDocument, assetUrlsById: Record<string, string> = {}): WorkspaceSlide[] {
   return document.slides.map((slide, index) => {
     const textElements = slide.elements.filter((element) => element.type === "TEXT");
     const title = textElements.find((element) => element.id.endsWith("-title"))?.text ?? `第 ${index + 1} 页`;
@@ -321,12 +321,14 @@ function workspaceSlidesFromDocument(document: PresentationDocument): WorkspaceS
       const base = { id: element.id, x: element.x * 100, y: element.y * 100, w: element.width * 100, h: element.height * 100 };
       if (element.type === "TEXT") items.push({ ...base, kind: "text", text: element.text });
       else if (element.type === "SHAPE") items.push({ ...base, kind: "shape", shape: element.shapeType === "ELLIPSE" ? "ellipse" : "rect" });
-      else if (element.type === "IMAGE") items.push({ ...base, kind: "image", src: generatedAssets[index % generatedAssets.length], alt: element.alt });
+      else if (element.type === "IMAGE") items.push({ ...base, kind: "image", src: assetUrlsById[element.assetId] ?? generatedAssets[index % generatedAssets.length], alt: element.alt });
       else if (element.type === "TABLE") items.push({ ...base, kind: "table" });
       else if (element.type === "CHART") items.push({ ...base, kind: "chart" });
     }
     const backgroundColor = slide.background.type === "SOLID" ? slide.background.color : "#0F172A";
-    return { id: slide.id, eyebrow, title, subtitle, image: generatedAssets[index % generatedAssets.length], tone: backgroundColor === "#F4EFE8" ? "light" : "dark", notes: slide.notes ?? "", items };
+    const imageElement = slide.elements.find((element) => element.type === "IMAGE");
+    const image = imageElement?.type === "IMAGE" ? assetUrlsById[imageElement.assetId] ?? generatedAssets[index % generatedAssets.length] : generatedAssets[index % generatedAssets.length];
+    return { id: slide.id, eyebrow, title, subtitle, image, tone: backgroundColor === "#F4EFE8" ? "light" : "dark", notes: slide.notes ?? "", items };
   });
 }
 
@@ -363,6 +365,23 @@ function assetProvenanceFromRunState(value: unknown): AssetProvenance[] {
       ...(typeof item.alt === "string" ? { alt: item.alt } : {}),
     }];
   });
+}
+
+function assetUrlsByIdFromRunState(...values: unknown[]): Record<string, string> {
+  const mapped: Record<string, string> = {};
+  values.forEach((value) => {
+    if (!value || typeof value !== "object") return;
+    const assets = (value as Record<string, unknown>).assets;
+    if (!Array.isArray(assets)) return;
+    assets.forEach((asset) => {
+      if (!asset || typeof asset !== "object") return;
+      const item = asset as Record<string, unknown>;
+      const assetId = typeof item.assetId === "string" ? item.assetId : "";
+      const imageUrl = resolvePptAssetUrl(item.imageUrl);
+      if (assetId && imageUrl) mapped[assetId] = imageUrl;
+    });
+  });
+  return mapped;
 }
 
 function candidateProvenanceFromRunState(value: unknown): AssetProvenance[] {
@@ -671,6 +690,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const [mobileWorkflowOpen, setMobileWorkflowOpen] = useState(false);
   const [leftWidth, setLeftWidth] = useState(420);
   const [serverPresentation, setServerPresentation] = useState<PptPresentationResponse | null>(null);
+  const [assetUrlsById, setAssetUrlsById] = useState<Record<string, string>>({});
   const [serverState, setServerState] = useState<"loading" | "ready" | "offline" | "error">("loading");
   const [runId, setRunId] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => [{
@@ -680,6 +700,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   }]);
   const canvasRef = useRef<HTMLDivElement>(null);
   const serverPresentationRef = useRef<PptPresentationResponse | null>(null);
+  const assetUrlsByIdRef = useRef<Record<string, string>>({});
   const persistenceQueueRef = useRef(Promise.resolve());
   const runEventControllerRef = useRef<AbortController | null>(null);
   const lastRunEventIdRef = useRef(0);
@@ -688,6 +709,13 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const activeSlide = slides.find((slide) => slide.id === activeSlideId) ?? slides[0];
   const activeIndex = slides.findIndex((slide) => slide.id === activeSlide.id);
   const started = running || workflowStep > 0 || chatMessages.some((message) => message.role === "user");
+
+  const registerRunAssets = (values: unknown[]) => {
+    const next = { ...assetUrlsByIdRef.current, ...assetUrlsByIdFromRunState(...values) };
+    assetUrlsByIdRef.current = next;
+    setAssetUrlsById(next);
+    return next;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -727,7 +755,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           if (templateId !== "blank") query.set("templateId", templateId);
           router.replace(`/ppt/workspace/${encodeURIComponent(nextPresentation.presentationId)}${query.toString() ? `?${query}` : ""}`);
         } else {
-          const restoredSlides = workspaceSlidesFromDocument(nextPresentation.document);
+          const restoredSlides = workspaceSlidesFromDocument(nextPresentation.document, assetUrlsById);
           if (restoredSlides.length > 0) {
             setSlides(restoredSlides);
             setActiveSlideId(restoredSlides[0].id);
@@ -867,6 +895,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           }
           if (phase === "WEB_ASSETS" || phase === "AI_ASSETS") {
             const assets = Array.isArray(event.data.assets) ? event.data.assets : [];
+            registerRunAssets([event.data]);
             const urls = assets.flatMap((asset) => {
               if (!asset || typeof asset !== "object") return [];
               const candidate = asset as Record<string, unknown>;
@@ -909,6 +938,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: phaseProgressMeta }));
           if (phase === "WEB_ASSETS" || phase === "AI_ASSETS") {
             const assets = Array.isArray(event.data.assets) ? event.data.assets : [];
+            registerRunAssets([event.data]);
             const urls = assets.flatMap((asset) => {
               if (!asset || typeof asset !== "object") return [];
               const candidate = asset as Record<string, unknown>;
@@ -937,6 +967,18 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         if (event.type === "run.completed") {
           setWorkflowStep(workflow.length - 1);
           setRunning(false);
+          const completedPresentation = serverPresentationRef.current;
+          if (completedPresentation) {
+            void pptApi.getPresentation(completedPresentation.presentationId).then((updated) => {
+              serverPresentationRef.current = updated;
+              setServerPresentation(updated);
+              const restoredSlides = workspaceSlidesFromDocument(updated.document, assetUrlsByIdRef.current);
+              if (restoredSlides.length > 0) {
+                setSlides(restoredSlides);
+                setActiveSlideId(restoredSlides[0].id);
+              }
+            }).catch(() => undefined);
+          }
           setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "已完成实时搭建。你可以在右侧继续编辑每一页，或导出 PPTX。" }]);
           return;
         }
@@ -987,6 +1029,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         }
         if (run.presentationId !== presentationId) return;
         const state = run.state;
+        const restoredAssetUrls = registerRunAssets([state.webImages, state.aiImages]);
         setSearchSources(searchSourcesFromRunState(state.searchRounds));
         setWorkflowDetails(runDetailsFromState(state));
         setAssetSources({
@@ -998,6 +1041,14 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           "ai-assets": assetProvenanceFromRunState(state.aiImages),
         });
         setCandidateSources({ "web-assets": candidateProvenanceFromRunState(state.webImages) });
+        const hydratedPresentation = serverPresentationRef.current;
+        if (hydratedPresentation) {
+          const restoredSlides = workspaceSlidesFromDocument(hydratedPresentation.document, restoredAssetUrls);
+          if (restoredSlides.length > 0) {
+            setSlides(restoredSlides);
+            setActiveSlideId(restoredSlides[0].id);
+          }
+        }
         const nextConfig: RunConfig = {
           modelProvider: state.modelProvider === "qwen" || state.modelProvider === "glm" ? state.modelProvider : "deepseek",
           searchProvider: state.searchProvider === "firecrawl" || state.searchProvider === "qwen" || state.searchProvider === "glm" ? state.searchProvider : "auto",
