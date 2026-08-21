@@ -483,6 +483,7 @@ class AgentRunService:
             not isinstance(build, Mapping)
             or build.get("status") != "completed"
             or int(build.get("contentVersion", 0) or 0) < 3
+            or int(build.get("layoutVersion", 0) or 0) < 2
             or build.get("contentMode") not in {"model-segmented", "demo-fallback"}
         ):
             return "BUILD"
@@ -499,6 +500,22 @@ class AgentRunService:
         cached += 1
         self._event_sequences[run_id] = cached
         return cached
+
+    @staticmethod
+    def _layout_for_slide(index: int, section: str) -> str:
+        """Rotate visual grammar instead of rendering every page as a clone."""
+        normalized = section.strip()
+        if index == 0:
+            return "hero"
+        if normalized in {"趋势", "指标", "对比"}:
+            return "chart"
+        if normalized in {"案例", "落地"}:
+            return "image-focus"
+        if normalized in {"方法", "路线图", "协作", "行动"}:
+            return "timeline"
+        if normalized in {"总结", "结尾"}:
+            return "closing"
+        return ("split", "grid", "quote")[index % 3]
 
     @staticmethod
     def _build_outline(prompt: str, search_rounds: list[dict[str, Any]], slide_count: int = 16) -> dict[str, Any]:
@@ -539,6 +556,7 @@ class AgentRunService:
             {
                 "ordinal": index + 1,
                 "section": title,
+                "layout": AgentRunService._layout_for_slide(index, title),
                 "title": prompt.strip()[:80] if index == 0 else title,
                 "direction": direction,
                 "sourceHint": source_titles[index % len(source_titles)] if source_titles else None,
@@ -600,8 +618,10 @@ class AgentRunService:
         background_asset_id: str | None = None,
     ) -> dict[str, Any]:
         slide_id = f"ai-slide-{index + 1}"
-        dark = index % 2 == 0
+        layout = str(slide.get("layout") or AgentRunService._layout_for_slide(index, str(slide.get("section") or "")))
+        dark = index % 2 == 0 or layout in {"hero", "quote", "closing"}
         text_color = "#FFFFFF" if dark else "#111827"
+        muted_color = "#CBD5E1" if dark else "#64748B"
         key_points = slide.get("keyPoints") if isinstance(slide.get("keyPoints"), list) else []
         body = str(slide.get("body") or "").strip()
         if not body:
@@ -613,23 +633,91 @@ class AgentRunService:
         body_text = body[:420]
         if bullet_text:
             body_text = f"{body_text}\n\n{bullet_text}" if body_text else bullet_text
-        elements: list[dict[str, Any]] = [
-            {"type": "TEXT", "id": f"{slide_id}-eyebrow", "x": 0.07, "y": 0.08, "width": 0.65, "height": 0.05, "rotation": 0, "zIndex": 3, "opacity": 1, "isLocked": False, "isHidden": False, "text": f"{index + 1:02d} · AI PPT", "style": {"fontFamily": "Microsoft YaHei", "fontSize": 14, "color": text_color, "bold": True, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "MIDDLE"}},
-            {"type": "TEXT", "id": f"{slide_id}-title", "x": 0.07, "y": 0.18, "width": 0.62, "height": 0.25, "rotation": 0, "zIndex": 3, "opacity": 1, "isLocked": False, "isHidden": False, "text": str(slide.get("title") or slide.get("section") or f"第 {index + 1} 页"), "style": {"fontFamily": "Microsoft YaHei", "fontSize": 28, "color": text_color, "bold": True, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "MIDDLE"}},
-            {"type": "TEXT", "id": f"{slide_id}-subtitle", "x": 0.07, "y": 0.58, "width": 0.62, "height": 0.14, "rotation": 0, "zIndex": 2, "opacity": 1, "isLocked": False, "isHidden": False, "text": str(slide.get("subtitle") or slide.get("direction") or "从资料、观点到下一步行动。"), "style": {"fontFamily": "Microsoft YaHei", "fontSize": 14, "color": text_color, "bold": False, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "MIDDLE"}},
-            {"type": "TEXT", "id": f"{slide_id}-body", "x": 0.07, "y": 0.68, "width": 0.58, "height": 0.25, "rotation": 0, "zIndex": 2, "opacity": 1, "isLocked": False, "isHidden": False, "text": body_text or "从资料、观点到下一步行动。", "style": {"fontFamily": "Microsoft YaHei", "fontSize": 15, "color": text_color, "bold": False, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "TOP"}},
-        ]
+        elements: list[dict[str, Any]] = []
+
+        def text_element(element_id: str, value: str, x: float, y: float, width: float, height: float, *, size: int = 15, color: str = text_color, bold: bool = False, align: str = "LEFT", z_index: int = 3) -> dict[str, Any]:
+            return {"type": "TEXT", "id": f"{slide_id}-{element_id}", "x": x, "y": y, "width": width, "height": height, "rotation": 0, "zIndex": z_index, "opacity": 1, "isLocked": False, "isHidden": False, "text": value, "style": {"fontFamily": "Microsoft YaHei", "fontSize": size, "color": color, "bold": bold, "italic": False, "underline": False, "align": align, "verticalAlign": "MIDDLE" if align == "CENTER" else "TOP"}}
+
+        def shape_element(element_id: str, x: float, y: float, width: float, height: float, *, fill: str = "#FFFFFF", stroke: str = "#CBD5E1", opacity: float = 0.14) -> dict[str, Any]:
+            return {"type": "SHAPE", "id": f"{slide_id}-{element_id}", "x": x, "y": y, "width": width, "height": height, "rotation": 0, "zIndex": 1, "opacity": opacity, "isLocked": False, "isHidden": False, "shapeType": "ROUND_RECT", "fill": fill, "stroke": stroke, "strokeWidth": 1}
+
+        eyebrow = text_element("eyebrow", f"{index + 1:02d} · {str(slide.get('section') or 'AI PPT').upper()}", 0.07, 0.07, 0.78, 0.05, size=12, color=muted_color, bold=True)
+        title = str(slide.get("title") or slide.get("section") or f"第 {index + 1} 页")
+        subtitle = str(slide.get("subtitle") or slide.get("direction") or "从资料、观点到下一步行动。")
+        title_element = text_element("title", title, 0.07, 0.17, 0.68, 0.22, size=28, bold=True)
+        subtitle_element = text_element("subtitle", subtitle, 0.07, 0.55, 0.62, 0.13, size=14, color=muted_color)
+        body_element = text_element("body", body_text or "从资料、观点到下一步行动。", 0.07, 0.69, 0.58, 0.24, size=15)
+
+        if layout == "hero":
+            elements.extend([eyebrow, title_element, subtitle_element, body_element])
+        elif layout == "split":
+            title_element.update({"width": 0.43, "y": 0.16})
+            subtitle_element.update({"width": 0.40, "y": 0.43})
+            body_element.update({"width": 0.42, "y": 0.60, "height": 0.25})
+            elements.extend([eyebrow, title_element, subtitle_element, body_element])
+        elif layout == "grid":
+            title_element.update({"width": 0.82, "y": 0.15})
+            subtitle_element.update({"width": 0.82, "y": 0.38})
+            body_element.update({"width": 0.82, "y": 0.84, "height": 0.10})
+            elements.extend([eyebrow, title_element, subtitle_element, body_element])
+            points = [str(item).strip() for item in key_points[:3] if str(item).strip()] or ["事实", "判断", "行动"]
+            for point_index, point in enumerate(points):
+                x = 0.07 + point_index * 0.29
+                elements.append(shape_element(f"card-{point_index + 1}", x, 0.58, 0.25, 0.25, fill="#7C3AED" if dark else "#E2E8F0", stroke="#A78BFA" if dark else "#CBD5E1"))
+                elements.append(text_element(f"card-{point_index + 1}-text", point, x + 0.02, 0.62, 0.21, 0.16, size=14, color=text_color, bold=True))
+        elif layout == "quote":
+            title_element.update({"width": 0.82, "y": 0.15})
+            quote = text_element("body", f"“{body[:180]}”", 0.11, 0.36, 0.74, 0.28, size=23, color=text_color, bold=True, align="CENTER")
+            source = text_element("source", str(slide.get("sourceHint") or "基于已收集资料的核心判断"), 0.16, 0.72, 0.68, 0.10, size=13, color=muted_color, align="CENTER")
+            elements.extend([eyebrow, title_element, quote, source])
+        elif layout == "chart":
+            title_element.update({"width": 0.42, "y": 0.15})
+            subtitle_element.update({"width": 0.40, "y": 0.40})
+            body_element.update({"width": 0.38, "y": 0.57, "height": 0.26})
+            elements.extend([eyebrow, title_element, subtitle_element, body_element])
+        elif layout == "image-focus":
+            title_element.update({"width": 0.38, "y": 0.16})
+            subtitle_element.update({"width": 0.37, "y": 0.42})
+            body_element.update({"width": 0.37, "y": 0.57, "height": 0.27})
+            elements.extend([eyebrow, title_element, subtitle_element, body_element])
+        elif layout == "timeline":
+            title_element.update({"width": 0.82, "y": 0.15})
+            subtitle_element.update({"width": 0.82, "y": 0.35})
+            body_element.update({"width": 0.82, "y": 0.84, "height": 0.10})
+            elements.extend([eyebrow, title_element, subtitle_element, body_element])
+            points = [str(item).strip() for item in key_points[:4] if str(item).strip()] or ["准备", "验证", "执行", "复盘"]
+            for point_index, point in enumerate(points):
+                x = 0.08 + point_index * (0.78 / max(1, len(points) - 1))
+                elements.append(shape_element(f"step-{point_index + 1}", x - 0.018, 0.59, 0.036, 0.036, fill="#8B5CF6", stroke="#C4B5FD", opacity=1))
+                elements.append(text_element(f"step-{point_index + 1}-text", point, max(0.04, x - 0.08), 0.68, 0.16, 0.13, size=12, color=text_color, bold=True, align="CENTER"))
+        else:  # closing
+            title_element.update({"width": 0.82, "y": 0.24, "height": 0.25})
+            subtitle_element.update({"width": 0.82, "y": 0.57})
+            subtitle_element["style"]["align"] = "CENTER"
+            body_element.update({"x": 0.17, "width": 0.66, "y": 0.72, "height": 0.12})
+            body_element["style"]["align"] = "CENTER"
+            elements.extend([eyebrow, title_element, subtitle_element, body_element])
+
+        chart_spec = slide.get("chart") if isinstance(slide.get("chart"), Mapping) else None
+        if layout == "chart":
+            chart_spec = chart_spec or {"chartType": "BAR", "categories": ["阶段一", "阶段二", "阶段三"], "series": [{"name": "示意值", "values": [42, 68, 86], "color": "#8B5CF6"}], "showLegend": False}
+            categories = chart_spec.get("categories") if isinstance(chart_spec.get("categories"), list) else ["阶段一", "阶段二", "阶段三"]
+            series = chart_spec.get("series") if isinstance(chart_spec.get("series"), list) else [{"name": "示意值", "values": [42, 68, 86], "color": "#8B5CF6"}]
+            elements.append({"type": "CHART", "id": f"{slide_id}-chart", "x": 0.53, "y": 0.20, "width": 0.39, "height": 0.55, "rotation": 0, "zIndex": 1, "opacity": 0.96, "isLocked": False, "isHidden": False, "chartType": str(chart_spec.get("chartType") or "BAR"), "categories": categories[:8], "series": series[:3], "showLegend": bool(chart_spec.get("showLegend", False))})
         if asset_id:
-            elements.append({"type": "IMAGE", "id": f"{slide_id}-material", "x": 0.73, "y": 0.18, "width": 0.21, "height": 0.45, "rotation": 0, "zIndex": 1, "opacity": 0.94, "isLocked": False, "isHidden": False, "assetId": asset_id, "alt": "AI 工作流素材", "fit": "COVER"})
+            image_position = (0.56, 0.19, 0.36, 0.58) if layout in {"split", "image-focus"} else (0.73, 0.18, 0.21, 0.45)
+            elements.append({"type": "IMAGE", "id": f"{slide_id}-material", "x": image_position[0], "y": image_position[1], "width": image_position[2], "height": image_position[3], "rotation": 0, "zIndex": 1, "opacity": 0.94, "isLocked": False, "isHidden": False, "assetId": asset_id, "alt": "网页研究素材", "fit": "COVER"})
         source_urls = slide.get("sourceUrls") if isinstance(slide.get("sourceUrls"), list) else []
         notes = "[Sources]\n" + "\n".join(str(url) for url in source_urls[:5] if str(url).startswith("http"))
+        if layout == "chart" and not isinstance(slide.get("chart"), Mapping):
+            notes += "\n图表数据：示意性展示，需结合来源进一步核验。"
         return {
             "id": slide_id,
             "order": index,
             "background": ({"type": "IMAGE", "assetId": background_asset_id, "opacity": 1, "fit": "COVER"} if background_asset_id else {"type": "SOLID", "color": "#0B1020" if dark else "#F4EFE8"}),
             "elements": elements,
             "animations": [],
-            "notes": (notes + (f"\n素材线索：{slide.get('sourceHint')}" if slide.get("sourceHint") else "") + (f"\n演讲备注：{slide.get('speakerNotes')}" if slide.get("speakerNotes") else ""))[:2_000],
+            "notes": (notes + f"\n布局：{layout}" + (f"\n素材线索：{slide.get('sourceHint')}" if slide.get("sourceHint") else "") + (f"\n演讲备注：{slide.get('speakerNotes')}" if slide.get("speakerNotes") else ""))[:2_000],
         }
 
     @staticmethod
@@ -1021,6 +1109,7 @@ class AgentRunService:
                     can_resume_build = (
                         isinstance(existing_build, dict)
                         and existing_build.get("contentMode") == "model-segmented"
+                        and int(existing_build.get("layoutVersion", 0) or 0) >= 2
                         and int(existing_build.get("completedSlides", 0) or 0) > 0
                         and len(existing_document_slides) >= int(existing_build.get("completedSlides", 0) or 0)
                     )
@@ -1223,6 +1312,7 @@ class AgentRunService:
                                     "build": {
                                         "status": "running",
                                         "contentVersion": 3,
+                                        "layoutVersion": 2,
                                         "contentMode": "model-segmented" if writer is not None else "demo-fallback",
                                         "slideCount": len(planned_slides),
                                         "completedSlides": index + 1 if page_completed else index,
@@ -1244,6 +1334,7 @@ class AgentRunService:
                     state_patch["build"] = {
                         "status": "completed",
                         "contentVersion": 3,
+                        "layoutVersion": 2,
                         "contentMode": "model-segmented" if writer is not None else "demo-fallback",
                         "slideCount": len(built_slides),
                         "completedSlides": len(built_slides),

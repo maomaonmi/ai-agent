@@ -142,7 +142,7 @@ def test_settings_narrative_generator_writes_structured_slide_section() -> None:
 
     def request_json(endpoint: str, headers: dict[str, str], payload: dict[str, object]):
         calls.append((endpoint, payload))
-        return {"choices": [{"message": {"content": '{"title":"真实标题","subtitle":"观点","body":"这是正文段落。","keyPoints":["事实"],"speakerNotes":"备注","sourceUrls":["https://example.com/source"]}'}}]}
+        return {"choices": [{"message": {"content": '{"title":"真实标题","subtitle":"观点","body":"这是正文段落。","keyPoints":["事实"],"speakerNotes":"备注","sourceUrls":["https://example.com/source"],"chart":{"chartType":"LINE","categories":["一季度","二季度"],"series":[{"name":"采用率","values":[42,68],"color":"#7C3AED"}],"showLegend":true}}'}}]}
 
     generator = SettingsNarrativeGenerator(
         provider="qwen",
@@ -162,6 +162,8 @@ def test_settings_narrative_generator_writes_structured_slide_section() -> None:
 
     assert result["title"] == "真实标题"
     assert result["ordinal"] == 2
+    assert result["chart"]["chartType"] == "LINE"
+    assert result["chart"]["series"][0]["values"] == [42.0, 68.0]
     assert calls[0][0].endswith("/chat/completions")
     assert calls[0][1]["response_format"] == {"type": "json_object"}
 

@@ -565,13 +565,24 @@ def test_build_writes_model_generated_sections_one_page_at_a_time(tmp_path: Path
     assert snapshot.status == "COMPLETED"
     assert narrative.calls == list(range(1, 17))
     assert snapshot.state["build"]["contentMode"] == "model-segmented"
+    assert snapshot.state["build"]["layoutVersion"] == 2
     assert snapshot.state["build"]["completedSlides"] == 16
+    assert len({slide.get("layout") for slide in snapshot.state["outline"]["slides"]}) >= 6
     presentation = repository.get_presentation("presentation-narrative-001", owner_scope="owner-a")
     assert presentation is not None
     assert presentation.document["slides"][0]["elements"][1]["text"] == "模型标题 1"
     assert "模型真实写入的第 1 页正文" in next(
         element["text"] for element in presentation.document["slides"][0]["elements"] if element["id"].endswith("-body")
     )
+    chart_elements = [
+        element
+        for slide in presentation.document["slides"]
+        for element in slide.get("elements", [])
+        if element.get("type") == "CHART"
+    ]
+    assert chart_elements
+    assert chart_elements[0]["categories"] == ["阶段一", "阶段二", "阶段三"]
+    assert chart_elements[0]["series"][0]["values"] == [42, 68, 86]
     progress = [
         event for event in repository.list_run_events(run.id, after_sequence=0, limit=500)
         if event.event_type == "phase.progress" and event.payload.get("phase") == "BUILD"

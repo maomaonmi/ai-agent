@@ -1005,6 +1005,36 @@ class SettingsNarrativeGenerator:
         urls = parsed.get("sourceUrls")
         if isinstance(urls, Sequence) and not isinstance(urls, (str, bytes, bytearray)):
             result["sourceUrls"] = [str(item).strip() for item in urls if str(item).startswith(("http://", "https://"))][:5]
+        chart = parsed.get("chart")
+        if isinstance(chart, Mapping):
+            chart_type = str(chart.get("chartType") or "BAR").upper()
+            categories = chart.get("categories")
+            series = chart.get("series")
+            allowed_types = {"BAR", "LINE", "PIE", "DOUGHNUT", "AREA"}
+            if chart_type in allowed_types and isinstance(categories, Sequence) and not isinstance(categories, (str, bytes, bytearray)) and isinstance(series, Sequence):
+                clean_categories = [str(item).strip() for item in categories if str(item).strip()][:8]
+                clean_series: list[dict[str, object]] = []
+                for entry in series[:3]:
+                    if not isinstance(entry, Mapping):
+                        continue
+                    values = entry.get("values")
+                    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+                        continue
+                    numeric_values: list[float] = []
+                    for value in values[: len(clean_categories)]:
+                        try:
+                            numeric_values.append(float(value))
+                        except (TypeError, ValueError):
+                            numeric_values = []
+                            break
+                    if len(numeric_values) == len(clean_categories) and numeric_values:
+                        clean_series.append({
+                            "name": str(entry.get("name") or "指标"),
+                            "values": numeric_values,
+                            **({"color": str(entry["color"])} if isinstance(entry.get("color"), str) else {}),
+                        })
+                if clean_categories and clean_series:
+                    result["chart"] = {"chartType": chart_type, "categories": clean_categories, "series": clean_series, "showLegend": bool(chart.get("showLegend", False))}
         return result
 
     def generate_slide(
@@ -1050,6 +1080,7 @@ class SettingsNarrativeGenerator:
                 "keyPoints": ["2-4条可验证要点"],
                 "speakerNotes": "80-160字演讲备注",
                 "sourceUrls": ["只填写实际使用的证据 URL"],
+                "chart": "趋势、指标、对比页可选；格式为 {chartType, categories, series, showLegend}，没有可靠数字时不要返回",
             },
         }
         payload: dict[str, object] = {
