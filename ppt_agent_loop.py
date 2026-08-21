@@ -457,8 +457,12 @@ class AgentRunService:
             return "WEB_ASSETS"
         ai = state.get("aiImages") if isinstance(state, Mapping) else None
         ai_assets = ai.get("assets", []) if isinstance(ai, Mapping) else []
-        durable_ai_count = sum(1 for asset in ai_assets if isinstance(asset, Mapping) and str(asset.get("imageUrl", "")).startswith("/api/ppt/assets/")) if isinstance(ai_assets, list) else 0
-        if not isinstance(ai, Mapping) or int(ai.get("generatedCount", 0) or 0) < int(ai.get("requiredCount", 3) or 3) or (ai.get("mode") == "provider" and durable_ai_count < int(ai.get("requiredCount", 3) or 3)):
+        required_ai = int(ai.get("requiredCount", 3) or 3) if isinstance(ai, Mapping) else 3
+        # A completed provider generation is an existing artifact even when
+        # the provider URL is not locally rehydrated yet.  Repair is allowed
+        # to refresh the bytes, but “继续” must not spend another generation
+        # request just because the old URL is remote.
+        if not isinstance(ai, Mapping) or int(ai.get("generatedCount", 0) or 0) < required_ai or not isinstance(ai_assets, list) or len(ai_assets) < required_ai:
             return "AI_ASSETS"
         outline = state.get("outline") if isinstance(state, Mapping) else None
         if not isinstance(outline, Mapping) or int(outline.get("slideCount", 0) or 0) < 1:

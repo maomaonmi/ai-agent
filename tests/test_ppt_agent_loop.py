@@ -473,3 +473,19 @@ def test_continue_audit_resumes_from_first_missing_artifact(tmp_path: Path) -> N
     assert presentation is not None
     assert len(presentation.document["slides"]) == 16
     assert any(element.get("type") == "IMAGE" for slide in presentation.document["slides"] for element in slide.get("elements", []))
+
+
+def test_continue_audit_keeps_saved_search_and_generated_ai_assets() -> None:
+    state = {
+        "searchRounds": [
+            {"results": [{"url": "https://example.com/round-1"}]},
+            {"results": [{"url": "https://example.com/round-2"}]},
+            {"results": [{"url": "https://example.com/round-3"}]},
+        ],
+        "webImages": {"mode": "provider", "selectedCount": 3, "assets": [{"imageUrl": "/api/ppt/assets/web-1"}, {"imageUrl": "/api/ppt/assets/web-2"}, {"imageUrl": "/api/ppt/assets/web-3"}]},
+        "aiImages": {"mode": "provider", "generatedCount": 3, "requiredCount": 3, "assets": [{"role": role, "imageUrl": "https://provider.example/keep-me"} for role in ("COVER", "MID_BACKGROUND", "END")]},
+    }
+    # The provider URLs are already generated artifacts.  Only the missing
+    # outline should be resumed; saved search rounds and AI images must not
+    # trigger another Qwen/GLM request or generation call.
+    assert AgentRunService._first_incomplete_phase(state) == "OUTLINE"
