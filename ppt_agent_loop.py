@@ -84,6 +84,7 @@ class AgentRunService:
         self.asset_root = self.asset_root.resolve()
         self.asset_root.mkdir(parents=True, exist_ok=True)
         self._locks: dict[str, threading.Lock] = {}
+        self._event_sequences: dict[str, int] = {}
         self._workers: dict[str, threading.Thread] = {}
         self._worker_guard = threading.Lock()
         self._settings_backed = search_adapters is None
@@ -491,8 +492,13 @@ class AgentRunService:
         return "REVIEW"
 
     def _next_sequence(self, run_id: str) -> int:
-        events = self.repository.list_run_events(run_id, after_sequence=0, limit=1_000)
-        return (events[-1].sequence if events else 0) + 1
+        cached = self._event_sequences.get(run_id)
+        if cached is None:
+            events = self.repository.list_run_events(run_id, after_sequence=0, limit=1_000)
+            cached = events[-1].sequence if events else 0
+        cached += 1
+        self._event_sequences[run_id] = cached
+        return cached
 
     @staticmethod
     def _build_outline(prompt: str, search_rounds: list[dict[str, Any]], slide_count: int = 16) -> dict[str, Any]:
@@ -670,7 +676,19 @@ class AgentRunService:
                 phase=next_phase,
                 state=state,
             )
-            return self.repository.get_run(run_id, owner_scope=owner_scope)
+            # The caller already holds the run lock and the state just written
+            # is fully known here. Avoid a second SELECT on every component
+            # event; this matters once a page emits several component events.
+            return RunRecord(
+                id=current.id,
+                presentation_id=current.presentation_id,
+                owner_scope=current.owner_scope,
+                status=next_status,
+                phase=next_phase,
+                state=state,
+                created_at=current.created_at,
+                updated_at=current.updated_at,
+            )
 
     def _execute(self, run_id: str, owner_scope: str) -> None:
         try:
@@ -1064,7 +1082,15 @@ class AgentRunService:
                         chapter = (index // 4) + 1
                         selected_evidence = evidence[index * 2:index * 2 + 8] or evidence[:8]
                         previous_sections = built_slides[-3:]
-                        if writer is None:
+                        active_state = existing_build.get("activeSlide") if isinstance(existing_build, dict) else None
+                        active_draft = active_state.get("slide") if isinstance(active_state, Mapping) else None
+                        if isinstance(active_draft, Mapping) and int(active_draft.get("ordinal", 0) or 0) == index + 1:
+                            # The model result itself is durable. If the
+                            # process stopped between component commits, reuse
+                            # it and only replay the missing canvas components.
+                            built = dict(active_draft)
+                            generated = None
+                        elif writer is None:
                             generated = self._demo_narrative(slide, index)
                         else:
                             generated = writer.generate_slide(
@@ -1088,17 +1114,16 @@ class AgentRunService:
                                 str(url) for url in (generated.get("sourceUrls") or [])
                                 if str(url) in allowed_urls
                             ][:5]
-                        built = {
-                            **slide,
-                            **(generated if isinstance(generated, Mapping) else {}),
-                            "status": "built",
-                            "componentCount": 5,
-                            "chapter": chapter,
-                            "writingMode": "model-segmented" if writer is not None else "demo-fallback",
-                        }
+                        if not isinstance(active_draft, Mapping) or int(active_draft.get("ordinal", 0) or 0) != index + 1:
+                            built = {
+                                **slide,
+                                **(generated if isinstance(generated, Mapping) else {}),
+                                "status": "built",
+                                "chapter": chapter,
+                                "writingMode": "model-segmented" if writer is not None else "demo-fallback",
+                            }
                         if not built.get("sourceUrls"):
                             built["sourceUrls"] = list(slide.get("sourceUrls") or [])[:5]
-                        built_slides.append(built)
                         if index == 0:
                             background_asset_id = ai_asset_ids.get("COVER")
                         elif index == len(planned_slides) - 1:
@@ -1106,55 +1131,116 @@ class AgentRunService:
                         else:
                             background_asset_id = ai_asset_ids.get("MID_BACKGROUND")
                         asset_id = web_asset_ids[(index - 1) % len(web_asset_ids)] if web_asset_ids and index not in {0, len(planned_slides) - 1} else None
-                        working_document["slides"].append(self._slide_from_outline(built, index, asset_id, background_asset_id))
-                        working_document["revision"] = presentation.current_revision + 1
-                        working_document.setdefault("metadata", {})["updatedAt"] = time.time()
+                        full_slide = self._slide_from_outline(built, index, asset_id, background_asset_id)
+                        full_background = copy.deepcopy(full_slide.get("background"))
+                        dark = index % 2 == 0
+                        shell_background = (
+                            {"type": "SOLID", "color": "#0B1020" if dark else "#F4EFE8"}
+                            if isinstance(full_background, Mapping) and full_background.get("type") == "IMAGE"
+                            else full_background
+                        )
+                        shell_slide = copy.deepcopy(full_slide)
+                        shell_slide["background"] = shell_background
+                        shell_slide["elements"] = []
+                        working_document["slides"].append(shell_slide)
+                        component_stages: list[tuple[str, str, object | None]] = [("canvas", "建立画布骨架", None)]
+                        if isinstance(full_background, Mapping) and full_background.get("type") == "IMAGE":
+                            component_stages.append(("background", "插入 AI 背景", full_background))
+                        for element in full_slide.get("elements", []):
+                            if not isinstance(element, Mapping):
+                                continue
+                            if element.get("type") == "IMAGE":
+                                component_label = "插入网页图片素材"
+                            elif str(element.get("id", "")).endswith("-title"):
+                                component_label = "写入页面标题"
+                            elif str(element.get("id", "")).endswith("-subtitle"):
+                                component_label = "写入页面副标题"
+                            elif str(element.get("id", "")).endswith("-body"):
+                                component_label = "写入正文与要点"
+                            else:
+                                component_label = "写入页面标识"
+                            component_stages.append(("element", component_label, copy.deepcopy(element)))
+                        built["componentCount"] = len(component_stages)
                         # A retried BUILD phase must not reuse operation ids
-                        # from an earlier partial attempt.  The revision
-                        # guard still serializes writes; this nonce only makes
-                        # a fresh attempt eligible to commit after a failure.
-                        operation_id = f"ppt-agent-build-v3-{run_id}-{build_attempt_id}-{index + 1}"
-                        operation = {"operationId": operation_id, "type": "BUILD_SLIDE", "slideId": working_document["slides"][-1]["id"], "ordinal": index + 1}
-                        self.repository.commit_revision(
-                            presentation_id=presentation.id,
-                            owner_scope=owner_scope,
-                            expected_revision=presentation.current_revision,
-                            document=copy.deepcopy(working_document),
-                            operations=[operation],
-                            operation_payloads={operation_id: hashlib.sha256(json.dumps(operation, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()},
-                        )
-                        refreshed_presentation = self.repository.get_presentation(presentation.id, owner_scope=owner_scope)
-                        if refreshed_presentation is None:
-                            raise RuntimeError("逐页搭建后无法读取演示文稿")
-                        presentation = refreshed_presentation
-                        self._emit(
-                            run_id,
-                            owner_scope,
-                            "phase.progress",
-                            {
-                                "phase": phase,
-                                "label": label,
-                                "completedSlides": index + 1,
-                                "slideCount": len(planned_slides),
-                                "slide": built,
-                                "section": built.get("section"),
-                                "title": built.get("title"),
-                                "bodyPreview": str(built.get("body") or "")[:180],
-                                "writerProvider": writer_provider,
-                            },
-                            state_patch={
-                                "build": {
-                                    "status": "running",
-                                    "contentVersion": 3,
-                                    "contentMode": "model-segmented" if writer is not None else "demo-fallback",
+                        # from an earlier partial attempt. Each component has
+                        # its own operation and revision, so the canvas can
+                        # visibly grow instead of appearing all at once.
+                        for component_index, (component_type, component_label, component_payload) in enumerate(component_stages):
+                            current_slide = working_document["slides"][-1]
+                            if component_type == "background" and isinstance(component_payload, Mapping):
+                                current_slide["background"] = copy.deepcopy(component_payload)
+                            elif component_type == "element" and isinstance(component_payload, Mapping):
+                                current_slide.setdefault("elements", []).append(copy.deepcopy(component_payload))
+                            working_document["revision"] = presentation.current_revision + 1
+                            working_document.setdefault("metadata", {})["updatedAt"] = time.time()
+                            operation_id = f"ppt-agent-build-v4-{run_id}-{build_attempt_id}-{index + 1}-{component_index + 1}"
+                            operation = {
+                                "operationId": operation_id,
+                                "type": "BUILD_COMPONENT",
+                                "slideId": current_slide["id"],
+                                "ordinal": index + 1,
+                                "componentType": component_type,
+                                "componentLabel": component_label,
+                                "componentIndex": component_index + 1,
+                                "componentCount": len(component_stages),
+                            }
+                            self.repository.commit_revision(
+                                presentation_id=presentation.id,
+                                owner_scope=owner_scope,
+                                expected_revision=presentation.current_revision,
+                                document=copy.deepcopy(working_document),
+                                operations=[operation],
+                                operation_payloads={operation_id: hashlib.sha256(json.dumps(operation, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()},
+                            )
+                            refreshed_presentation = self.repository.get_presentation(presentation.id, owner_scope=owner_scope)
+                            if refreshed_presentation is None:
+                                raise RuntimeError("逐组件搭建后无法读取演示文稿")
+                            presentation = refreshed_presentation
+                            page_completed = component_index == len(component_stages) - 1
+                            self._emit(
+                                run_id,
+                                owner_scope,
+                                "phase.progress",
+                                {
+                                    "phase": phase,
+                                    "label": label,
+                                    "completedSlides": index + 1 if page_completed else index,
                                     "slideCount": len(planned_slides),
-                                    "completedSlides": index + 1,
-                                    "slides": list(built_slides),
+                                    "slide": built,
+                                    "canvasSlide": copy.deepcopy(current_slide),
+                                    "section": built.get("section"),
+                                    "title": built.get("title"),
+                                    "bodyPreview": str(built.get("body") or "")[:180],
                                     "writerProvider": writer_provider,
-                                    "updatedAt": time.time(),
-                                }
-                            },
-                        )
+                                    "componentIndex": component_index + 1,
+                                    "componentCount": len(component_stages),
+                                    "componentType": component_type,
+                                    "componentLabel": component_label,
+                                    "pageNumber": index + 1,
+                                    "pageCompleted": page_completed,
+                                },
+                                state_patch={
+                                    "build": {
+                                        "status": "running",
+                                        "contentVersion": 3,
+                                        "contentMode": "model-segmented" if writer is not None else "demo-fallback",
+                                        "slideCount": len(planned_slides),
+                                        "completedSlides": index + 1 if page_completed else index,
+                                        "slides": list(built_slides),
+                                        "activeSlide": None if page_completed else {
+                                            "ordinal": index + 1,
+                                            "title": built.get("title"),
+                                            "slide": built,
+                                            "componentIndex": component_index + 1,
+                                            "componentCount": len(component_stages),
+                                            "componentLabel": component_label,
+                                        },
+                                        "writerProvider": writer_provider,
+                                        "updatedAt": time.time(),
+                                    }
+                                },
+                            )
+                        built_slides.append(built)
                     state_patch["build"] = {
                         "status": "completed",
                         "contentVersion": 3,
@@ -1165,7 +1251,7 @@ class AgentRunService:
                         "writerProvider": writer_provider,
                         "completedAt": time.time(),
                     }
-                    phase_details.update({"slideCount": len(built_slides), "componentMode": "incremental", "completedSlides": len(built_slides), "writerProvider": writer_provider})
+                    phase_details.update({"slideCount": len(built_slides), "componentMode": "component-incremental", "completedSlides": len(built_slides), "writerProvider": writer_provider})
                 elif phase == "REVIEW":
                     presentation = self.repository.get_presentation(current.presentation_id, owner_scope=owner_scope)
                     report = self._quality_report(

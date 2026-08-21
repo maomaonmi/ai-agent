@@ -576,4 +576,7 @@ def test_build_writes_model_generated_sections_one_page_at_a_time(tmp_path: Path
         event for event in repository.list_run_events(run.id, after_sequence=0, limit=500)
         if event.event_type == "phase.progress" and event.payload.get("phase") == "BUILD"
     ]
+    assert len(progress) >= 16 * 5
+    assert progress[0].payload["componentLabel"] == "建立画布骨架"
+    assert any(event.payload.get("componentLabel") == "写入正文与要点" for event in progress)
     assert any(event.payload.get("writerProvider") == "qwen" and event.payload.get("completedSlides") == 16 for event in progress)
