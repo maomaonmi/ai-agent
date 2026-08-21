@@ -70,3 +70,31 @@ def test_workspace_resumes_durable_runs_and_does_not_claim_uncreated_ai_assets()
     assert 'nextQuery.set("runId", run.runId)' in workspace
     assert 'nextQuery.set("resume", "1")' in workspace
     assert 'loading="lazy"' in workspace
+
+
+def test_main_sidebar_exposes_a_dedicated_ppt_history_group() -> None:
+    sidebar = (FRONTEND / "components" / "SessionSidebar.tsx").read_text(encoding="utf-8")
+
+    for contract_marker in (
+        "pptHistory",
+        "pptHistoryLoading",
+        "onSelectPptHistory",
+        "PPT 历史记录",
+        "presentationId",
+        "runId",
+    ):
+        assert contract_marker in sidebar
+
+
+def test_chat_interface_loads_and_routes_ppt_history_records() -> None:
+    chat = (FRONTEND / "components" / "ChatInterface.tsx").read_text(encoding="utf-8")
+
+    for contract_marker in (
+        "listHistoryRuns",
+        "pptHistoryLoading",
+        "onSelectPptHistory",
+        "source=history",
+        "run.presentationId",
+        "run.runId",
+    ):
+        assert contract_marker in chat
