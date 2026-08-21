@@ -50,7 +50,18 @@ type CanvasItem =
   | { id: string; kind: "shape"; x: number; y: number; w: number; h: number; shape: "rect" | "ellipse" }
   | { id: string; kind: "image"; x: number; y: number; w: number; h: number; src: string; alt: string }
   | { id: string; kind: "table"; x: number; y: number; w: number; h: number }
-  | { id: string; kind: "chart"; x: number; y: number; w: number; h: number };
+  | {
+      id: string;
+      kind: "chart";
+      x: number;
+      y: number;
+      w: number;
+      h: number;
+      chartType: "BAR" | "LINE" | "PIE" | "DOUGHNUT" | "AREA";
+      categories: string[];
+      series: Array<{ name: string; values: number[]; color?: string }>;
+      showLegend: boolean;
+    };
 
 interface WorkspaceSlide {
   id: string;
@@ -258,10 +269,10 @@ function canonicalElementFromItem(item: CanvasItem, index: number): Record<strin
   return {
     type: "CHART",
     ...geometry,
-    chartType: "BAR",
-    categories: ["Q1", "Q2", "Q3"],
-    series: [{ name: "增长", values: [24, 42, 68], color: "#7C3AED" }],
-    showLegend: false,
+    chartType: item.chartType,
+    categories: item.categories,
+    series: item.series,
+    showLegend: item.showLegend,
   };
 }
 
@@ -322,7 +333,14 @@ function workspaceSlidesFromDocument(document: PresentationDocument, assetUrlsBy
       else if (element.type === "SHAPE") items.push({ ...base, kind: "shape", shape: element.shapeType === "ELLIPSE" ? "ellipse" : "rect" });
       else if (element.type === "IMAGE") items.push({ ...base, kind: "image", src: assetUrlsById[element.assetId] ?? generatedAssets[index % generatedAssets.length], alt: element.alt });
       else if (element.type === "TABLE") items.push({ ...base, kind: "table" });
-      else if (element.type === "CHART") items.push({ ...base, kind: "chart" });
+      else if (element.type === "CHART") items.push({
+        ...base,
+        kind: "chart",
+        chartType: element.chartType,
+        categories: element.categories,
+        series: element.series.map((entry) => ({ name: entry.name, values: entry.values, ...(entry.color ? { color: entry.color } : {}) })),
+        showLegend: element.showLegend,
+      });
     }
     const backgroundColor = slide.background.type === "SOLID" ? slide.background.color : "#0F172A";
     const image = slide.background.type === "IMAGE"
@@ -503,6 +521,51 @@ async function imageUrlToDataUrl(src: string): Promise<string> {
 }
 
 
+function ChartPreview({ item }: { item: Extract<CanvasItem, { kind: "chart" }> }) {
+  const colors = ["#7C3AED", "#06B6D4", "#F59E0B"];
+  const values = (item.series[0]?.values ?? []).map((value) => (Number.isFinite(value) ? Math.max(0, value) : 0));
+  const maxValue = Math.max(...values, 1);
+  const chartType = item.chartType;
+  const points = values.map((value, index) => {
+    const x = values.length <= 1 ? 50 : (index / (values.length - 1)) * 100;
+    const y = 100 - (value / maxValue) * 82 - 8;
+    return `${x},${y}`;
+  }).join(" ");
+  if (chartType === "PIE" || chartType === "DOUGHNUT") {
+    const total = Math.max(values.reduce((sum, value) => sum + value, 0), 1);
+    let cursor = 0;
+    const segments = values.map((value, index) => {
+      const start = (cursor / total) * 360;
+      cursor += value;
+      const end = (cursor / total) * 360;
+      return `${colors[index % colors.length]} ${start}deg ${end}deg`;
+    }).join(", ");
+    return <span className="flex h-full items-center justify-center rounded-md bg-white/90 p-[9%]"><i className={`block aspect-square h-full rounded-full ${chartType === "DOUGHNUT" ? "ring-8 ring-white/90" : ""}`} style={{ background: `conic-gradient(${segments})` }} /></span>;
+  }
+  if (chartType === "LINE" || chartType === "AREA") {
+    const areaPoints = `${points} 100,100 0,100`;
+    return (
+      <span className="block h-full rounded-md bg-white/90 p-[7%]">
+        <svg viewBox="0 0 100 100" preserveAspectRatio="none" className="h-full w-full">
+          {chartType === "AREA" && <polygon points={areaPoints} fill="#7C3AED" fillOpacity="0.18" />}
+          <polyline points={points} fill="none" stroke="#7C3AED" strokeWidth="4" vectorEffect="non-scaling-stroke" strokeLinecap="round" strokeLinejoin="round" />
+          {values.map((value, index) => {
+            const x = values.length <= 1 ? 50 : (index / (values.length - 1)) * 100;
+            const y = 100 - (value / maxValue) * 82 - 8;
+            return <circle key={`${item.id}-point-${index}`} cx={x} cy={y} r="3.5" fill="#7C3AED" vectorEffect="non-scaling-stroke" />;
+          })}
+        </svg>
+      </span>
+    );
+  }
+  return (
+    <span className="flex h-full items-end gap-[6%] rounded-md bg-white/90 p-[9%]">
+      {values.map((value, index) => <i key={`${item.id}-bar-${index}`} className="flex-1 rounded-t bg-violet-600" style={{ height: `${Math.max(8, (value / maxValue) * 100)}%`, backgroundColor: item.series[index % Math.max(1, item.series.length)]?.color ?? colors[index % colors.length] }} />)}
+    </span>
+  );
+}
+
+
 function SlideSurface({
   slide,
   selectedItemId,
@@ -571,9 +634,7 @@ function SlideSurface({
             </span>
           )}
           {item.kind === "chart" && (
-            <span className="flex h-full items-end gap-[6%] rounded-md bg-white/90 p-[9%]">
-              {[42, 78, 58, 92, 70].map((height, index) => <i key={index} className="flex-1 bg-violet-600" style={{ height: `${height}%` }} />)}
-            </span>
+            <ChartPreview item={item} />
           )}
         </button>
       ))}
@@ -1197,7 +1258,18 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     else if (kind === "shape") item = { id: nextId("shape"), kind, x: 60, y: 48, w: 18, h: 18, shape: "ellipse" };
     else if (kind === "image") item = { id: nextId("image"), kind, x: 60, y: 22, w: 30, h: 32, src: generatedAssets[(activeIndex + 1) % generatedAssets.length], alt: "插入图片" };
     else if (kind === "table") item = { id: nextId("table"), kind, x: 52, y: 38, w: 40, h: 32 };
-    else item = { id: nextId("chart"), kind, x: 55, y: 32, w: 36, h: 40 };
+    else item = {
+      id: nextId("chart"),
+      kind,
+      x: 55,
+      y: 32,
+      w: 36,
+      h: 40,
+      chartType: "BAR",
+      categories: ["Q1", "Q2", "Q3"],
+      series: [{ name: "增长", values: [24, 42, 68], color: "#7C3AED" }],
+      showLegend: false,
+    };
     updateActiveSlide({ items: [...activeSlide.items, item] });
     setSelectedItemId(item.id);
   };
@@ -1256,7 +1328,14 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
             if (item.kind === "shape") elements.push({ kind: "shape", ...pos, shape: item.shape, fill: "7C3AED", transparency: 20, line: "A78BFA" });
             if (item.kind === "image") elements.push({ kind: "image", ...pos, data: imageMap.get(item.src) ?? imageMap.get(slide.image)!, alt: item.alt });
             if (item.kind === "table") elements.push({ kind: "table", ...pos, rows: [["Q1", "Q2", "Q3"], ["24", "42", "68"]], headerFill: "7C3AED", borderColor: "CBD5E1" });
-            if (item.kind === "chart") elements.push({ kind: "chart", ...pos, chartType: "bar", series: [{ name: "增长", labels: ["Q1", "Q2", "Q3"], values: [24, 42, 68] }], showLegend: false });
+            if (item.kind === "chart") elements.push({
+              kind: "chart",
+              ...pos,
+              chartType: item.chartType.toLowerCase(),
+              categories: item.categories,
+              series: item.series.map((series) => ({ name: series.name, labels: item.categories, values: series.values, ...(series.color ? { color: series.color.replace(/^#/, "") } : {}) })),
+              showLegend: item.showLegend,
+            });
           });
           return { background: slide.tone === "dark" ? "0F172A" : "F8FAFC", notes: slide.notes, elements };
         }),
