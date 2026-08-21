@@ -412,6 +412,7 @@ class AgentRunService:
                                 "selectionRoundCount": selection_round_count,
                                 "roundSelectedCount": round_selected_count,
                                 "failedCount": failed_count,
+                                "candidateSources": list(real_sources),
                                 "assets": list(web_assets),
                             },
                             state_patch={
@@ -424,6 +425,7 @@ class AgentRunService:
                                     "selectionRounds": list(selection_rounds),
                                     "failedCount": failed_count,
                                     "mode": "provider" if downloaded_count >= 3 else "collecting",
+                                    "candidateSources": list(real_sources),
                                     "assets": list(web_assets),
                                 }
                             },
@@ -471,6 +473,7 @@ class AgentRunService:
                         "selectionRoundCount": selection_round_count,
                         "selectionRounds": list(selection_rounds),
                         "mode": "provider" if downloaded_count >= 3 else "demo-fallback",
+                        "candidateSources": list(real_sources),
                         "assets": list(web_assets),
                     }
                     phase_details.update(state_patch["webImages"])

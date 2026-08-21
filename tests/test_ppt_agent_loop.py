@@ -88,6 +88,7 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
     assert snapshot.state["searchLimit"] == 3
     assert snapshot.state["searchRounds"][0]["resultCount"] == 3
     assert snapshot.state["webImages"]["downloadedCount"] == 9
+    assert len(snapshot.state["webImages"]["candidateSources"]) == 9
     assert snapshot.state["webImages"]["mode"] == "provider"
     assert snapshot.state["aiImages"]["mode"] == "provider"
     assert len(calls) == 3
@@ -102,6 +103,7 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
     ]
     web_complete = next(event for event in events if event.event_type == "phase.completed" and event.payload.get("phase") == "WEB_ASSETS")
     assert web_complete.payload["downloadedCount"] == 9
+    assert len(web_complete.payload["candidateSources"]) == 9
     assert len(web_complete.payload["assets"]) == 9
     assert [item["selectedCount"] for item in web_complete.payload["selectionRounds"]] == [3, 3, 3]
 
@@ -365,5 +367,6 @@ def test_web_assets_are_selected_in_four_rounds_of_three_from_the_candidate_pool
     assert web_images["candidateCount"] == 27
     assert web_images["selectedCount"] == 9
     assert web_images["downloadedCount"] == 9
+    assert len(web_images["candidateSources"]) == 27
     assert len(web_images["selectionRounds"]) == 3
     assert [round_state["selectedCount"] for round_state in web_images["selectionRounds"]] == [3, 3, 3]

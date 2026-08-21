@@ -66,4 +66,7 @@ def test_workspace_resumes_durable_runs_and_does_not_claim_uncreated_ai_assets()
     assert "searchSourcesFromRunState" in workspace
     assert "imageUrlsFromRunState" in workspace
     assert "selectionRoundCount" in workspace
+    assert "candidateSources" in workspace
+    assert 'nextQuery.set("runId", run.runId)' in workspace
+    assert 'nextQuery.set("resume", "1")' in workspace
     assert 'loading="lazy"' in workspace

@@ -501,22 +501,23 @@ def build_settings_search_adapters(*, request_json: JsonRequest | None = None) -
         settings = models.load(provider)
         if not settings.api_key:
             continue
-        # Keep PPT on the exact same native-search transport as the regular
-        # chat route.  The persisted model profile already contains the
-        # provider-specific base URL and model; using it here is important
-        # because Qwen and GLM keys are valid on their chat-compatible native
-        # search protocol, but not necessarily on a separate search endpoint.
+        # The regular chat route proves that the credentials are valid, but
+        # its streaming answer is not an auditable source contract: providers
+        # may return plain text without citations/tool frames. PPT needs a
+        # concrete URL list, so use each provider's structured native search
+        # endpoint when no custom endpoint is configured.
         endpoint = os.getenv(f"{provider.upper()}_SEARCH_URL")
         if endpoint:
             adapters[provider] = NativeSearchAdapter(provider, endpoint=endpoint, api_key=settings.api_key, request_json=request_json)
-        else:
-            adapters[provider] = OpenAICompatibleNativeSearchAdapter(
-                provider,
-                base_url=settings.base_url,
+        elif provider == "qwen":
+            adapters[provider] = QwenDashScopeSearchAdapter(
                 api_key=settings.api_key,
                 model=settings.model_id,
-                temperature=settings.temperature,
-                max_tokens=settings.max_tokens,
+                request_json=request_json,
+            )
+        else:
+            adapters[provider] = GlmWebSearchAdapter(
+                api_key=settings.api_key,
                 request_json=request_json,
             )
     return adapters
