@@ -127,6 +127,7 @@ export interface CreatePptRunInput {
   modelProvider?: "deepseek" | "qwen" | "glm";
   searchProvider?: "auto" | "firecrawl" | "qwen" | "glm";
   searchLimit?: number;
+  resume?: boolean;
 }
 
 interface ApiErrorPayload {

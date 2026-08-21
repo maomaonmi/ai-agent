@@ -432,6 +432,12 @@ function runDetailsFromState(state: Record<string, unknown>): Record<string, str
     const requiredCount = typeof aiImages.requiredCount === "number" ? aiImages.requiredCount : 3;
     details["ai-assets"] = `${generatedCount} / ${requiredCount} 张${aiImages.mode === "provider" ? " · 实时 provider" : ""}`;
   }
+  const outline = state.outline && typeof state.outline === "object" ? state.outline as Record<string, unknown> : null;
+  if (outline) details.outline = `${typeof outline.slideCount === "number" ? outline.slideCount : 0} 页大纲 · 已持久化`;
+  const build = state.build && typeof state.build === "object" ? state.build as Record<string, unknown> : null;
+  if (build) details.build = `${typeof build.slideCount === "number" ? build.slideCount : 0} 页 · 逐页完成`;
+  const quality = state.qualityReport && typeof state.qualityReport === "object" ? state.qualityReport as Record<string, unknown> : null;
+  if (quality) details.review = quality.status === "passed" ? "检查通过 · 可导出" : "存在待处理项 · 可继续检查";
   return details;
 }
 
@@ -775,7 +781,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     }).catch(() => setServerState("error"));
   };
 
-  const startAgentRun = async (prompt: string, config: RunConfig = runConfig, existingRunId?: string) => {
+  const startAgentRun = async (prompt: string, config: RunConfig = runConfig, existingRunId?: string, resume = false) => {
     const currentPresentation = serverPresentationRef.current;
     if (!currentPresentation) {
       setRunning(false);
@@ -794,6 +800,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         modelProvider: config.modelProvider,
         searchProvider: config.searchProvider,
         searchLimit: Math.min(20, Math.max(1, config.searchLimit)),
+        ...(resume ? { resume: true } : {}),
       });
       setRunId(run.runId);
       if (!existingRunId) {
@@ -806,7 +813,11 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         nextQuery.set("resume", "1");
         router.replace(`${pathname}?${nextQuery.toString()}`, { scroll: false });
       }
-      lastRunEventIdRef.current = 0;
+      // A fresh run (or the explicit history-hydration path) replays the
+      // durable event log.  A user pressing “继续” must subscribe from the
+      // cursor already rendered on screen; replaying the whole log makes the
+      // remaining phases look as if they completed instantly.
+      if (!existingRunId || !resume) lastRunEventIdRef.current = 0;
       setWorkflowStep(workflowStepForPhase(run.phase));
       setRunning(run.status === "RUNNING" || run.status === "QUEUED");
 
@@ -832,11 +843,15 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           const generatedCount = typeof event.data.generatedCount === "number" ? event.data.generatedCount : null;
           const requiredCount = typeof event.data.requiredCount === "number" ? event.data.requiredCount : null;
           const slideCount = typeof event.data.slideCount === "number" ? event.data.slideCount : null;
+          const completedSlides = typeof event.data.completedSlides === "number" ? event.data.completedSlides : null;
+          const qualityStatus = typeof event.data.status === "string" ? event.data.status : null;
           const mode = event.data.mode === "provider" ? "实时 provider" : event.data.mode === "provider-fallback" ? "Firecrawl fallback" : event.data.mode === "demo-fallback" ? "未配置 provider" : null;
           const fallbackReason = typeof event.data.fallbackReason === "string" ? event.data.fallbackReason : null;
           const meta = resultCount !== null ? `${resultCount} 条${mode ? ` · ${mode}` : ""}`
             : candidateCount !== null && selectedCount !== null ? `${candidateCount} 张候选 · ${selectionRoundCount !== null ? `${selectionRoundCount} 轮采用 · ` : ""}${selectedCount} 张采用${downloadedCount !== null ? ` · 已下载 ${downloadedCount}` : ""}`
-              : generatedCount !== null && requiredCount !== null ? `${generatedCount} / ${requiredCount} 张${mode ? ` · ${mode}` : ""}`
+            : generatedCount !== null && requiredCount !== null ? `${generatedCount} / ${requiredCount} 张${mode ? ` · ${mode}` : ""}`
+              : completedSlides !== null && slideCount !== null ? `${completedSlides} / ${slideCount} 页 · 逐页搭建`
+                : qualityStatus !== null ? (qualityStatus === "passed" ? "检查通过 · 可导出" : "存在待处理项 · 可继续检查")
                 : slideCount !== null ? `${slideCount} 页大纲` : "已完成";
           setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: `${meta}${fallbackReason ? ` · 原因 ${fallbackReason}` : ""}` }));
           if (phase.startsWith("SEARCH")) {
@@ -885,10 +900,13 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           const roundSelectedCount = typeof event.data.roundSelectedCount === "number" ? event.data.roundSelectedCount : null;
           const generatedCount = typeof event.data.generatedCount === "number" ? event.data.generatedCount : null;
           const requiredCount = typeof event.data.requiredCount === "number" ? event.data.requiredCount : null;
+          const completedSlides = typeof event.data.completedSlides === "number" ? event.data.completedSlides : null;
+          const slideCount = typeof event.data.slideCount === "number" ? event.data.slideCount : null;
           const progressMeta = candidateCount !== null && downloadedCount !== null
             ? `${candidateCount} 张候选 · ${selectionRoundCount !== null ? `${selectionRoundCount} 轮 · ` : ""}本轮 ${roundSelectedCount ?? 0} 张 · 已下载 ${downloadedCount}${selectedCount !== null ? ` · 共采用 ${selectedCount}` : ""}`
             : generatedCount !== null && requiredCount !== null ? `${generatedCount} / ${requiredCount} 张` : "执行中";
-          setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: progressMeta }));
+          const phaseProgressMeta = completedSlides !== null && slideCount !== null ? `${completedSlides} / ${slideCount} 页 · 逐页搭建` : progressMeta;
+          setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: phaseProgressMeta }));
           if (phase === "WEB_ASSETS" || phase === "AI_ASSETS") {
             const assets = Array.isArray(event.data.assets) ? event.data.assets : [];
             const urls = assets.flatMap((asset) => {
@@ -1001,6 +1019,15 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const sendChatMessage = (message: string, config: RunConfig = runConfig) => {
     setRunConfig(config);
     if (!message.trim()) return;
+    const normalized = message.trim().replace(/[！!。．.]+$/g, "");
+    const isContinueRequest = /^(继续|继续任务|继续生成|继续制作|恢复任务|查漏补缺|检查并继续)$/.test(normalized);
+    if (isContinueRequest && runId) {
+      const previousPrompt = [...chatMessages].reverse().find((item) => item.role === "user")?.text ?? "继续完成这份 PPT";
+      setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: message }, { id: nextId("assistant"), role: "assistant", text: "我会从已保存的断点开始检查，先补齐缺失阶段，再继续后续搭建。" }]);
+      setRunning(true);
+      void startAgentRun(previousPrompt, config, runId, true);
+      return;
+    }
     setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: message }, { id: nextId("assistant"), role: "assistant", text: "收到。我会先拆解需求，再进行多轮检索和素材收集；你可以在右侧实时看到每一页的搭建过程。" }]);
     setWorkflowStep(0);
     setWorkflowDetails({});
