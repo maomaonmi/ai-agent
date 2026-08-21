@@ -12,6 +12,7 @@ from ppt_materials import (
     QwenDashScopeSearchAdapter,
     GlmWebSearchAdapter,
     SettingsAiImageAdapter,
+    SettingsNarrativeGenerator,
     ProviderNotConfigured,
     SafeImageDownloader,
     SourceLedger,
@@ -134,6 +135,35 @@ def test_settings_native_search_adapter_matches_qwen_native_mode_contract() -> N
         "search_strategy": "turbo",
         "forced_search": True,
     }
+
+
+def test_settings_narrative_generator_writes_structured_slide_section() -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def request_json(endpoint: str, headers: dict[str, str], payload: dict[str, object]):
+        calls.append((endpoint, payload))
+        return {"choices": [{"message": {"content": '{"title":"真实标题","subtitle":"观点","body":"这是正文段落。","keyPoints":["事实"],"speakerNotes":"备注","sourceUrls":["https://example.com/source"]}'}}]}
+
+    generator = SettingsNarrativeGenerator(
+        provider="qwen",
+        model="qwen3.7-plus",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api_key="qwen-key",
+        request_json=request_json,
+    )
+    result = generator.generate_slide(
+        prompt="人工智能发展",
+        slide={"ordinal": 2, "section": "背景", "direction": "解释变化"},
+        chapter=1,
+        total_slides=16,
+        evidence=[{"title": "来源", "url": "https://example.com/source"}],
+        previous_sections=[],
+    )
+
+    assert result["title"] == "真实标题"
+    assert result["ordinal"] == 2
+    assert calls[0][0].endswith("/chat/completions")
+    assert calls[0][1]["response_format"] == {"type": "json_object"}
 
 
 def test_qwen_dashscope_search_adapter_returns_native_sources() -> None:

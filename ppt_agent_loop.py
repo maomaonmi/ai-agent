@@ -75,6 +75,7 @@ class AgentRunService:
         ai_image_adapter: Any | None = None,
         image_downloader: Any | None = None,
         web_image_extractor: Any | None = None,
+        narrative_generator: Any | None = None,
         allow_demo_materials: bool = False,
         asset_root: str | Path | None = None,
     ) -> None:
@@ -86,6 +87,7 @@ class AgentRunService:
         self._workers: dict[str, threading.Thread] = {}
         self._worker_guard = threading.Lock()
         self._settings_backed = search_adapters is None
+        self._narrative_settings_backed = narrative_generator is None and self._settings_backed
         # Providers are optional at runtime: use the same persisted settings as
         # the settings UI first, then fall back to environment variables for
         # headless deployments. Credentials never enter the durable run state.
@@ -113,6 +115,7 @@ class AgentRunService:
         self.ai_image_adapter = ai_image_adapter
         self.image_downloader = image_downloader
         self.web_image_extractor = web_image_extractor
+        self.narrative_generator = narrative_generator
         self.allow_demo_materials = allow_demo_materials
 
     def _persist_downloaded_web_asset(
@@ -336,6 +339,13 @@ class AgentRunService:
             from ppt_materials import AiImageAdapter
 
             self.ai_image_adapter = AiImageAdapter()
+        if self._narrative_settings_backed:
+            from ppt_materials import build_settings_narrative_generator
+
+            # The provider is selected per run, so this is refreshed lazily in
+            # _execute; clearing a previously constructed writer here avoids
+            # accidentally using a stale settings profile after a save.
+            self.narrative_generator = None
 
     def _lock(self, run_id: str) -> threading.Lock:
         return self._locks.setdefault(run_id, threading.Lock())
@@ -468,7 +478,12 @@ class AgentRunService:
         if not isinstance(outline, Mapping) or int(outline.get("slideCount", 0) or 0) < 1:
             return "OUTLINE"
         build = state.get("build") if isinstance(state, Mapping) else None
-        if not isinstance(build, Mapping) or build.get("status") != "completed" or int(build.get("contentVersion", 0) or 0) < 3:
+        if (
+            not isinstance(build, Mapping)
+            or build.get("status") != "completed"
+            or int(build.get("contentVersion", 0) or 0) < 3
+            or build.get("contentMode") not in {"model-segmented", "demo-fallback"}
+        ):
             return "BUILD"
         review = state.get("qualityReport") if isinstance(state, Mapping) else None
         if not isinstance(review, Mapping):
@@ -555,7 +570,7 @@ class AgentRunService:
                         overflow.append(f"{slide_id}:{element.get('id', 'element')}")
                 except (TypeError, ValueError):
                     overflow.append(f"{slide_id}:{element.get('id', 'element')}")
-                if element.get("type") == "TEXT" and len(str(element.get("text", ""))) > 240:
+                if element.get("type") == "TEXT" and len(str(element.get("text", ""))) > 420:
                     unreadable.append(f"{slide_id}:{element.get('id', 'text')}")
         references = sum(
             len(round_state.get("results", []))
@@ -585,12 +600,18 @@ class AgentRunService:
         body = str(slide.get("body") or "").strip()
         if not body:
             body = "从资料、观点到下一步行动。"
-        body_text = "\n".join(f"• {str(item).strip()}" for item in key_points[:3] if str(item).strip())
+        bullet_text = "\n".join(f"• {str(item).strip()}" for item in key_points[:3] if str(item).strip())
+        # Keep the model-written paragraph visible on the slide. The old
+        # renderer only showed bullets, which made BUILD look like a static
+        # outline even after a model had produced the section prose.
+        body_text = body[:420]
+        if bullet_text:
+            body_text = f"{body_text}\n\n{bullet_text}" if body_text else bullet_text
         elements: list[dict[str, Any]] = [
             {"type": "TEXT", "id": f"{slide_id}-eyebrow", "x": 0.07, "y": 0.08, "width": 0.65, "height": 0.05, "rotation": 0, "zIndex": 3, "opacity": 1, "isLocked": False, "isHidden": False, "text": f"{index + 1:02d} · AI PPT", "style": {"fontFamily": "Microsoft YaHei", "fontSize": 14, "color": text_color, "bold": True, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "MIDDLE"}},
             {"type": "TEXT", "id": f"{slide_id}-title", "x": 0.07, "y": 0.18, "width": 0.62, "height": 0.25, "rotation": 0, "zIndex": 3, "opacity": 1, "isLocked": False, "isHidden": False, "text": str(slide.get("title") or slide.get("section") or f"第 {index + 1} 页"), "style": {"fontFamily": "Microsoft YaHei", "fontSize": 28, "color": text_color, "bold": True, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "MIDDLE"}},
             {"type": "TEXT", "id": f"{slide_id}-subtitle", "x": 0.07, "y": 0.58, "width": 0.62, "height": 0.14, "rotation": 0, "zIndex": 2, "opacity": 1, "isLocked": False, "isHidden": False, "text": str(slide.get("direction") or "从资料、观点到下一步行动。"), "style": {"fontFamily": "Microsoft YaHei", "fontSize": 14, "color": text_color, "bold": False, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "MIDDLE"}},
-            {"type": "TEXT", "id": f"{slide_id}-body", "x": 0.07, "y": 0.72, "width": 0.58, "height": 0.18, "rotation": 0, "zIndex": 2, "opacity": 1, "isLocked": False, "isHidden": False, "text": body_text or body, "style": {"fontFamily": "Microsoft YaHei", "fontSize": 15, "color": text_color, "bold": False, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "TOP"}},
+            {"type": "TEXT", "id": f"{slide_id}-body", "x": 0.07, "y": 0.68, "width": 0.58, "height": 0.25, "rotation": 0, "zIndex": 2, "opacity": 1, "isLocked": False, "isHidden": False, "text": body_text or "从资料、观点到下一步行动。", "style": {"fontFamily": "Microsoft YaHei", "fontSize": 15, "color": text_color, "bold": False, "italic": False, "underline": False, "align": "LEFT", "verticalAlign": "TOP"}},
         ]
         if asset_id:
             elements.append({"type": "IMAGE", "id": f"{slide_id}-material", "x": 0.73, "y": 0.18, "width": 0.21, "height": 0.45, "rotation": 0, "zIndex": 1, "opacity": 0.94, "isLocked": False, "isHidden": False, "assetId": asset_id, "alt": "AI 工作流素材", "fit": "COVER"})
@@ -602,7 +623,25 @@ class AgentRunService:
             "background": ({"type": "IMAGE", "assetId": background_asset_id, "opacity": 1, "fit": "COVER"} if background_asset_id else {"type": "SOLID", "color": "#0B1020" if dark else "#F4EFE8"}),
             "elements": elements,
             "animations": [],
-            "notes": (notes + (f"\n素材线索：{slide.get('sourceHint')}" if slide.get("sourceHint") else ""))[:2_000],
+            "notes": (notes + (f"\n素材线索：{slide.get('sourceHint')}" if slide.get("sourceHint") else "") + (f"\n演讲备注：{slide.get('speakerNotes')}" if slide.get("speakerNotes") else ""))[:2_000],
+        }
+
+    @staticmethod
+    def _demo_narrative(slide: Mapping[str, Any], index: int) -> dict[str, object]:
+        """Deterministic writer used only by injected/unit-test adapters.
+
+        A settings-backed service never reaches this path: it must have a real
+        configured text model or BUILD fails with a clear provider error.
+        """
+        direction = str(slide.get("direction") or "建立共同事实基础")
+        section = str(slide.get("section") or f"第 {index + 1} 页")
+        return {
+            "title": str(slide.get("title") or section),
+            "subtitle": direction,
+            "body": f"本节围绕“{section}”展开，先结合已收集的资料说明背景，再把关键变化转化为可执行判断。团队应在明确目标之后验证事实、记录约束，并用阶段性指标检验下一步行动是否有效。",
+            "keyPoints": list(slide.get("keyPoints") or [])[:3],
+            "speakerNotes": f"讲解第 {index + 1} 页：说明{direction}，并引出下一页的论证。",
+            "sourceUrls": list(slide.get("sourceUrls") or [])[:5],
         }
 
     def _emit(self, run_id: str, owner_scope: str, event_type: str, payload: dict[str, Any], *, status: str | None = None, phase: str | None = None, state_patch: dict[str, Any] | None = None) -> RunRecord | None:
@@ -951,13 +990,29 @@ class AgentRunService:
                         raise RuntimeError("material gates are not satisfied")
                     outline = current.state.get("outline") if isinstance(current.state.get("outline"), dict) else self._build_outline(str(current.state.get("prompt", "PPT")), [], 16)
                     planned_slides = outline.get("slides", []) if isinstance(outline, dict) else []
-                    built_slides: list[dict[str, Any]] = []
                     presentation = self.repository.get_presentation(current.presentation_id, owner_scope=owner_scope)
                     if presentation is None:
                         raise RuntimeError("演示文稿不存在，无法逐页搭建")
+                    existing_build = current.state.get("build") if isinstance(current.state.get("build"), dict) else {}
+                    previous_records = existing_build.get("slides", []) if isinstance(existing_build, dict) else []
+                    if not isinstance(previous_records, list):
+                        previous_records = []
+                    existing_document_slides = presentation.document.get("slides", [])
+                    if not isinstance(existing_document_slides, list):
+                        existing_document_slides = []
+                    can_resume_build = (
+                        isinstance(existing_build, dict)
+                        and existing_build.get("contentMode") == "model-segmented"
+                        and int(existing_build.get("completedSlides", 0) or 0) > 0
+                        and len(existing_document_slides) >= int(existing_build.get("completedSlides", 0) or 0)
+                    )
+                    completed_before = int(existing_build.get("completedSlides", 0) or 0) if can_resume_build else 0
+                    built_slides: list[dict[str, Any]] = [
+                        dict(item) for item in previous_records[:completed_before] if isinstance(item, dict)
+                    ]
                     working_document = copy.deepcopy(presentation.document)
                     working_document["title"] = str(current.state.get("prompt", "新建 AI PPT"))[:500]
-                    working_document["slides"] = []
+                    working_document["slides"] = copy.deepcopy(existing_document_slides[:completed_before]) if can_resume_build else []
                     build_attempt_id = uuid.uuid4().hex[:12]
                     web_asset_ids = [
                         str(asset.get("assetId"))
@@ -969,10 +1024,67 @@ class AgentRunService:
                         for asset in material_gate.ai_images
                         if isinstance(asset, dict) and isinstance(asset.get("role"), str) and isinstance(asset.get("assetId"), str)
                     }
+                    writer = self.narrative_generator
+                    if writer is None and self._narrative_settings_backed:
+                        from ppt_materials import build_settings_narrative_generator
+
+                        writer = build_settings_narrative_generator(str(current.state.get("modelProvider") or "deepseek"))
+                        if writer is None:
+                            raise RuntimeError("逐页写作模型未配置，请先在设置中配置当前模型的 API Key")
+                    evidence = [
+                        dict(result)
+                        for round_state in current.state.get("searchRounds", [])
+                        if isinstance(round_state, dict)
+                        for result in round_state.get("results", [])
+                        if isinstance(result, dict)
+                    ]
+                    writer_provider = getattr(writer, "provider", "demo") if writer is not None else "demo"
                     for index, slide in enumerate(planned_slides if isinstance(planned_slides, list) else []):
                         if not isinstance(slide, dict):
                             continue
-                        built = {**slide, "status": "built", "componentCount": 4}
+                        if index < completed_before and index < len(built_slides):
+                            # A process restart after a successful commit must
+                            # not regenerate an already-written page.
+                            built = built_slides[index]
+                            self._emit(
+                                run_id,
+                                owner_scope,
+                                "phase.progress",
+                                {
+                                    "phase": phase,
+                                    "label": label,
+                                    "completedSlides": index + 1,
+                                    "slideCount": len(planned_slides),
+                                    "slide": built,
+                                    "reused": True,
+                                    "writerProvider": writer_provider,
+                                },
+                            )
+                            continue
+                        chapter = (index // 4) + 1
+                        selected_evidence = evidence[index * 2:index * 2 + 8] or evidence[:8]
+                        previous_sections = built_slides[-3:]
+                        if writer is None:
+                            generated = self._demo_narrative(slide, index)
+                        else:
+                            generated = writer.generate_slide(
+                                prompt=str(current.state.get("prompt", "PPT")),
+                                slide=slide,
+                                chapter=chapter,
+                                total_slides=len(planned_slides),
+                                evidence=selected_evidence,
+                                previous_sections=previous_sections,
+                            )
+                        built = {
+                            **slide,
+                            **(generated if isinstance(generated, Mapping) else {}),
+                            "status": "built",
+                            "componentCount": 5,
+                            "chapter": chapter,
+                            "writingMode": "model-segmented" if writer is not None else "demo-fallback",
+                        }
+                        if not built.get("sourceUrls"):
+                            built["sourceUrls"] = list(slide.get("sourceUrls") or [])[:5]
                         built_slides.append(built)
                         if index == 0:
                             background_asset_id = ai_asset_ids.get("COVER")
@@ -1006,10 +1118,41 @@ class AgentRunService:
                             run_id,
                             owner_scope,
                             "phase.progress",
-                            {"phase": phase, "label": label, "completedSlides": index + 1, "slideCount": len(planned_slides), "slide": built},
+                            {
+                                "phase": phase,
+                                "label": label,
+                                "completedSlides": index + 1,
+                                "slideCount": len(planned_slides),
+                                "slide": built,
+                                "section": built.get("section"),
+                                "title": built.get("title"),
+                                "bodyPreview": str(built.get("body") or "")[:180],
+                                "writerProvider": writer_provider,
+                            },
+                            state_patch={
+                                "build": {
+                                    "status": "running",
+                                    "contentVersion": 3,
+                                    "contentMode": "model-segmented" if writer is not None else "demo-fallback",
+                                    "slideCount": len(planned_slides),
+                                    "completedSlides": index + 1,
+                                    "slides": list(built_slides),
+                                    "writerProvider": writer_provider,
+                                    "updatedAt": time.time(),
+                                }
+                            },
                         )
-                    state_patch["build"] = {"status": "completed", "contentVersion": 3, "slideCount": len(built_slides), "slides": built_slides, "completedAt": time.time()}
-                    phase_details.update({"slideCount": len(built_slides), "componentMode": "incremental", "completedSlides": len(built_slides)})
+                    state_patch["build"] = {
+                        "status": "completed",
+                        "contentVersion": 3,
+                        "contentMode": "model-segmented" if writer is not None else "demo-fallback",
+                        "slideCount": len(built_slides),
+                        "completedSlides": len(built_slides),
+                        "slides": built_slides,
+                        "writerProvider": writer_provider,
+                        "completedAt": time.time(),
+                    }
+                    phase_details.update({"slideCount": len(built_slides), "componentMode": "incremental", "completedSlides": len(built_slides), "writerProvider": writer_provider})
                 elif phase == "REVIEW":
                     presentation = self.repository.get_presentation(current.presentation_id, owner_scope=owner_scope)
                     report = self._quality_report(

@@ -492,3 +492,88 @@ def test_continue_audit_keeps_saved_search_and_generated_ai_assets() -> None:
     # outline should be resumed; saved search rounds and AI images must not
     # trigger another Qwen/GLM request or generation call.
     assert AgentRunService._first_incomplete_phase(state) == "OUTLINE"
+
+
+def test_build_writes_model_generated_sections_one_page_at_a_time(tmp_path: Path) -> None:
+    repository = PptRepository(tmp_path / "ppt.db")
+    repository.initialize()
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    document["presentationId"] = "presentation-narrative-001"
+    repository.create_presentation(
+        presentation_id="presentation-narrative-001",
+        owner_scope="owner-a",
+        title="Narrative test",
+        document=document,
+        template_id=None,
+    )
+
+    def search(query: str, _limit: int):
+        marker = "one" if "概念定义" in query else "two" if "行业研究" in query else "three"
+        return [{
+            "title": f"{marker} source {index}",
+            "url": f"https://example.com/{marker}-{index}",
+            "imageUrl": f"https://cdn.example/{marker}-{index}.png",
+        } for index in range(3)]
+
+    class Downloader:
+        def download(self, image_url: str) -> DownloadedImage:
+            return DownloadedImage(image_url, "image/png", b"image", "a" * 64)
+
+    class ImageAdapter:
+        def generate(self, *, role: str, prompt: str):
+            return {"role": role, "assetId": f"asset-{role.lower()}", "imageUrl": f"https://cdn.example/{role.lower()}.png"}
+
+    class Narrative:
+        provider = "qwen"
+
+        def __init__(self):
+            self.calls: list[int] = []
+
+        def generate_slide(self, *, prompt, slide, chapter, total_slides, evidence, previous_sections):
+            ordinal = int(slide["ordinal"])
+            self.calls.append(ordinal)
+            return {
+                "title": f"模型标题 {ordinal}",
+                "subtitle": f"第 {chapter} 章的判断",
+                "body": f"这是模型真实写入的第 {ordinal} 页正文，基于 {len(evidence)} 条资料逐段展开，并承接前文形成连续叙事。",
+                "keyPoints": [f"证据要点 {ordinal}", "可执行判断"],
+                "speakerNotes": f"请讲解第 {ordinal} 页。",
+                "sourceUrls": [str(evidence[0]["url"])] if evidence else [],
+            }
+
+    narrative = Narrative()
+    service = AgentRunService(
+        repository,
+        search_adapters={"firecrawl": search, "qwen": search, "glm": search},
+        ai_image_adapter=ImageAdapter(),
+        image_downloader=Downloader(),
+        narrative_generator=narrative,
+    )
+    run, _ = service.create(
+        run_id="run-narrative-001",
+        presentation_id="presentation-narrative-001",
+        owner_scope="owner-a",
+        prompt="人工智能发展",
+        max_iterations=3,
+    )
+    for _ in range(500):
+        snapshot = service.get(run.id, owner_scope="owner-a")
+        if snapshot.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+            break
+        time.sleep(0.01)
+
+    assert snapshot.status == "COMPLETED"
+    assert narrative.calls == list(range(1, 17))
+    assert snapshot.state["build"]["contentMode"] == "model-segmented"
+    assert snapshot.state["build"]["completedSlides"] == 16
+    presentation = repository.get_presentation("presentation-narrative-001", owner_scope="owner-a")
+    assert presentation is not None
+    assert presentation.document["slides"][0]["elements"][1]["text"] == "模型标题 1"
+    assert "模型真实写入的第 1 页正文" in next(
+        element["text"] for element in presentation.document["slides"][0]["elements"] if element["id"].endswith("-body")
+    )
+    progress = [
+        event for event in repository.list_run_events(run.id, after_sequence=0, limit=500)
+        if event.event_type == "phase.progress" and event.payload.get("phase") == "BUILD"
+    ]
+    assert any(event.payload.get("writerProvider") == "qwen" and event.payload.get("completedSlides") == 16 for event in progress)

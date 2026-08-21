@@ -174,6 +174,21 @@ def _image_json_request(endpoint: str, headers: dict[str, str], payload: dict[st
     return _request_json_with_timeout(endpoint, headers, payload, timeout_seconds=max(30, min(180, int(os.getenv("PPT_IMAGE_PROVIDER_TIMEOUT_SECONDS", "120")))))
 
 
+def _narrative_json_request(endpoint: str, headers: dict[str, str], payload: dict[str, object]) -> Mapping[str, object]:
+    """Bounded request used for one slide's narrative section.
+
+    BUILD deliberately makes one request per slide. A separate timeout keeps a
+    slow writing request from being confused with image generation while still
+    allowing a real model to finish a longer Chinese section.
+    """
+    return _request_json_with_timeout(
+        endpoint,
+        headers,
+        payload,
+        timeout_seconds=max(30, min(180, int(os.getenv("PPT_NARRATIVE_TIMEOUT_SECONDS", "90")))),
+    )
+
+
 def _normalize_search_response(payload: Mapping[str, object]) -> list[dict[str, object]]:
     candidates: object = payload.get("data", payload.get("results", payload.get("search_result", [])))
     if isinstance(candidates, Mapping):
@@ -900,6 +915,186 @@ class SettingsAiImageAdapter:
             raise ProviderRequestFailed("image provider returned an invalid image")
         asset_url = _validate_https_url(str(first["url"]))
         return {"role": role, "assetId": str(first.get("id") or hashlib.sha256(asset_url.encode()).hexdigest()[:16]), "imageUrl": asset_url}
+
+
+class SettingsNarrativeGenerator:
+    """Generate one structured, source-aware narrative section per slide.
+
+    The adapter intentionally uses the same persisted model profiles as the
+    chat/settings UI. It is OpenAI-compatible for DeepSeek, Qwen and GLM, but
+    does not enable web search: BUILD consumes the already persisted search
+    ledger and asks the model to write from that evidence.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        model: str,
+        base_url: str,
+        api_key: str,
+        temperature: float = 0.7,
+        max_tokens: int = 2_000,
+        request_json: JsonRequest | None = None,
+    ) -> None:
+        self.provider = provider
+        self.model = model
+        self.endpoint = base_url.rstrip("/") if base_url.rstrip("/").endswith("/chat/completions") else f"{base_url.rstrip('/')}/chat/completions"
+        self.api_key = api_key
+        self.temperature = max(0.0, min(2.0, float(temperature)))
+        self.max_tokens = max(256, min(65_536, int(max_tokens)))
+        self.request_json = request_json or _narrative_json_request
+
+    @staticmethod
+    def _content_from_response(payload: Mapping[str, object]) -> str:
+        choices = payload.get("choices")
+        if isinstance(choices, Sequence) and choices and isinstance(choices[0], Mapping):
+            message = choices[0].get("message")
+            if isinstance(message, Mapping):
+                content = message.get("content") or message.get("reasoning_content")
+                if isinstance(content, str):
+                    return content.strip()
+            text = choices[0].get("text")
+            if isinstance(text, str):
+                return text.strip()
+        # Some gateways are configured with stream=true by policy. Reassemble
+        # the content deltas so the contract stays identical for the caller.
+        frames = payload.get("stream_frames")
+        if isinstance(frames, Sequence):
+            chunks: list[str] = []
+            for frame in frames:
+                if not isinstance(frame, Mapping):
+                    continue
+                frame_choices = frame.get("choices")
+                if not isinstance(frame_choices, Sequence) or not frame_choices:
+                    continue
+                choice = frame_choices[0]
+                if not isinstance(choice, Mapping):
+                    continue
+                delta = choice.get("delta") or choice.get("message")
+                if isinstance(delta, Mapping) and isinstance(delta.get("content"), str):
+                    chunks.append(str(delta["content"]))
+            return "".join(chunks).strip()
+        return ""
+
+    @staticmethod
+    def _parse_json(text: str) -> dict[str, object]:
+        candidate = text.strip()
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```(?:json)?\s*|\s*```$", "", candidate, flags=re.IGNORECASE | re.DOTALL).strip()
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", candidate, flags=re.DOTALL)
+            if not match:
+                raise ProviderRequestFailed("narrative model returned invalid JSON")
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError as exc:
+                raise ProviderRequestFailed("narrative model returned invalid JSON") from exc
+        if not isinstance(parsed, Mapping):
+            raise ProviderRequestFailed("narrative model returned an invalid section")
+        result: dict[str, object] = {}
+        for key in ("title", "subtitle", "body", "speakerNotes"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value.strip():
+                result[key] = value.strip()
+        points = parsed.get("keyPoints")
+        if isinstance(points, Sequence) and not isinstance(points, (str, bytes, bytearray)):
+            result["keyPoints"] = [str(item).strip() for item in points if str(item).strip()][:4]
+        urls = parsed.get("sourceUrls")
+        if isinstance(urls, Sequence) and not isinstance(urls, (str, bytes, bytearray)):
+            result["sourceUrls"] = [str(item).strip() for item in urls if str(item).startswith(("http://", "https://"))][:5]
+        return result
+
+    def generate_slide(
+        self,
+        *,
+        prompt: str,
+        slide: Mapping[str, object],
+        chapter: int,
+        total_slides: int,
+        evidence: Sequence[Mapping[str, object]],
+        previous_sections: Sequence[Mapping[str, object]],
+    ) -> dict[str, object]:
+        if not self.api_key:
+            raise ProviderNotConfigured(f"{self.provider} narrative provider is not configured")
+        _validate_https_url(self.endpoint)
+        evidence_text = "\n".join(
+            f"- {item.get('title', '来源')} | {item.get('url', '')}"
+            for item in evidence[:8]
+            if isinstance(item, Mapping)
+        ) or "（没有可用来源）"
+        previous_text = "\n".join(
+            f"- 第 {item.get('ordinal', '?')} 页：{item.get('title', '')}：{item.get('body', '')}"
+            for item in previous_sections[-3:]
+            if isinstance(item, Mapping)
+        ) or "（这是第一段）"
+        system = (
+            "你是专业的中文演示文稿作者。请只输出 JSON，不要 Markdown，不要解释。"
+            "正文必须是可直接放进 PPT 的真实段落，而不是‘本页将介绍’这类占位符。"
+        )
+        user = {
+            "任务": prompt,
+            "章节": chapter,
+            "当前页": int(slide.get("ordinal", 0) or 0),
+            "总页数": total_slides,
+            "章节主题": slide.get("section"),
+            "页标题方向": slide.get("direction"),
+            "已完成的前文": previous_text,
+            "搜索证据": evidence_text,
+            "输出格式": {
+                "title": "不超过22字的页标题",
+                "subtitle": "一句话观点，不超过45字",
+                "body": "120-220字的连贯中文段落，包含具体事实、因果或判断",
+                "keyPoints": ["2-4条可验证要点"],
+                "speakerNotes": "80-160字演讲备注",
+                "sourceUrls": ["只填写实际使用的证据 URL"],
+            },
+        }
+        payload: dict[str, object] = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(user, ensure_ascii=False)},
+            ],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        # JSON mode is not reliable on every GLM profile; prompting plus
+        # defensive parsing works across all configured providers.
+        if self.provider in {"deepseek", "qwen"}:
+            payload["response_format"] = {"type": "json_object"}
+        response = self.request_json(
+            self.endpoint,
+            {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            payload,
+        )
+        content = self._content_from_response(response)
+        result = self._parse_json(content)
+        if not result.get("title") or not result.get("body"):
+            raise ProviderRequestFailed("narrative model returned an incomplete section")
+        result["ordinal"] = int(slide.get("ordinal", 0) or 0)
+        result["section"] = str(slide.get("section") or "")
+        return result
+
+
+def build_settings_narrative_generator(provider: str, *, request_json: JsonRequest | None = None) -> SettingsNarrativeGenerator | None:
+    """Build the writer from the model profile selected by the PPT run."""
+    from model_settings import ModelSettingsStore
+
+    settings = ModelSettingsStore().load(provider)
+    if not settings.api_key or not settings.base_url or not settings.model_id:
+        return None
+    return SettingsNarrativeGenerator(
+        provider=provider,
+        model=settings.model_id,
+        base_url=settings.base_url,
+        api_key=settings.api_key,
+        temperature=min(1.0, settings.temperature),
+        max_tokens=min(8_000, settings.max_tokens),
+        request_json=request_json,
+    )
 
 
 def generate_required_ai_images(adapter: AiImageAdapter, *, prompt: str) -> list[dict[str, object]]:
