@@ -4850,6 +4850,40 @@ async def run_mcp_tool_preround(
     yield {"mcp_phase": "done", "tool_count": len(tool_notes), "tool_notes": tool_notes}
 
 
+MCP_PREROUND_TIMEOUT_SECONDS = 8.0
+
+
+async def iter_mcp_tool_preround_with_timeout(
+    base_messages: list,
+    settings: RuntimeSettings,
+    *,
+    max_rounds: int = 3,
+    timeout_seconds: float = MCP_PREROUND_TIMEOUT_SECONDS,
+):
+    """Run the optional MCP pre-round without holding the chat stream forever.
+
+    MCP is supplemental for native provider web search.  A stalled MCP server,
+    tool dispatch, or decision-model call must therefore degrade to the native
+    provider path instead of leaving the SSE response in a permanent thinking
+    state.
+    """
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            async for event in run_mcp_tool_preround(
+                base_messages, settings, max_rounds=max_rounds
+            ):
+                yield event
+    except TimeoutError:
+        logger.warning(
+            "[mcp] preround timed out after %.1fs; continuing without MCP context",
+            timeout_seconds,
+        )
+        yield {"mcp_phase": "error", "reason": "timeout", "tool_count": 0}
+    except Exception:
+        logger.exception("[mcp] preround wrapper failed; continuing without MCP context")
+        yield {"mcp_phase": "error", "reason": "error", "tool_count": 0}
+
+
 async def generate_chat_events(
     message: str,
     mode: str,
@@ -7534,7 +7568,7 @@ async def chat_stream(request: ChatRequest):
                                 base_messages.append(AIMessage(content=turn["content"]))
                     base_messages.append(HumanMessage(content=request.message))
                     tool_notes = []
-                    async for mcp_ev in run_mcp_tool_preround(base_messages, runtime):
+                    async for mcp_ev in iter_mcp_tool_preround_with_timeout(base_messages, runtime):
                         if "tool_notes" in mcp_ev and mcp_ev.get("mcp_phase") == "done":
                             tool_notes = mcp_ev.pop("tool_notes")
                         yield f"event: mcp\ndata: {json.dumps(mcp_ev, ensure_ascii=False)}\n\n"
