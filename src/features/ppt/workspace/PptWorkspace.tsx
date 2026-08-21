@@ -971,7 +971,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         };
         setRunConfig(nextConfig);
         const prompt = typeof state.prompt === "string" ? state.prompt : "继续完成这份 PPT";
-        setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: prompt }, { id: nextId("assistant"), role: "assistant", text: "已恢复上次未完成的 AI PPT 会话，继续接收实时进度。" }]);
+        setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: prompt }, { id: nextId("assistant"), role: "assistant", text: "已恢复这条 AI PPT 历史会话，已保存的搜索、素材和搭建进度正在载入。" }]);
         setWorkflowStep(workflowStepForPhase(run.phase));
         setRunning(run.status === "RUNNING" || run.status === "QUEUED" || run.status === "PAUSED");
         await startAgentRun(prompt, nextConfig, run.runId);
