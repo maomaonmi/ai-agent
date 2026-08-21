@@ -3,7 +3,7 @@
 import { MODE_OPTIONS } from './ModeSelector';
 import { SessionSummary } from '../lib/api';
 import type { PptHistoryRun } from '../features/ppt/api';
-import { Activity, ChevronUp, Film, LogOut, Presentation, Puzzle, Settings, UserRound, Workflow } from 'lucide-react';
+import { Activity, Check, ChevronRight, ChevronUp, Film, FolderInput, LogOut, MoreHorizontal, Pencil, Pin, Presentation, Puzzle, Settings, Share2, Trash2, UserRound, Workflow } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 
 interface SessionSidebarProps {
@@ -17,6 +17,7 @@ interface SessionSidebarProps {
   onCreate: () => void;
   onSelect: (session: SessionSummary) => void;
   onDelete: (sessionId: string) => void;
+  onRename: (sessionId: string, title: string) => Promise<void>;
   onClear: () => void;
   onOpenSettings: () => void;
   onOpenDirectory: (tab?: 'skills' | 'connectors' | 'plugins') => void;
@@ -63,6 +64,7 @@ export default function SessionSidebar({
   onCreate,
   onSelect,
   onDelete,
+  onRename,
   onClear,
   onOpenSettings,
   onOpenDirectory,
@@ -76,11 +78,109 @@ export default function SessionSidebar({
   onSelectPptHistory,
 }: SessionSidebarProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement>(null);
+  const [openSessionMenuId, setOpenSessionMenuId] = useState<string | null>(null);
+  const [projectMenuSessionId, setProjectMenuSessionId] = useState<string | null>(null);
+  const [pinnedSessionIds, setPinnedSessionIds] = useState<Set<string>>(new Set());
+  const [sessionProjects, setSessionProjects] = useState<Record<string, string>>({});
+  const [projectNames, setProjectNames] = useState<string[]>([]);
+  const [shareNotice, setShareNotice] = useState<string | null>(null);
+  const userMenuRef = useRef<HTMLDivElement>(null);
+  const sessionMenuRef = useRef<HTMLUListElement>(null);
+  const storageHydratedRef = useRef(false);
+  const skipPersistenceRef = useRef(false);
   useEffect(() => {
-    const close = (event: MouseEvent) => !menuRef.current?.contains(event.target as Node) && setUserMenuOpen(false);
-    document.addEventListener('mousedown', close); return () => document.removeEventListener('mousedown', close);
+    try {
+      const storedPins = JSON.parse(localStorage.getItem('sessionSidebarPinned-v1') ?? '[]');
+      if (Array.isArray(storedPins)) setPinnedSessionIds(new Set(storedPins.filter((value): value is string => typeof value === 'string')));
+      const storedProjects = JSON.parse(localStorage.getItem('sessionSidebarProjects-v1') ?? '{}');
+      if (storedProjects && typeof storedProjects === 'object' && !Array.isArray(storedProjects)) setSessionProjects(storedProjects as Record<string, string>);
+      const storedProjectNames = JSON.parse(localStorage.getItem('sessionSidebarProjectNames-v1') ?? '[]');
+      if (Array.isArray(storedProjectNames)) setProjectNames(storedProjectNames.filter((value): value is string => typeof value === 'string'));
+    } catch { /* localStorage corruption should not block the sidebar */ }
+    storageHydratedRef.current = true;
+    skipPersistenceRef.current = true;
   }, []);
+  useEffect(() => {
+    if (!storageHydratedRef.current) return;
+    if (skipPersistenceRef.current) {
+      skipPersistenceRef.current = false;
+      return;
+    }
+    localStorage.setItem('sessionSidebarPinned-v1', JSON.stringify([...pinnedSessionIds]));
+    localStorage.setItem('sessionSidebarProjects-v1', JSON.stringify(sessionProjects));
+    localStorage.setItem('sessionSidebarProjectNames-v1', JSON.stringify(projectNames));
+  }, [pinnedSessionIds, sessionProjects, projectNames]);
+  useEffect(() => {
+    const close = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!userMenuRef.current?.contains(target)) setUserMenuOpen(false);
+      if (!sessionMenuRef.current?.contains(target)) {
+        setOpenSessionMenuId(null);
+        setProjectMenuSessionId(null);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpenSessionMenuId(null);
+        setProjectMenuSessionId(null);
+      }
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, []);
+
+  const orderedSessions = [...sessions].sort((left, right) => {
+    const pinDifference = Number(pinnedSessionIds.has(right.session_id)) - Number(pinnedSessionIds.has(left.session_id));
+    return pinDifference || right.updated_at - left.updated_at;
+  });
+  const closeSessionMenu = () => {
+    setOpenSessionMenuId(null);
+    setProjectMenuSessionId(null);
+  };
+  const togglePinned = (sessionId: string) => {
+    setPinnedSessionIds((current) => {
+      const next = new Set(current);
+      if (next.has(sessionId)) next.delete(sessionId); else next.add(sessionId);
+      return next;
+    });
+    closeSessionMenu();
+  };
+  const renameFromMenu = (session: SessionSummary) => {
+    const nextTitle = window.prompt('重命名会话', session.title)?.trim();
+    if (!nextTitle || nextTitle === session.title) return;
+    void onRename(session.session_id, nextTitle).then(closeSessionMenu).catch(() => undefined);
+  };
+  const shareFromMenu = async (sessionId: string) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('session', sessionId);
+    try {
+      if (!navigator.clipboard) throw new Error('clipboard unavailable');
+      await navigator.clipboard.writeText(url.toString());
+      setShareNotice(sessionId);
+      window.setTimeout(() => setShareNotice((current) => current === sessionId ? null : current), 2_000);
+    } catch {
+      setShareNotice(null);
+    }
+    closeSessionMenu();
+  };
+  const moveToProject = (sessionId: string, project: string) => {
+    setSessionProjects((current) => {
+      const next = { ...current };
+      if (project === '未分类') delete next[sessionId]; else next[sessionId] = project;
+      return next;
+    });
+    closeSessionMenu();
+  };
+  const createProjectFromMenu = (sessionId: string) => {
+    const project = window.prompt('新建项目', '')?.trim();
+    if (!project) return;
+    setProjectNames((current) => current.includes(project) ? current : [...current, project]);
+    moveToProject(sessionId, project);
+  };
   return (
     <>
       {isOpen && (
@@ -220,11 +320,14 @@ export default function SessionSidebar({
               暂无历史会话
             </div>
           ) : (
-            <ul className="space-y-1">
-              {sessions.map((session) => {
+            <ul ref={sessionMenuRef} className="space-y-1">
+              {orderedSessions.map((session) => {
                 const active = session.session_id === activeSessionId;
+                const pinned = pinnedSessionIds.has(session.session_id);
+                const project = sessionProjects[session.session_id];
+                const menuOpen = openSessionMenuId === session.session_id;
                 return (
-                  <li key={session.session_id}>
+                  <li key={session.session_id} className="relative">
                     <div
                       className={`group flex items-center rounded-lg ${
                         active ? 'bg-slate-200' : 'hover:bg-slate-100'
@@ -239,18 +342,51 @@ export default function SessionSidebar({
                           {session.title}
                         </span>
                         <span className="mt-0.5 block truncate text-xs text-slate-500">
-                          {modeLabel(session.mode)}
+                          {modeLabel(session.mode)}{project ? ` · ${project}` : ''}
                         </span>
                       </button>
                       <button
                         type="button"
-                        aria-label={`删除会话：${session.title}`}
-                        onClick={() => onDelete(session.session_id)}
-                        className="mr-2 rounded px-2 py-1 text-slate-400 opacity-0 hover:bg-white hover:text-rose-600 focus:opacity-100 group-hover:opacity-100"
+                        aria-label={`打开会话菜单：${session.title}`}
+                        aria-haspopup="menu"
+                        aria-expanded={menuOpen}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setOpenSessionMenuId(menuOpen ? null : session.session_id);
+                          setProjectMenuSessionId(null);
+                        }}
+                        className={`mr-1 flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-white hover:text-slate-800 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${menuOpen ? 'bg-white opacity-100 text-slate-800' : 'opacity-0 group-hover:opacity-100'}`}
                       >
-                        ×
+                        <MoreHorizontal size={17} />
                       </button>
                     </div>
+                    {menuOpen && (
+                      <div role="menu" aria-label={`${session.title} 操作`} className="absolute right-2 top-11 z-30 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-[0_16px_40px_rgba(15,23,42,0.16)]">
+                        <button type="button" role="menuitem" onClick={() => togglePinned(session.session_id)} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100">
+                          <Pin size={16} className={pinned ? 'fill-violet-600 text-violet-600' : 'text-slate-500'} />{pinned ? '取消置顶' : '置顶'}
+                        </button>
+                        <button type="button" role="menuitem" onClick={() => void shareFromMenu(session.session_id)} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100">
+                          {shareNotice === session.session_id ? <Check size={16} className="text-emerald-600" /> : <Share2 size={16} className="text-slate-500" />}{shareNotice === session.session_id ? '链接已复制' : '分享'}
+                        </button>
+                        <button type="button" role="menuitem" onClick={() => renameFromMenu(session)} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100">
+                          <Pencil size={16} className="text-slate-500" />重命名
+                        </button>
+                        <button type="button" role="menuitem" aria-expanded={projectMenuSessionId === session.session_id} onClick={() => setProjectMenuSessionId((current) => current === session.session_id ? null : session.session_id)} className="flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100">
+                          <span className="flex items-center gap-3"><FolderInput size={16} className="text-slate-500" />移动到项目</span><ChevronRight size={15} className="text-slate-400" />
+                        </button>
+                        {projectMenuSessionId === session.session_id && (
+                          <div className="mt-1 border-t border-slate-100 pt-1" role="menu" aria-label="选择项目">
+                            <button type="button" role="menuitem" onClick={() => moveToProject(session.session_id, '未分类')} className="flex w-full items-center rounded-lg px-3 py-2 text-xs text-slate-600 hover:bg-slate-100">未分类{!project && <Check size={14} className="ml-auto text-violet-600" />}</button>
+                            {projectNames.map((name) => <button key={name} type="button" role="menuitem" onClick={() => moveToProject(session.session_id, name)} className="flex w-full items-center rounded-lg px-3 py-2 text-xs text-slate-600 hover:bg-slate-100">{name}{project === name && <Check size={14} className="ml-auto text-violet-600" />}</button>)}
+                            <button type="button" role="menuitem" onClick={() => createProjectFromMenu(session.session_id)} className="mt-1 flex w-full items-center rounded-lg border-t border-slate-100 px-3 py-2 text-xs font-medium text-violet-700 hover:bg-violet-50">＋ 新建项目</button>
+                          </div>
+                        )}
+                        <div className="my-1 border-t border-slate-100" />
+                        <button type="button" role="menuitem" onClick={() => { closeSessionMenu(); onDelete(session.session_id); }} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-rose-600 hover:bg-rose-50">
+                          <Trash2 size={16} />删除
+                        </button>
+                      </div>
+                    )}
                   </li>
                 );
               })}
@@ -258,7 +394,7 @@ export default function SessionSidebar({
           )}
         </nav>
 
-        <div className="border-t border-slate-200 p-3 dark:border-slate-700" ref={menuRef}>
+        <div className="border-t border-slate-200 p-3 dark:border-slate-700" ref={userMenuRef}>
           {userMenuOpen && <div className="mb-2 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl dark:border-slate-700 dark:bg-slate-900">
             <div className="border-b border-slate-100 px-3 py-2 dark:border-slate-800"><p className="truncate text-sm font-semibold text-slate-900 dark:text-white">AI Agent 用户</p><p className="text-xs text-slate-500">本地工作区</p></div>
             <button type="button" onClick={() => { setUserMenuOpen(false); onOpenSettings(); }} className="mt-1 flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800"><Settings size={17}/>设置</button>

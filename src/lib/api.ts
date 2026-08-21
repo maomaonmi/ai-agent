@@ -2680,6 +2680,20 @@ export async function deleteSession(sessionId: string): Promise<void> {
   if (!response.ok) throw new Error(await parseApiError(response));
 }
 
+export async function renameSession(sessionId: string, title: string): Promise<SessionSummary> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title }),
+    },
+  );
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const payload = await response.json() as { session: SessionSummary };
+  return payload.session;
+}
+
 export async function clearSessions(): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/sessions`, {
     method: 'DELETE',

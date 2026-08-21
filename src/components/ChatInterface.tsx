@@ -27,6 +27,7 @@ import {
   getSessionHistory,
   saveSessionSnapshot,
   deleteSession,
+  renameSession,
   clearSessions,
   ChatAttachment,
   getModelSettings,
@@ -1067,7 +1068,8 @@ export default function ChatInterface() {
       .then(async (response) => {
         if (cancelled) return;
         setSessions(response.sessions);
-        const rememberedId = localStorage.getItem('activeSessionId');
+        const sharedId = new URLSearchParams(window.location.search).get('session');
+        const rememberedId = sharedId || localStorage.getItem('activeSessionId');
         const initial =
           response.sessions.find((item) => item.session_id === rememberedId) ??
           response.sessions[0];
@@ -2082,6 +2084,17 @@ export default function ChatInterface() {
     }
   };
 
+  const handleRenameSession = async (sessionId: string, title: string) => {
+    if (isLoading || !title.trim()) return;
+    try {
+      const updated = await renameSession(sessionId, title);
+      setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== sessionId)]);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : '重命名会话失败');
+      throw requestError;
+    }
+  };
+
   const handleClearSessions = async () => {
     if (
       isLoading ||
@@ -2315,6 +2328,7 @@ export default function ChatInterface() {
         onCreate={() => void handleCreateSession()}
         onSelect={(session) => void handleSelectSession(session)}
         onDelete={(sessionId) => void handleDeleteSession(sessionId)}
+        onRename={(sessionId, title) => handleRenameSession(sessionId, title)}
         onClear={() => void handleClearSessions()}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onOpenDirectory={openDirectory}
