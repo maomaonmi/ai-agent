@@ -635,6 +635,13 @@ class WebPageImageExtractor:
                 key = _source_key(candidate)
                 if key in seen:
                     continue
+                parsed_candidate = urlparse(candidate)
+                basename = parsed_candidate.path.rsplit("/", 1)[-1].lower()
+                if any(token in basename for token in ("logo", "favicon", "icon", "avatar", "sprite", "qrcode", "w_60", "h_60")):
+                    continue
+                query = parsed_candidate.query.lower()
+                if any(marker in query for marker in ("w_60", "h_60", "width=60", "height=60", "size=small")):
+                    continue
                 seen.add(key)
                 images.append(candidate)
                 if len(images) >= max(1, min(limit, 10)):
@@ -674,6 +681,39 @@ class DownloadedImage:
     @property
     def byte_size(self) -> int:
         return len(self.content)
+
+
+def _image_dimensions(content: bytes, mime_type: str) -> tuple[int, int] | None:
+    """Read dimensions from common raster headers without decoding pixels."""
+    if mime_type == "image/png" and content.startswith(b"\x89PNG\r\n\x1a\n") and len(content) >= 24:
+        return int.from_bytes(content[16:20], "big"), int.from_bytes(content[20:24], "big")
+    if mime_type == "image/gif" and content[:6] in {b"GIF87a", b"GIF89a"} and len(content) >= 10:
+        return int.from_bytes(content[6:8], "little"), int.from_bytes(content[8:10], "little")
+    if mime_type == "image/webp" and content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        if content[12:16] == b"VP8X" and len(content) >= 30:
+            return 1 + int.from_bytes(content[24:27], "little"), 1 + int.from_bytes(content[27:30], "little")
+        if content[12:16] == b"VP8 " and len(content) >= 30 and content[23:27] == b"\x9d\x01\x2a":
+            return int.from_bytes(content[26:28], "little") & 0x3FFF, int.from_bytes(content[28:30], "little") & 0x3FFF
+    if mime_type == "image/jpeg" and content[:2] == b"\xff\xd8":
+        index = 2
+        while index + 9 < len(content):
+            if content[index] != 0xFF:
+                index += 1
+                continue
+            marker = content[index + 1]
+            index += 2
+            if marker in {0xD8, 0xD9}:
+                continue
+            if index + 2 > len(content):
+                break
+            segment_length = int.from_bytes(content[index:index + 2], "big")
+            if segment_length < 2 or index + segment_length > len(content):
+                break
+            if marker in set(range(0xC0, 0xC4)) | set(range(0xC5, 0xC8)) | set(range(0xC9, 0xCC)) | set(range(0xCD, 0xD0)):
+                if segment_length >= 7:
+                    return int.from_bytes(content[index + 5:index + 7], "big"), int.from_bytes(content[index + 3:index + 5], "big")
+            index += segment_length
+    return None
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -737,6 +777,9 @@ class SafeImageDownloader:
                     raise ValueError("image size exceeds limit")
                 chunks.append(chunk)
             content = b"".join(chunks)
+            dimensions = _image_dimensions(content, mime_type)
+            if dimensions is not None and (dimensions[0] < 160 or dimensions[1] < 90):
+                raise ValueError("image dimensions are too small for PPT material")
             return DownloadedImage(safe_url, mime_type, content, hashlib.sha256(content).hexdigest())
         finally:
             close = getattr(response, "close", None)
@@ -766,10 +809,13 @@ class SourceLedger:
         page_url: str,
         downloader: SafeImageDownloader,
         alt: str = "",
+        persist: Callable[[DownloadedImage], Mapping[str, object]] | None = None,
     ) -> dict[str, object]:
         downloaded = downloader.download(image_url)
         item = self.add_web_image(downloaded.url, page_url=page_url, alt=alt)
         item.update({"mimeType": downloaded.mime_type, "byteSize": downloaded.byte_size, "sha256": downloaded.sha256})
+        if persist is not None:
+            item.update(dict(persist(downloaded)))
         return item
 
 

@@ -308,6 +308,7 @@ def test_safe_image_downloader_rejects_redirects_oversize_and_non_images() -> No
             resolver=public_resolver,
         ).download("https://cdn.example/image.png")
 
+
     with pytest.raises(ValueError, match="size"):
         SafeImageDownloader(
             opener=lambda _request: Response(
@@ -330,6 +331,32 @@ def test_safe_image_downloader_rejects_redirects_oversize_and_non_images() -> No
             ),
             resolver=public_resolver,
         ).download("https://cdn.example/image.png")
+
+
+def test_safe_image_downloader_rejects_tiny_raster_material() -> None:
+    def public_resolver(*_args, **_kwargs):
+        return [(None, None, None, None, ("93.184.216.34", 0))]
+
+    class Response:
+        headers = {"Content-Type": "image/png"}
+
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def geturl(self) -> str:
+            return "https://cdn.example/icon.png"
+
+        def read(self, _size: int = -1) -> bytes:
+            # Minimal PNG header declaring a 60x60 image; pixel decoding is
+            # intentionally unnecessary for the content-quality gate.
+            self.reads += 1
+            return b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + (60).to_bytes(4, "big") + (60).to_bytes(4, "big") if self.reads == 1 else b""
+
+        def close(self) -> None:
+            return None
+
+    with pytest.raises(ValueError, match="dimensions"):
+        SafeImageDownloader(opener=lambda _request: Response(), resolver=public_resolver).download("https://cdn.example/icon.png")
 
 
 def test_source_ledger_records_downloaded_web_image_metadata() -> None:
@@ -425,3 +452,17 @@ def test_web_page_image_extractor_reads_open_graph_and_img_sources() -> None:
         "https://cdn.example/og.png",
         "https://example.com/images/hero.webp",
     ]
+
+
+def test_web_page_image_extractor_skips_logos_and_small_icon_hints() -> None:
+    html = b'''<meta property="og:image" content="https://cdn.example/logo-normal.png"><img src="https://cdn.example/image-w_60,h_60.png"><img src="/images/hero.webp">'''
+
+    class Response:
+        def read(self, _size: int = -1) -> bytes:
+            return html
+
+        def close(self) -> None:
+            return None
+
+    extractor = WebPageImageExtractor(opener=lambda _request: Response())
+    assert extractor.extract("https://example.com/article", limit=3) == ["https://example.com/images/hero.webp"]

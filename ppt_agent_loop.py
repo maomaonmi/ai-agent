@@ -5,8 +5,10 @@ from __future__ import annotations
 import threading
 import uuid
 import os
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, Mapping
 
 from ppt_repository import PptRepository, RepositoryConflict, RunRecord
@@ -70,8 +72,12 @@ class AgentRunService:
         image_downloader: Any | None = None,
         web_image_extractor: Any | None = None,
         allow_demo_materials: bool = False,
+        asset_root: str | Path | None = None,
     ) -> None:
         self.repository = repository
+        self.asset_root = Path(asset_root) if asset_root is not None else repository.database_path.parent / "ppt-assets"
+        self.asset_root = self.asset_root.resolve()
+        self.asset_root.mkdir(parents=True, exist_ok=True)
         self._locks: dict[str, threading.Lock] = {}
         self._workers: dict[str, threading.Thread] = {}
         self._worker_guard = threading.Lock()
@@ -104,6 +110,136 @@ class AgentRunService:
         self.image_downloader = image_downloader
         self.web_image_extractor = web_image_extractor
         self.allow_demo_materials = allow_demo_materials
+
+    def _persist_downloaded_web_asset(
+        self,
+        downloaded: Any,
+        *,
+        owner_scope: str,
+    ) -> dict[str, object]:
+        """Persist downloaded bytes and return a browser-safe local URL."""
+        mime_to_extension = {
+            "image/jpeg": "jpg",
+            "image/png": "png",
+            "image/gif": "gif",
+            "image/webp": "webp",
+            "image/svg+xml": "svg",
+        }
+        mime_type = str(getattr(downloaded, "mime_type", "application/octet-stream"))
+        extension = mime_to_extension.get(mime_type, "bin")
+        owner_hash = hashlib.sha256(owner_scope.encode("utf-8")).hexdigest()[:10]
+        asset_id = f"ppt-web-{str(getattr(downloaded, 'sha256', ''))[:32]}-{owner_hash}"
+        if len(asset_id) <= len("ppt-web-"):
+            asset_id = f"ppt-web-{uuid.uuid4().hex}"
+        relative_path = Path("web") / f"{asset_id}.{extension}"
+        target = (self.asset_root / relative_path).resolve()
+        if self.asset_root not in target.parents:
+            raise ValueError("PPT asset path escaped configured storage root")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        content = bytes(getattr(downloaded, "content", b""))
+        if not target.exists() or target.stat().st_size != len(content):
+            temporary = target.with_suffix(target.suffix + ".part")
+            temporary.write_bytes(content)
+            temporary.replace(target)
+        try:
+            self.repository.create_asset(
+                asset_id=asset_id,
+                owner_scope=owner_scope,
+                kind="PPT_WEB_IMAGE",
+                storage_path=relative_path.as_posix(),
+                mime_type=mime_type,
+                size_bytes=len(content),
+                sha256=str(getattr(downloaded, "sha256", "")),
+                source_url=str(getattr(downloaded, "url", "")) or None,
+            )
+        except RepositoryConflict:
+            if self.repository.get_asset(asset_id, owner_scope=owner_scope) is None:
+                raise
+        return {
+            "assetId": asset_id,
+            "sourceImageUrl": str(getattr(downloaded, "url", "")),
+            "imageUrl": f"/api/ppt/assets/{asset_id}/content",
+        }
+
+    def repair_web_assets(self, run_id: str, *, owner_scope: str) -> RunRecord:
+        """Rehydrate selected web images from older runs into local storage.
+
+        Early versions persisted only third-party image URLs.  Repair is
+        intentionally idempotent: assets already backed by a local asset API
+        are left untouched, while remote URLs are downloaded once and linked
+        to the durable run state.
+        """
+        with self._lock(run_id):
+            current = self.get(run_id, owner_scope=owner_scope)
+            web_images = current.state.get("webImages")
+            if not isinstance(web_images, dict):
+                return current
+            remote_to_local: dict[str, dict[str, object]] = {}
+            repaired = 0
+            failed = 0
+
+            def repair_asset(raw: object) -> dict[str, object] | None:
+                nonlocal repaired, failed
+                if not isinstance(raw, dict):
+                    return None
+                asset = dict(raw)
+                image_url = asset.get("imageUrl")
+                if not isinstance(image_url, str) or not image_url.startswith(("http://", "https://")):
+                    return asset
+                if image_url in remote_to_local:
+                    asset.update(remote_to_local[image_url])
+                    return asset
+                try:
+                    downloaded = self.image_downloader.download(image_url)
+                    local = self._persist_downloaded_web_asset(downloaded, owner_scope=owner_scope)
+                    remote_to_local[image_url] = local
+                    asset.update(local)
+                    repaired += 1
+                except Exception:
+                    failed += 1
+                return asset
+
+            assets = web_images.get("assets")
+            if isinstance(assets, list):
+                web_images["assets"] = [repair_asset(asset) for asset in assets]
+            selection_rounds = web_images.get("selectionRounds")
+            if isinstance(selection_rounds, list):
+                repaired_rounds: list[object] = []
+                for round_state in selection_rounds:
+                    if not isinstance(round_state, dict):
+                        repaired_rounds.append(round_state)
+                        continue
+                    next_round = dict(round_state)
+                    round_assets = next_round.get("assets")
+                    if isinstance(round_assets, list):
+                        next_round["assets"] = [repair_asset(asset) for asset in round_assets]
+                    repaired_rounds.append(next_round)
+                web_images["selectionRounds"] = repaired_rounds
+            candidates = web_images.get("candidateSources")
+            if isinstance(candidates, list) and remote_to_local:
+                web_images["candidateSources"] = [
+                    ({**candidate, **remote_to_local[str(candidate["imageUrl"])]}
+                     if isinstance(candidate, dict) and isinstance(candidate.get("imageUrl"), str) and candidate["imageUrl"] in remote_to_local
+                     else candidate)
+                    for candidate in candidates
+                ]
+            if repaired == 0 and failed == 0:
+                return current
+            next_state = {**current.state, "webImages": web_images}
+            self.repository.append_run_event(
+                run_id=run_id,
+                sequence=self._next_sequence(run_id),
+                event_type="assets.repaired",
+                payload={"phase": "WEB_ASSETS", "repairedCount": repaired, "failedCount": failed},
+            )
+            self.repository.update_run(
+                run_id,
+                owner_scope=owner_scope,
+                status=current.status,
+                phase=current.phase,
+                state=next_state,
+            )
+            return self.get(run_id, owner_scope=owner_scope)
 
     def _refresh_settings_backed_adapters(self) -> None:
         """Reload persisted provider profiles for every run after a settings save."""
@@ -445,6 +581,7 @@ class AgentRunService:
                                         page_url=str(source.get("pageUrl") or source["url"]),
                                         downloader=self.image_downloader,
                                         alt=str(source.get("title", "")),
+                                        persist=lambda downloaded, owner=owner_scope: self._persist_downloaded_web_asset(downloaded, owner_scope=owner),
                                     )
                                     web_assets = list(material_gate.ledger.web_images)
                                     round_assets.append(web_assets[-1])

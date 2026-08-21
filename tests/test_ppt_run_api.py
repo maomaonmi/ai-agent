@@ -168,3 +168,45 @@ def test_ppt_history_lists_terminal_and_active_runs_with_presentation_binding(tm
     assert records["run-history-001"]["title"] == "Run test"
     assert records["run-history-001"]["prompt"] == "记录已完成的历史 PPT"
     assert records["run-history-001"]["status"] == "CANCELLED"
+
+
+def test_ppt_asset_content_is_served_from_local_storage_and_owner_scoped(tmp_path: Path) -> None:
+    repository = PptRepository(tmp_path / "ppt.db")
+    repository.initialize()
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    document["presentationId"] = "presentation-asset-001"
+    document["revision"] = 0
+    repository.create_presentation(
+        presentation_id="presentation-asset-001",
+        owner_scope="owner-a",
+        title="Asset test",
+        document=document,
+        template_id=None,
+    )
+    asset_root = tmp_path / "assets"
+    asset_path = asset_root / "web" / "asset-1.png"
+    asset_path.parent.mkdir(parents=True)
+    asset_path.write_bytes(b"png-bytes")
+    repository.create_asset(
+        asset_id="asset-1",
+        owner_scope="owner-a",
+        kind="PPT_WEB_IMAGE",
+        storage_path="web/asset-1.png",
+        mime_type="image/png",
+        size_bytes=9,
+        sha256="a" * 64,
+        source_url="https://example.com/source.png",
+    )
+
+    async def owner_resolver(request: Request) -> str:
+        return request.headers.get("x-test-owner", "owner-a")
+
+    app = FastAPI()
+    app.include_router(create_ppt_router(repository, owner_resolver=owner_resolver, asset_root=asset_root))
+    response = TestClient(app).get("/api/ppt/assets/asset-1/content", headers={"x-test-owner": "owner-a"})
+    hidden = TestClient(app).get("/api/ppt/assets/asset-1/content", headers={"x-test-owner": "owner-b"})
+
+    assert response.status_code == 200
+    assert response.content == b"png-bytes"
+    assert response.headers["content-type"].startswith("image/png")
+    assert hidden.status_code == 404

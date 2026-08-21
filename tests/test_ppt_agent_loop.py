@@ -89,6 +89,8 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
     assert snapshot.state["searchRounds"][0]["resultCount"] == 3
     assert snapshot.state["webImages"]["downloadedCount"] == 9
     assert len(snapshot.state["webImages"]["candidateSources"]) == 9
+    assert all(str(asset["imageUrl"]).startswith("/api/ppt/assets/") for asset in snapshot.state["webImages"]["assets"])
+    assert all("assetId" in asset for asset in snapshot.state["webImages"]["assets"])
     assert snapshot.state["webImages"]["mode"] == "provider"
     assert snapshot.state["aiImages"]["mode"] == "provider"
     assert len(calls) == 3
@@ -106,6 +108,54 @@ def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: 
     assert len(web_complete.payload["candidateSources"]) == 9
     assert len(web_complete.payload["assets"]) == 9
     assert [item["selectedCount"] for item in web_complete.payload["selectionRounds"]] == [3, 3, 3]
+
+
+def test_repair_web_assets_rehydrates_legacy_remote_urls_idempotently(tmp_path: Path) -> None:
+    repository = PptRepository(tmp_path / "ppt.db")
+    repository.initialize()
+    document = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    document["presentationId"] = "presentation-repair-001"
+    repository.create_presentation(
+        presentation_id="presentation-repair-001",
+        owner_scope="owner-a",
+        title="Repair test",
+        document=document,
+        template_id=None,
+    )
+    repository.create_run(
+        run_id="run-repair-001",
+        presentation_id="presentation-repair-001",
+        owner_scope="owner-a",
+        status="COMPLETED",
+        phase="REVIEW",
+        state={
+            "prompt": "repair",
+            "webImages": {
+                "assets": [{"imageUrl": "https://cdn.example/legacy.png", "pageUrl": "https://example.com/article"}],
+                "selectionRounds": [{"round": 1, "assets": [{"imageUrl": "https://cdn.example/legacy.png"}]}],
+            },
+        },
+    )
+
+    class Downloader:
+        calls = 0
+
+        def download(self, image_url: str) -> DownloadedImage:
+            self.calls += 1
+            return DownloadedImage(image_url, "image/png", b"legacy-png", "b" * 64)
+
+    downloader = Downloader()
+    service = AgentRunService(repository, image_downloader=downloader, search_adapters={})
+
+    repaired = service.repair_web_assets("run-repair-001", owner_scope="owner-a")
+    asset = repaired.state["webImages"]["assets"][0]
+    assert asset["assetId"].startswith("ppt-web-")
+    assert asset["imageUrl"].startswith("/api/ppt/assets/")
+    assert (tmp_path / "ppt-assets" / "web").exists()
+    assert downloader.calls == 1
+
+    service.repair_web_assets("run-repair-001", owner_scope="owner-a")
+    assert downloader.calls == 1
 
 
 def test_agent_run_falls_back_to_firecrawl_when_native_search_times_out(tmp_path: Path) -> None:

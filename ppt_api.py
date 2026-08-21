@@ -6,10 +6,11 @@ import hashlib
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Query, Request, Response, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ppt_models import parse_presentation_document
@@ -113,12 +114,27 @@ def create_ppt_router(
     repository: PptRepository,
     *,
     owner_resolver: OwnerResolver = _default_owner_resolver,
+    asset_root: str | Path | None = None,
 ) -> APIRouter:
     repository.initialize()
     service = PptService(repository)
     service.ensure_system_templates()
-    run_service = AgentRunService(repository)
+    resolved_asset_root = (Path(asset_root) if asset_root is not None else repository.database_path.parent / "ppt-assets").resolve()
+    resolved_asset_root.mkdir(parents=True, exist_ok=True)
+    run_service = AgentRunService(repository, asset_root=resolved_asset_root)
     router = APIRouter(prefix="/api/ppt", tags=["ppt"])
+
+    @router.get("/assets/{asset_id}/content", response_model=None)
+    async def get_ppt_asset_content(asset_id: str, request: Request) -> FileResponse | JSONResponse:
+        owner_scope = await _resolve_owner(owner_resolver, request)
+        asset = repository.get_asset(asset_id, owner_scope=owner_scope)
+        if asset is None:
+            return _error("PPT_ASSET_NOT_FOUND", "PPT 素材不存在", status_code=404)
+        root = resolved_asset_root.resolve()
+        path = (root / asset.storage_path).resolve()
+        if root not in path.parents or not path.is_file():
+            return _error("PPT_ASSET_NOT_FOUND", "PPT 素材不存在", status_code=404)
+        return FileResponse(path, media_type=asset.mime_type, filename=path.name)
 
     @router.post("/presentations", status_code=status.HTTP_201_CREATED, response_model=None)
     async def create_presentation(request: Request, payload: dict[str, Any]) -> dict[str, Any] | JSONResponse:
@@ -271,6 +287,15 @@ def create_ppt_router(
         owner_scope = await _resolve_owner(owner_resolver, request)
         try:
             return run_service.payload(run_service.get(run_id, owner_scope=owner_scope))
+        except RunNotFound:
+            return _error("PPT_RUN_NOT_FOUND", "运行任务不存在", status_code=404)
+
+    @router.post("/runs/{run_id}/repair-assets", response_model=None)
+    async def repair_run_assets(run_id: str, request: Request) -> JSONResponse | dict[str, Any]:
+        owner_scope = await _resolve_owner(owner_resolver, request)
+        try:
+            repaired = run_service.repair_web_assets(run_id, owner_scope=owner_scope)
+            return run_service.payload(repaired)
         except RunNotFound:
             return _error("PPT_RUN_NOT_FOUND", "运行任务不存在", status_code=404)
 
