@@ -130,6 +130,34 @@ test("run API starts, polls, and cancels a durable agent loop", async () => {
 });
 
 
+test("PPT history API returns every run with its presentation binding", async () => {
+  const originalFetch = globalThis.fetch;
+  const api = createPptApi("http://ppt.test");
+  try {
+    globalThis.fetch = async (input) => {
+      assert.equal(String(input), "http://ppt.test/api/ppt/runs/history?limit=50");
+      return new Response(JSON.stringify({ runs: [{
+        runId: "run-history-1",
+        presentationId: "presentation-1",
+        title: "协作历史",
+        templateId: null,
+        status: "COMPLETED",
+        phase: "REVIEW",
+        prompt: "做一份协作 PPT",
+        createdAt: "2026-08-20T00:00:00Z",
+        updatedAt: "2026-08-20T00:01:00Z",
+      }] }), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const result = await api.listHistoryRuns();
+    assert.equal(result.runs[0].runId, "run-history-1");
+    assert.equal(result.runs[0].presentationId, "presentation-1");
+    assert.equal(result.runs[0].title, "协作历史");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
 test("run event API parses chunked SSE and resumes from the last event id", async () => {
   const originalFetch = globalThis.fetch;
   const api = createPptApi("http://ppt.test");

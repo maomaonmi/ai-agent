@@ -84,6 +84,22 @@ export interface PptRunListResponse {
   runs: PptRunResponse[];
 }
 
+export interface PptHistoryRun {
+  runId: string;
+  presentationId: string;
+  title: string;
+  templateId: string | null;
+  status: PptRunStatus;
+  phase: string;
+  prompt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PptHistoryResponse {
+  runs: PptHistoryRun[];
+}
+
 export interface PptRunEvent {
   id: number;
   type: string;
@@ -159,6 +175,7 @@ export interface PptApi {
   applyOperations(presentationId: string, input: ApplyPptOperationsInput, signal?: AbortSignal): Promise<PptPresentationResponse>;
   createRun(input: CreatePptRunInput, signal?: AbortSignal): Promise<PptRunResponse>;
   listResumableRuns(signal?: AbortSignal): Promise<PptRunListResponse>;
+  listHistoryRuns(signal?: AbortSignal): Promise<PptHistoryResponse>;
   getRun(runId: string, signal?: AbortSignal): Promise<PptRunResponse>;
   subscribeRunEvents(runId: string, onEvent: (event: PptRunEvent) => void, options?: PptRunEventOptions): Promise<void>;
   cancelRun(runId: string): Promise<PptRunResponse>;
@@ -295,6 +312,10 @@ export function createPptApi(baseUrl = DEFAULT_API_BASE_URL): PptApi {
     ),
     listResumableRuns: (signal) => request<PptRunListResponse>(
       "/api/ppt/runs/resumable",
+      { signal },
+    ),
+    listHistoryRuns: (signal) => request<PptHistoryResponse>(
+      "/api/ppt/runs/history?limit=50",
       { signal },
     ),
     getRun: (runId, signal) => request<PptRunResponse>(
