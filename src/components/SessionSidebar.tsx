@@ -79,13 +79,18 @@ export default function SessionSidebar({
 }: SessionSidebarProps) {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [openSessionMenuId, setOpenSessionMenuId] = useState<string | null>(null);
+  const [openPptMenuId, setOpenPptMenuId] = useState<string | null>(null);
   const [projectMenuSessionId, setProjectMenuSessionId] = useState<string | null>(null);
   const [pinnedSessionIds, setPinnedSessionIds] = useState<Set<string>>(new Set());
   const [sessionProjects, setSessionProjects] = useState<Record<string, string>>({});
   const [projectNames, setProjectNames] = useState<string[]>([]);
   const [shareNotice, setShareNotice] = useState<string | null>(null);
+  const [pptPinnedIds, setPptPinnedIds] = useState<Set<string>>(new Set());
+  const [pptTitleOverrides, setPptTitleOverrides] = useState<Record<string, string>>({});
+  const [hiddenPptIds, setHiddenPptIds] = useState<Set<string>>(new Set());
   const userMenuRef = useRef<HTMLDivElement>(null);
   const sessionMenuRef = useRef<HTMLUListElement>(null);
+  const pptMenuRef = useRef<HTMLElement>(null);
   const storageHydratedRef = useRef(false);
   const skipPersistenceRef = useRef(false);
   useEffect(() => {
@@ -96,6 +101,12 @@ export default function SessionSidebar({
       if (storedProjects && typeof storedProjects === 'object' && !Array.isArray(storedProjects)) setSessionProjects(storedProjects as Record<string, string>);
       const storedProjectNames = JSON.parse(localStorage.getItem('sessionSidebarProjectNames-v1') ?? '[]');
       if (Array.isArray(storedProjectNames)) setProjectNames(storedProjectNames.filter((value): value is string => typeof value === 'string'));
+      const storedPptPins = JSON.parse(localStorage.getItem('pptHistoryPinned-v1') ?? '[]');
+      if (Array.isArray(storedPptPins)) setPptPinnedIds(new Set(storedPptPins.filter((value): value is string => typeof value === 'string')));
+      const storedPptTitles = JSON.parse(localStorage.getItem('pptHistoryTitles-v1') ?? '{}');
+      if (storedPptTitles && typeof storedPptTitles === 'object' && !Array.isArray(storedPptTitles)) setPptTitleOverrides(storedPptTitles as Record<string, string>);
+      const storedHiddenPpt = JSON.parse(localStorage.getItem('pptHistoryHidden-v1') ?? '[]');
+      if (Array.isArray(storedHiddenPpt)) setHiddenPptIds(new Set(storedHiddenPpt.filter((value): value is string => typeof value === 'string')));
     } catch { /* localStorage corruption should not block the sidebar */ }
     storageHydratedRef.current = true;
     skipPersistenceRef.current = true;
@@ -109,19 +120,24 @@ export default function SessionSidebar({
     localStorage.setItem('sessionSidebarPinned-v1', JSON.stringify([...pinnedSessionIds]));
     localStorage.setItem('sessionSidebarProjects-v1', JSON.stringify(sessionProjects));
     localStorage.setItem('sessionSidebarProjectNames-v1', JSON.stringify(projectNames));
-  }, [pinnedSessionIds, sessionProjects, projectNames]);
+    localStorage.setItem('pptHistoryPinned-v1', JSON.stringify([...pptPinnedIds]));
+    localStorage.setItem('pptHistoryTitles-v1', JSON.stringify(pptTitleOverrides));
+    localStorage.setItem('pptHistoryHidden-v1', JSON.stringify([...hiddenPptIds]));
+  }, [pinnedSessionIds, sessionProjects, projectNames, pptPinnedIds, pptTitleOverrides, hiddenPptIds]);
   useEffect(() => {
     const close = (event: MouseEvent) => {
       const target = event.target as Node;
       if (!userMenuRef.current?.contains(target)) setUserMenuOpen(false);
-      if (!sessionMenuRef.current?.contains(target)) {
+      if (!sessionMenuRef.current?.contains(target) && !pptMenuRef.current?.contains(target)) {
         setOpenSessionMenuId(null);
+        setOpenPptMenuId(null);
         setProjectMenuSessionId(null);
       }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setOpenSessionMenuId(null);
+        setOpenPptMenuId(null);
         setProjectMenuSessionId(null);
       }
     };
@@ -139,6 +155,7 @@ export default function SessionSidebar({
   });
   const closeSessionMenu = () => {
     setOpenSessionMenuId(null);
+    setOpenPptMenuId(null);
     setProjectMenuSessionId(null);
   };
   const togglePinned = (sessionId: string) => {
@@ -180,6 +197,42 @@ export default function SessionSidebar({
     if (!project) return;
     setProjectNames((current) => current.includes(project) ? current : [...current, project]);
     moveToProject(sessionId, project);
+  };
+  const visiblePptHistory = pptHistory.filter((run) => !hiddenPptIds.has(run.runId));
+  const orderedPptHistory = [...visiblePptHistory].sort((left, right) => {
+    const pinDifference = Number(pptPinnedIds.has(right.runId)) - Number(pptPinnedIds.has(left.runId));
+    return pinDifference || new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+  });
+  const togglePptPinned = (runId: string) => {
+    setPptPinnedIds((current) => {
+      const next = new Set(current);
+      if (next.has(runId)) next.delete(runId); else next.add(runId);
+      return next;
+    });
+    closeSessionMenu();
+  };
+  const renamePptFromMenu = (run: PptHistoryRun) => {
+    const nextTitle = window.prompt('重命名 PPT 会话', pptTitleOverrides[run.runId] ?? run.title)?.trim();
+    if (!nextTitle || nextTitle === (pptTitleOverrides[run.runId] ?? run.title)) return;
+    setPptTitleOverrides((current) => ({ ...current, [run.runId]: nextTitle.slice(0, 80) }));
+    closeSessionMenu();
+  };
+  const sharePptFromMenu = async (run: PptHistoryRun) => {
+    const url = new URL(`/ppt/workspace/${encodeURIComponent(run.presentationId)}`, window.location.origin);
+    url.searchParams.set('source', 'history');
+    url.searchParams.set('runId', run.runId);
+    url.searchParams.set('resume', '1');
+    try {
+      if (!navigator.clipboard) throw new Error('clipboard unavailable');
+      await navigator.clipboard.writeText(url.toString());
+      setShareNotice(`ppt:${run.runId}`);
+      window.setTimeout(() => setShareNotice((current) => current === `ppt:${run.runId}` ? null : current), 2_000);
+    } catch { setShareNotice(null); }
+    closeSessionMenu();
+  };
+  const hidePptFromMenu = (runId: string) => {
+    setHiddenPptIds((current) => new Set(current).add(runId));
+    closeSessionMenu();
   };
   return (
     <>
@@ -281,37 +334,89 @@ export default function SessionSidebar({
         </div>
 
         <nav className="min-h-0 flex-1 overflow-y-auto p-2">
-          <section aria-labelledby="ppt-history-heading" className="mb-3 border-b border-slate-100 pb-3">
+          <section ref={pptMenuRef} aria-labelledby="ppt-history-heading" className="mb-3 border-b border-slate-100 pb-3">
             <div className="flex items-center justify-between px-3 py-2">
               <h3 id="ppt-history-heading" className="text-xs font-semibold text-slate-700">PPT 历史记录</h3>
-              <span className="text-[10px] text-slate-400">{pptHistoryLoading ? '加载中…' : `${pptHistory.length} 条`}</span>
+              <span className="text-[10px] text-slate-400">{pptHistoryLoading ? '加载中…' : `${visiblePptHistory.length} 条`}</span>
             </div>
             {pptHistoryLoading ? (
               <div role="status" aria-label="正在加载 PPT 历史记录" className="space-y-2 px-3 py-2">
                 <div className="h-10 animate-pulse rounded-lg bg-slate-100" />
                 <div className="h-10 animate-pulse rounded-lg bg-slate-100" />
               </div>
-            ) : pptHistory.length === 0 ? (
+            ) : visiblePptHistory.length === 0 ? (
               <p className="px-3 py-3 text-xs text-slate-400">暂无 PPT 历史记录</p>
             ) : (
               <ul className="space-y-1" aria-label="PPT 历史会话列表">
-                {pptHistory.map((run) => (
-                  <li key={run.runId}>
-                    <button
-                      type="button"
-                      onClick={() => onSelectPptHistory(run)}
-                      aria-label={`打开 PPT 会话：${run.title}`}
-                      title={`presentationId: ${run.presentationId}\nrunId: ${run.runId}`}
-                      className="w-full rounded-lg px-3 py-2 text-left hover:bg-violet-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
-                    >
-                      <span className="block truncate text-xs font-medium text-slate-800">{run.title}</span>
-                      <span className="mt-0.5 flex items-center justify-between gap-2 text-[10px] text-slate-400">
-                        <span className="truncate">{pptStatusLabel(run.status)} · {formatPptHistoryDate(run.updatedAt)}</span>
-                        <span className="shrink-0 font-mono">…{run.runId.slice(-6)}</span>
-                      </span>
-                    </button>
+                {orderedPptHistory.map((run) => {
+                  const title = pptTitleOverrides[run.runId] ?? run.title;
+                  const menuId = `ppt:${run.runId}`;
+                  const menuOpen = openPptMenuId === run.runId;
+                  const pinned = pptPinnedIds.has(run.runId);
+                  const project = sessionProjects[menuId];
+                  return (
+                  <li key={run.runId} className="relative">
+                    <div className="group flex items-center rounded-lg hover:bg-violet-50">
+                      <button
+                        type="button"
+                        onClick={() => onSelectPptHistory(run)}
+                        aria-label={`打开 PPT 会话：${title}`}
+                        title={`presentationId: ${run.presentationId}\nrunId: ${run.runId}`}
+                        className="min-w-0 flex-1 px-3 py-2 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+                      >
+                        <span className="block truncate text-xs font-medium text-slate-800">{title}</span>
+                        <span className="mt-0.5 flex items-center justify-between gap-2 text-[10px] text-slate-400">
+                          <span className="truncate">{pptStatusLabel(run.status)} · {formatPptHistoryDate(run.updatedAt)}{project ? ` · ${project}` : ''}</span>
+                          <span className="shrink-0 font-mono">…{run.runId.slice(-6)}</span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={`打开 PPT 会话菜单：${title}`}
+                        aria-haspopup="menu"
+                        aria-expanded={menuOpen}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setOpenPptMenuId(menuOpen ? null : run.runId);
+                          setOpenSessionMenuId(null);
+                          setProjectMenuSessionId(null);
+                        }}
+                        className={`mr-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 transition hover:bg-white hover:text-slate-800 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${menuOpen ? 'bg-white opacity-100 text-slate-800' : 'opacity-0 group-hover:opacity-100'}`}
+                      >
+                        <MoreHorizontal size={17} />
+                      </button>
+                    </div>
+                    {menuOpen && (
+                      <div role="menu" aria-label={`${title} 操作`} className="absolute right-2 top-11 z-30 w-56 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-[0_16px_40px_rgba(15,23,42,0.16)]">
+                        <button type="button" role="menuitem" onClick={() => togglePptPinned(run.runId)} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100">
+                          <Pin size={16} className={pinned ? 'fill-violet-600 text-violet-600' : 'text-slate-500'} />{pinned ? '取消置顶' : '置顶'}
+                        </button>
+                        <button type="button" role="menuitem" onClick={() => void sharePptFromMenu(run)} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100">
+                          {shareNotice === menuId ? <Check size={16} className="text-emerald-600" /> : <Share2 size={16} className="text-slate-500" />}{shareNotice === menuId ? '链接已复制' : '分享'}
+                        </button>
+                        <button type="button" role="menuitem" onClick={() => renamePptFromMenu(run)} className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100">
+                          <Pencil size={16} className="text-slate-500" />重命名
+                        </button>
+                        <button type="button" role="menuitem" aria-expanded={projectMenuSessionId === menuId} onClick={() => setProjectMenuSessionId((current) => current === menuId ? null : menuId)} className="flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100">
+                          <span className="flex items-center gap-3"><FolderInput size={16} className="text-slate-500" />移动到项目</span><ChevronRight size={15} className="text-slate-400" />
+                        </button>
+                        {projectMenuSessionId === menuId && (
+                          <div className="mt-1 border-t border-slate-100 pt-1" role="menu" aria-label="选择项目">
+                            <button type="button" role="menuitem" onClick={() => moveToProject(menuId, '未分类')} className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs text-slate-600 hover:bg-slate-100">未分类{!project && <Check size={14} className="text-violet-600" />}</button>
+                            {projectNames.map((name) => (
+                              <button key={name} type="button" role="menuitem" onClick={() => moveToProject(menuId, name)} className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-xs text-slate-600 hover:bg-slate-100">{name}{project === name && <Check size={14} className="text-violet-600" />}</button>
+                            ))}
+                            <button type="button" role="menuitem" onClick={() => createProjectFromMenu(menuId)} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-xs text-violet-600 hover:bg-violet-50"><Pencil size={13} />新建项目</button>
+                          </div>
+                        )}
+                        <button type="button" role="menuitem" onClick={() => hidePptFromMenu(run.runId)} className="mt-1 flex w-full items-center gap-3 border-t border-slate-100 px-3 py-2 text-sm text-rose-600 hover:bg-rose-50">
+                          <Trash2 size={16} />删除
+                        </button>
+                      </div>
+                    )}
                   </li>
-                ))}
+                  );
+                })}
               </ul>
             )}
           </section>
