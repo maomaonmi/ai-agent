@@ -454,7 +454,12 @@ function runDetailsFromState(state: Record<string, unknown>): Record<string, str
   const outline = state.outline && typeof state.outline === "object" ? state.outline as Record<string, unknown> : null;
   if (outline) details.outline = `${typeof outline.slideCount === "number" ? outline.slideCount : 0} 页大纲 · 已持久化`;
   const build = state.build && typeof state.build === "object" ? state.build as Record<string, unknown> : null;
-  if (build) details.build = `${typeof build.slideCount === "number" ? build.slideCount : 0} 页 · 逐页完成`;
+  if (build) {
+    const slideCount = typeof build.slideCount === "number" ? build.slideCount : 0;
+    const completedSlides = typeof build.completedSlides === "number" ? build.completedSlides : slideCount;
+    const provider = typeof build.writerProvider === "string" && build.writerProvider !== "demo" ? ` · ${build.writerProvider} 写作` : "";
+    details.build = build.status === "completed" ? `${slideCount} 页 · 逐页完成${provider}` : `${completedSlides} / ${slideCount} 页 · 正在分段写作${provider}`;
+  }
   const quality = state.qualityReport && typeof state.qualityReport === "object" ? state.qualityReport as Record<string, unknown> : null;
   if (quality) details.review = quality.status === "passed" ? "检查通过 · 可导出" : "存在待处理项 · 可继续检查";
   return details;
@@ -934,7 +939,11 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           const progressMeta = candidateCount !== null && downloadedCount !== null
             ? `${candidateCount} 张候选 · ${selectionRoundCount !== null ? `${selectionRoundCount} 轮 · ` : ""}本轮 ${roundSelectedCount ?? 0} 张 · 已下载 ${downloadedCount}${selectedCount !== null ? ` · 共采用 ${selectedCount}` : ""}`
             : generatedCount !== null && requiredCount !== null ? `${generatedCount} / ${requiredCount} 张` : "执行中";
-          const phaseProgressMeta = completedSlides !== null && slideCount !== null ? `${completedSlides} / ${slideCount} 页 · 逐页搭建` : progressMeta;
+          const writingTitle = typeof event.data.title === "string" && event.data.title.trim() ? event.data.title.trim() : null;
+          const writerProvider = typeof event.data.writerProvider === "string" && event.data.writerProvider !== "demo" ? event.data.writerProvider : null;
+          const phaseProgressMeta = completedSlides !== null && slideCount !== null
+            ? `${completedSlides} / ${slideCount} 页 · ${writingTitle ? `已写入「${writingTitle}」` : "逐页搭建"}${writerProvider ? ` · ${writerProvider}` : ""}`
+            : progressMeta;
           setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: phaseProgressMeta }));
           if (phase === "WEB_ASSETS" || phase === "AI_ASSETS") {
             const assets = Array.isArray(event.data.assets) ? event.data.assets : [];
