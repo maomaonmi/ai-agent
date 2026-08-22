@@ -82,12 +82,14 @@ function OrbitTemplateCard({
 }) {
   const active = distance === 0;
   const magnitude = Math.abs(distance);
-  const translateX = distance * (active ? 0 : 245 + Math.min(magnitude, 3) * 28);
-  const translateY = magnitude * 18;
-  const translateZ = -magnitude * 105;
-  const rotateY = distance * -21;
-  const rotateZ = distance * -2.5;
-  const scale = active ? 1 : Math.max(0.54, 1 - magnitude * 0.11);
+  const orbitAngle = distance * 31;
+  const orbitRadians = (orbitAngle * Math.PI) / 180;
+  const translateX = Math.sin(orbitRadians) * 620;
+  const translateY = -magnitude * 52;
+  const translateZ = (Math.cos(orbitRadians) - 1) * 460;
+  const rotateY = -orbitAngle;
+  const rotateZ = distance * -2.8;
+  const scale = active ? 1 : Math.max(0.58, 1 - magnitude * 0.085);
   const opacity = magnitude > 4 ? 0 : Math.max(0.16, 1 - magnitude * 0.21);
 
   return (
@@ -338,6 +340,7 @@ export default function PptTemplateMarket() {
               onPointerCancel={() => { dragStartX.current = null; }}
               onWheel={handleOrbitWheel}
             >
+              <div className="pointer-events-none absolute left-1/2 top-[49%] z-0 h-[260px] w-[min(86vw,1240px)] rounded-[50%] border border-slate-300/25 bg-white/20 shadow-[0_0_90px_rgba(148,163,184,0.16)]" style={{ transform: "translate(-50%, -50%) rotateX(64deg)" }} aria-hidden="true" />
               <div className="pointer-events-none absolute inset-x-[8%] bottom-[-40%] h-[70%] rounded-[50%] bg-slate-400/25 blur-3xl" aria-hidden="true" />
               <div className="pointer-events-none absolute inset-x-[7%] bottom-0 h-28 bg-gradient-to-t from-[#fbfcfe] via-[#fbfcfe]/70 to-transparent" aria-hidden="true" />
               {visibleTemplates.map((template, index) => {
