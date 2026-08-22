@@ -29,7 +29,7 @@ from video_engine import (
     _map_provider_status,
 )
 
-from .constants import VIDEO_API_BASE, VIDEO_MODEL_ID
+from .constants import VIDEO_API_BASE, VIDEO_MODEL_ID, VIDEO_MODEL_ID_HAILUO
 
 _DEFAULT_BASE_URL = VIDEO_API_BASE
 
@@ -91,12 +91,18 @@ class MiniMaxVideoProvider:
         return content
 
     async def submit(self, request: VideoGenerationRequest) -> ProviderSubmission:
+        # Why: H3 与 Hailuo2.3 共用同一 API 端点，model 字段由前端传入；
+        # request.model 为空时默认 H3（全功能模型）。
+        model_id = request.model or VIDEO_MODEL_ID
         payload: dict[str, Any] = {
-            "model": request.model or VIDEO_MODEL_ID,
+            "model": model_id,
             "content": self._build_content(request),
             "duration": request.duration,
             "resolution": request.resolution,
         }
+        # Why: Hailuo2.3 仅支持文生视频，不支持首尾帧/参考素材，
+        # 如果前端误传了这些参数，H3 的 content 构建会包含它们但 Hailuo 会拒收。
+        # 此处不额外过滤——前端 capability 已限制 Hailuo 仅 text_to_video 模式。
         # Why ratio 规则：官方要求 i2v（含首尾帧）恒 adaptive；t2v/r2v 必须显式非 adaptive，
         # 前端 "auto" 语义在此收敛为 16:9 默认档，保证请求永不携带非法 ratio。
         if request.mode in {"image_to_video", "start_end_video"}:
@@ -124,17 +130,24 @@ class MiniMaxVideoProvider:
         body = _json_or_none(response)
         if response.is_error:
             raise _error_from_response(response, body)
-        status_raw = str((body or {}).get("status") or "UNKNOWN")
-        # Why: MiniMax 任务失败 = HTTP 200 + status="failed" + base_resp 带业务错误，
-        # 必须落 FAILED 快照让轮询层终态收尾；只有 status 缺失且 base_resp 报错
-        # （如 key 无效导致查询本身失败）才抛异常。
+        # Why: MiniMax 查询响应 status 在 body.task.status 内（非顶层），需兼容两种格式。
+        task_obj = (body or {}).get("task") if isinstance(body, dict) else None
+        status_raw = str(
+            (task_obj or {}).get("status")
+            or (body or {}).get("status")
+            or "UNKNOWN"
+        )
         if status_raw.upper() == "UNKNOWN":
+            import logging
+            logging.getLogger(__name__).warning("[minimax][diag] retrieve unknown: task_id=%s http=%s body=%s", provider_task_id, response.status_code, body)
             business_error = _base_resp_error(body, stage="任务查询")
             if business_error:
                 raise business_error
-        content = (body or {}).get("content") if isinstance(body, dict) else None
+        # Why: MiniMax 查询响应 content 在 body.task.content 内（非顶层），需兼容两种格式。
+        task_obj = (body or {}).get("task") if isinstance(body, dict) else None
+        content = (task_obj or {}).get("content") if isinstance(task_obj, dict) else (body or {}).get("content") if isinstance(body, dict) else None
         video_url = (content or {}).get("url") if isinstance(content, dict) else None
-        base_resp = (body or {}).get("base_resp") if isinstance(body, dict) else None
+        base_resp = (task_obj or {}).get("base_resp") if isinstance(task_obj, dict) else (body or {}).get("base_resp") if isinstance(body, dict) else None
         failed = _map_provider_status(status_raw) == VideoTaskStatus.FAILED
         return ProviderTaskSnapshot(
             provider_task_id=provider_task_id,

@@ -98,6 +98,27 @@ class VideoTaskMonitor:
                         error_code=code,
                         error_message=str(exc),
                     ) or {}
+            # Why: multi_image_to_video 支持直接传 URL 或 asset_id；
+            # 有 asset_id 的走 OSS 解析，已有 url 的直接保留。
+            elif request.mode == "multi_image_to_video" and self.reference_assets:
+                try:
+                    resolved_refs = []
+                    for reference in request.references:
+                        if reference.asset_id and not reference.url:
+                            resolved_refs.append(
+                                reference.model_copy(update={"url": self.reference_assets.get_reference_url(reference.asset_id)})  # type: ignore[attr-defined]
+                            )
+                        else:
+                            resolved_refs.append(reference)
+                    provider_request = request.model_copy(update={"references": resolved_refs})
+                except Exception as exc:
+                    code = getattr(exc, "code", "ASSET_NOT_READY")
+                    return self.repository.update_task(
+                        task_id,
+                        status=VideoTaskStatus.FAILED,
+                        error_code=code,
+                        error_message=str(exc),
+                    ) or {}
             try:
                 submission = await provider.submit(provider_request)
             except VideoProviderError as exc:

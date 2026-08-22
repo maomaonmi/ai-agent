@@ -113,6 +113,16 @@ def create_video_router(
             except ReferenceAssetError as exc:
                 code_status = 404 if exc.code == "REFERENCE_ASSET_NOT_FOUND" else 409 if exc.code in {"ASSET_NOT_READY", "REFERENCE_ASSET_EXPIRED"} else 503
                 return _error_response(exc.code, str(exc), status_code=code_status)
+        # Why: multi_image_to_video 允许直接传公网 URL，无需 OSS 资产检查；
+        # 仅对 asset_id 形式的 reference 做就绪校验。
+        if request.mode == "multi_image_to_video" and reference_assets:
+            asset_ids = [ref.asset_id for ref in request.references if ref.asset_id]
+            if asset_ids:
+                try:
+                    reference_assets.assert_ready(asset_ids)
+                except ReferenceAssetError as exc:
+                    code_status = 404 if exc.code == "REFERENCE_ASSET_NOT_FOUND" else 409 if exc.code in {"ASSET_NOT_READY", "REFERENCE_ASSET_EXPIRED"} else 503
+                    return _error_response(exc.code, str(exc), status_code=code_status)
         existing = repository.get_by_client_request_id(request.client_request_id)
         if existing:
             return _task_payload(existing)

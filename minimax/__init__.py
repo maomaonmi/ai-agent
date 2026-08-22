@@ -16,6 +16,7 @@ from .constants import (
     MODEL_M3,
     IMAGE_MODEL_ID,
     VIDEO_MODEL_ID,
+    VIDEO_MODEL_ID_HAILUO,
     WEB_SEARCH_TOOL,
 )
 from .client import MiniMaxClient, MiniMaxAPIError

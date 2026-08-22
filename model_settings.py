@@ -159,6 +159,9 @@ class ModelSettings(BaseModel):
     base_url: str = "https://api.deepseek.com"
     model_id: str = "deepseek-v4-flash"
     api_key: str = ""
+    # Why: MiniMax 专项生成（图像/视频）走独立端点，部分套餐（如 Max）需要单独的套餐 Key，
+    # 与普通文本 API Key 不同。留空时回退到 api_key。
+    minimax_video_api_key: str = ""
     display_name: str = "DeepSeek V4 Flash"
     model_family: str = "default"
     input_context: int = Field(default=1_000_000, ge=1, le=10_000_000)
@@ -291,8 +294,9 @@ class ModelSettingsStore:
 
     def public(self, provider: str | None = None) -> dict:
         settings = self.load(provider)
-        data = settings.model_dump(exclude={"api_key"})
+        data = settings.model_dump(exclude={"api_key", "minimax_video_api_key"})
         data["has_api_key"] = bool(settings.api_key)
+        data["has_minimax_video_key"] = bool(settings.minimax_video_api_key)
         return data
 
 

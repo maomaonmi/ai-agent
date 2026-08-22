@@ -19,7 +19,9 @@ MODEL_M2_5_HIGHSPEED = "MiniMax-M2.5-highspeed"
 
 # ---- 专项模型 ID ----
 IMAGE_MODEL_ID = "image-01"
-VIDEO_MODEL_ID = "MiniMax-H3"
+VIDEO_MODEL_ID = "Hailuo2.3"
+VIDEO_MODEL_ID_HAILUO = "Hailuo2.3"
+VIDEO_MODEL_ID_H3 = "MiniMax-H3"
 
 # ---- 服务端工具（仅 Anthropic Messages API，Beta）----
 # Why: web_search_20250305 是版本化类型标识（沿用 Anthropic 命名约定），声明时以此为准。

@@ -217,7 +217,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
         "id": "wan2.7-r2v", "name": "Wan 2.7 R2V", "provider": "qianwen",
         "description": "参考视频驱动的主体、动作与风格生成",
-        "modes": ["reference_to_video"], "future_modes": [],
+        "modes": ["reference_to_video", "multi_image_to_video"], "future_modes": [],
         "ratios": ["auto", "16:9", "9:16", "1:1", "4:3", "3:4"],
         "resolutions": ["720P", "1080P"], "duration_min": 2, "duration_max": 15,
         "durations": [], "supports_audio": True, "supports_audio_input": False, "enabled": True,
@@ -227,7 +227,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
         "id": "wan2.7-r2v-2026-06-12", "name": "Wan 2.7 R2V 快照", "provider": "qianwen",
         "description": "固定版本的参考视频生成",
-        "modes": ["reference_to_video"], "future_modes": [],
+        "modes": ["reference_to_video", "multi_image_to_video"], "future_modes": [],
         "ratios": ["auto", "16:9", "9:16", "1:1", "4:3", "3:4"],
         "resolutions": ["720P", "1080P"], "duration_min": 2, "duration_max": 15,
         "durations": [], "supports_audio": True, "supports_audio_input": False, "enabled": True,
@@ -237,7 +237,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
         "id": "wan2.6-r2v-flash", "name": "Wan 2.6 R2V Flash", "provider": "qianwen",
         "description": "快速参考视频生成，支持静音输出",
-        "modes": ["reference_to_video"], "future_modes": [],
+        "modes": ["reference_to_video", "multi_image_to_video"], "future_modes": [],
         "ratios": ["16:9", "9:16", "1:1", "4:3", "3:4"],
         "resolutions": ["720P", "1080P"], "duration_min": 2, "duration_max": 10,
         "durations": [], "supports_audio": True, "supports_audio_input": False, "enabled": True,
@@ -247,7 +247,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
         "id": "wan2.6-r2v", "name": "Wan 2.6 R2V", "provider": "qianwen",
         "description": "高质量参考视频生成",
-        "modes": ["reference_to_video"], "future_modes": [],
+        "modes": ["reference_to_video", "multi_image_to_video"], "future_modes": [],
         "ratios": ["16:9", "9:16", "1:1", "4:3", "3:4"],
         "resolutions": ["720P", "1080P"], "duration_min": 2, "duration_max": 10,
         "durations": [], "supports_audio": True, "supports_audio_input": False, "enabled": True,
@@ -257,7 +257,7 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
     {
         "id": "vidu2-reference", "name": "Vidu 2 Reference", "provider": "zhipu",
         "description": "多参考图一致性生视频",
-        "modes": ["reference_to_video"], "future_modes": [],
+        "modes": ["reference_to_video", "multi_image_to_video"], "future_modes": [],
         "ratios": ["16:9", "9:16", "1:1"], "resolutions": ["720P"],
         "duration_min": 4, "duration_max": 4, "durations": [4],
         "supports_audio": True, "supports_audio_input": False, "enabled": True,
@@ -269,13 +269,26 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         # ratio "auto" 仅对 i2v 类模式合法（官方恒 adaptive），t2v/r2v 在 Provider 内收敛为 16:9。
         "id": "MiniMax-H3", "name": "MiniMax H3", "provider": "minimax",
         "description": "全能视频生成：文生视频、首尾帧与图视频混合参考",
-        "modes": ["text_to_video", "image_to_video", "start_end_video", "reference_to_video"],
+        "modes": ["text_to_video", "image_to_video", "start_end_video", "reference_to_video", "multi_image_to_video"],
         "future_modes": [],
         "ratios": ["16:9", "9:16", "1:1", "4:3", "3:4", "auto"],
         "resolutions": ["768P", "2K"],
         "duration_min": 4, "duration_max": 15, "durations": [],
         "supports_audio": True, "supports_audio_input": False, "enabled": True,
         "max_reference_videos": 3, "max_references": 12,
+        "docs_url": "https://platform.minimaxi.com/document/Video%20Generation",
+    },
+    {
+        # Why: Hailuo2.3 是 Max 套餐包含的视频模型，仅支持文生视频。
+        "id": "Hailuo2.3", "name": "Hailuo 2.3", "provider": "minimax",
+        "description": "文生视频（Max 套餐，3 条/日）",
+        "modes": ["text_to_video"],
+        "future_modes": [],
+        "ratios": ["16:9", "9:16", "1:1", "4:3", "3:4", "auto"],
+        "resolutions": ["768P"],
+        "duration_min": 4, "duration_max": 15, "durations": [],
+        "supports_audio": True, "supports_audio_input": False, "enabled": True,
+        "max_reference_videos": 0, "max_references": 0,
         "docs_url": "https://platform.minimaxi.com/document/Video%20Generation",
     },
 )
@@ -297,18 +310,26 @@ def video_capability(model_id: str) -> dict[str, Any]:
 class VideoReference(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    asset_id: str = Field(min_length=1, max_length=128, alias="assetId")
+    asset_id: str | None = Field(default=None, min_length=1, max_length=128, alias="assetId")
+    url: str | None = Field(default=None, max_length=14_000_000)
     media_kind: Literal["reference_video", "reference_image", "first_frame"] = Field(alias="mediaKind")
     purpose: Literal["subject", "style", "motion", "scene"] = "motion"
-    # Internal-only field populated by the task monitor immediately before
-    # submission. It is excluded from model dumps and never persisted.
-    url: str | None = Field(default=None, exclude=True, repr=False)
+
+    @model_validator(mode="after")
+    def validate_reference_source(self) -> "VideoReference":
+        # Why: 多参考图模式允许直接传公网 URL（不经过 OSS 上传），
+        # 但 reference_video 必须走 OSS 上传流程（需要转码/探测）。
+        if self.media_kind == "reference_video" and not self.asset_id:
+            raise ValueError("参考视频必须通过上传流程获取 asset_id")
+        if not self.asset_id and not self.url:
+            raise ValueError("reference 必须提供 asset_id 或 url")
+        return self
 
 
 class VideoGenerationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: Literal["text_to_video", "image_to_video", "start_end_video", "reference_to_video"] = "text_to_video"
+    mode: Literal["text_to_video", "image_to_video", "start_end_video", "reference_to_video", "multi_image_to_video"] = "text_to_video"
     prompt: str = Field(default="", max_length=7000)
     model: str
     ratio: str = "16:9"
@@ -370,16 +391,16 @@ class VideoGenerationRequest(BaseModel):
         capability = video_capability(self.model)
         if self.mode not in capability["modes"]:
             raise ValueError(f"{self.model} 不支持模式 {self.mode}")
-        if self.mode in {"text_to_video", "reference_to_video"} and not self.prompt:
+        if self.mode in {"text_to_video", "reference_to_video", "multi_image_to_video"} and not self.prompt:
             raise ValueError("prompt 不能为空")
         if self.mode in {"image_to_video", "start_end_video"} and not self.first_frame_url:
             raise ValueError("图生视频必须提供首帧 URL")
         if self.mode == "start_end_video" and not self.last_frame_url:
             raise ValueError("首尾帧视频必须提供尾帧 URL")
-        if self.mode == "reference_to_video" and not self.references:
-            raise ValueError("参考视频生成至少需要一个参考素材")
-        if self.mode != "reference_to_video" and self.references:
-            raise ValueError("references 仅用于参考视频生成")
+        if self.mode in {"reference_to_video", "multi_image_to_video"} and not self.references:
+            raise ValueError("至少需要一个参考素材")
+        if self.mode not in {"reference_to_video", "multi_image_to_video"} and self.references:
+            raise ValueError("references 仅用于参考生成模式")
         if self.last_frame_url and self.mode != "start_end_video":
             raise ValueError("尾帧 URL 仅用于首尾帧模式")
         if self.model == "wan2.7-i2v" and not self.prompt:
@@ -400,7 +421,7 @@ class VideoGenerationRequest(BaseModel):
             raise ValueError(f"{self.model} 的 duration 必须在 {capability['duration_min']}–{capability['duration_max']} 秒之间")
         if capability["durations"] and self.duration not in capability["durations"]:
             raise ValueError(f"{self.model} 的 duration 只能是 {capability['durations']}")
-        if self.mode == "reference_to_video":
+        if self.mode in {"reference_to_video", "multi_image_to_video"}:
             max_references = int(capability.get("max_references", 5))
             max_videos = int(capability.get("max_reference_videos", 3))
             if len(self.references) > max_references:
@@ -408,6 +429,8 @@ class VideoGenerationRequest(BaseModel):
             video_count = sum(item.media_kind == "reference_video" for item in self.references)
             if video_count > max_videos:
                 raise ValueError(f"{self.model} 最多支持 {max_videos} 个参考视频")
+            if self.mode == "multi_image_to_video" and any(item.media_kind != "reference_image" for item in self.references):
+                raise ValueError("多参考图生成仅支持参考图片")
             if self.model.startswith("wan2.6-r2v") and any(item.media_kind != "reference_video" for item in self.references):
                 raise ValueError("Wan 2.6 R2V 当前仅支持参考视频")
             if self.model == "vidu2-reference" and any(item.media_kind != "reference_image" for item in self.references):
@@ -565,7 +588,7 @@ class QwenVideoProvider:
         input_payload: dict[str, Any] = {"prompt": request.prompt}
         if request.negative_prompt:
             input_payload["negative_prompt"] = request.negative_prompt
-        if (request.model.startswith("wan2.7-r2v") or request.model == "wan3.0-video") and request.mode == "reference_to_video":
+        if (request.model.startswith("wan2.7-r2v") or request.model == "wan3.0-video") and request.mode in {"reference_to_video", "multi_image_to_video"}:
             input_payload["media"] = [
                 {"type": reference.media_kind, "url": reference.url}
                 for reference in request.references

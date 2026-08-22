@@ -42,10 +42,11 @@ class MiniMaxImageError(RuntimeError):
 
 def _resolve_api_key() -> str:
     # Why: Key 解析与文本链路同源——settings 持久化优先，环境变量兜底，禁止明文回传。
-    from model_settings import model_settings_store
+    # 专项生成（图像/视频）优先用 minimax_video_api_key，留空时回退到普通 api_key。
+    from model_settings import ModelSettingsStore
 
-    settings = model_settings_store.load("minimax")
-    api_key = (settings.api_key or "").strip() or os.getenv("MINIMAX_API_KEY", "")
+    settings = ModelSettingsStore().load("minimax")
+    api_key = (settings.minimax_video_api_key or settings.api_key or "").strip() or os.getenv("MINIMAX_API_KEY", "")
     if not api_key:
         raise MiniMaxImageError("MiniMax API Key 尚未配置", status_code=503)
     return api_key

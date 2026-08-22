@@ -427,11 +427,14 @@ def _build_video_providers() -> dict[str, Any]:
             base_url=os.getenv("ZHIPU_VIDEO_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
         )
     minimax_settings = model_settings_store.load("minimax")
-    if minimax_settings.api_key:
+    # Why: 专项生成（图像/视频）优先用 minimax_video_api_key，留空时回退到普通 api_key。
+    # 部分套餐（如 Max）的套餐 Key 与普通 API Key 不同，需要单独配置。
+    minimax_video_key = (minimax_settings.minimax_video_api_key or minimax_settings.api_key or "").strip()
+    if minimax_video_key:
         from minimax.video import MiniMaxVideoProvider
 
         providers["minimax"] = MiniMaxVideoProvider(
-            minimax_settings.api_key,
+            minimax_video_key,
             base_url=os.getenv("MINIMAX_VIDEO_BASE_URL", "https://api.minimaxi.com/v2"),
         )
     return providers
@@ -2715,11 +2718,28 @@ def _rerank_or_keep(candidates: list[dict], user_query: str) -> list[dict]:
         return result
 
 
+# Plan 搜索专用 system prompt：与 chat 模式对齐，给模型完整的角色/行为约束。
+# Why: M2.7 在没有 system prompt 时更容易跳过工具调用直接回答；
+#   完整的 system prompt 让模型在"对话"语境下更稳定地遵循 tool 调用纪律。
+_PLAN_SEARCH_SYSTEM = (
+    "你是一个联网搜索助手。用户会提出一个问题，你必须先调用 web_search 工具搜索相关信息，"
+    "然后基于搜索结果给出简要回答。\n\n"
+    "## 行为约束\n"
+    "1. **第一步必须调用 web_search 工具**——禁止在未调用工具的情况下直接回答。\n"
+    "2. 搜索完成后，用 2-3 句话简要总结搜索结果，不需要写长文。\n"
+    "3. 如果搜索结果不足，如实说明信息缺口。"
+)
+
+
 def _run_minimax_plan_search(query: str) -> tuple[list[dict], str | None]:
-    """MiniMax 原生服务端搜索（Anthropic Messages 协议）→ plan 模式候选列表。
+    """MiniMax 原生服务端搜索（Anthropic Messages 协议 + SSE 流式）→ plan 模式候选列表。
 
     Why 独立函数：plan 链路走 OpenAI 兼容端点（不支持 server tools），
     需要单独调 Anthropic 端点做搜索，提取 web_search_tool_result 结果。
+
+    Why 用 stream_message 而非 create_message：
+    - SSE 流式解析（_iter_sse_events）对 M2.7/M3 都稳定，能正确提取 web_search_tool_result；
+    - 非流式 create_message 在 M2.7 降级后可能返回 thinking+text 块（无工具块），解析出 0 条。
     """
     from minimax.client import MiniMaxClient, MiniMaxAPIError
     from minimax.constants import WEB_SEARCH_TOOL, ANTHROPIC_BASE_URL, DEFAULT_TIMEOUT
@@ -2731,31 +2751,30 @@ def _run_minimax_plan_search(query: str) -> tuple[list[dict], str | None]:
 
     print(f"[plan-search] 开始搜索 query={query!r} model={settings.model_id}")
     client = MiniMaxClient(api_key=settings.api_key, base_url=ANTHROPIC_BASE_URL, timeout=DEFAULT_TIMEOUT)
-    try:
-        response = client.create_message(
+
+    def _do_stream(*, with_tool_choice: bool) -> Iterator[dict]:
+        """执行流式搜索，产出 SSE 事件。"""
+        return client.stream_message(
             model=settings.model_id,
             messages=[{"role": "user", "content": query}],
             max_tokens=4096,
+            system=_PLAN_SEARCH_SYSTEM,
             tools=[WEB_SEARCH_TOOL],
-            tool_choice="any",
+            tool_choice="any" if with_tool_choice else None,
         )
+
+    # 先尝试带 tool_choice 的流式调用
+    stream_iter = _do_stream(with_tool_choice=True)
+    try:
+        first_evt = next(stream_iter)
     except MiniMaxAPIError as exc:
         if exc.status_code in (400, 422):
-            # Why: MiniMax 兼容层拒收 tool_choice，降级用 prompt 软约束强制调工具。
-            #   不保证 100% 稳定，但比直接返回 0 结果好。
-            print(f"[plan-search] tool_choice 被拒(status={exc.status_code})，降级用 prompt 软约束重试")
-            forced_query = (
-                "第一步必须调用 web_search 工具搜索以下问题，禁止直接回答。\n"
-                "搜索完成后，基于搜索结果给出简要回答。\n\n"
-                f"问题：{query}"
-            )
+            # Why: MiniMax 兼容层拒收 tool_choice，降级用纯 prompt 约束重试。
+            #   SSE 流式 + 完整 system prompt 比非流式 + 短 prompt 更稳定。
+            print(f"[plan-search] tool_choice 被拒(status={exc.status_code})，降级无 tool_choice 重试")
+            stream_iter = _do_stream(with_tool_choice=False)
             try:
-                response = client.create_message(
-                    model=settings.model_id,
-                    messages=[{"role": "user", "content": forced_query}],
-                    max_tokens=4096,
-                    tools=[WEB_SEARCH_TOOL],
-                )
+                first_evt = next(stream_iter)
             except MiniMaxAPIError as exc2:
                 print(f"[plan-search] 降级重试仍失败：{exc2}")
                 return [], f"MiniMax 搜索失败：{exc2.message}"
@@ -2763,17 +2782,24 @@ def _run_minimax_plan_search(query: str) -> tuple[list[dict], str | None]:
             print(f"[plan-search] MiniMax 搜索失败(status={exc.status_code})：{exc}")
             return [], f"MiniMax 搜索失败：{exc.message}"
 
-    # 从 content 块列表中提取 web_search_tool_result
+    # 用 itertools.chain 把预取的第一个事件放回迭代器头部
+    import itertools
+    stream_iter = itertools.chain([first_evt], stream_iter)
+
+    # 从 SSE 事件流中提取 web_search_tool_result
+    # Why: M3 返回 server_tool_use（服务端自动执行→web_search_tool_result）；
+    #   M2.7 返回 tool_use name=plugin_web_search（客户端工具，需手动执行搜索 API）。
     candidates: list[dict] = []
-    content_blocks = response.get("content") or []
-    print(f"[plan-search] 收到 {len(content_blocks)} 个 content blocks")
-    for i, block in enumerate(content_blocks):
-        if not isinstance(block, dict):
-            continue
-        btype = block.get("type")
-        if btype == "web_search_tool_result":
+    block_idx = 0
+    tool_use_inputs: list[dict] = []  # 收集 M2.7 的客户端工具调用参数
+
+    for evt in stream_iter:
+        evt_type = evt.get("type")
+        if evt_type == "web_search_tool_result":
+            # M3 路径：服务端自动执行后返回结果
+            block = evt.get("block") or {}
             items = block.get("content") or []
-            print(f"[plan-search] block[{i}] web_search_tool_result 含 {len(items)} 条原始结果")
+            print(f"[plan-search] block[{block_idx}] web_search_tool_result 含 {len(items)} 条原始结果")
             for item in items:
                 if not isinstance(item, dict) or item.get("type") != "web_search_result":
                     continue
@@ -2788,8 +2814,117 @@ def _run_minimax_plan_search(query: str) -> tuple[list[dict], str | None]:
                     "content": content,
                     "url": url,
                 })
+            block_idx += 1
+        elif evt_type == "server_tool_use":
+            # M3 路径：服务端工具调用（结果在后续 web_search_tool_result 中）
+            block = evt.get("block") or {}
+            print(f"[plan-search] block[{block_idx}] server_tool_use name={block.get('name')}")
+            block_idx += 1
+        elif evt_type == "tool_use":
+            # M2.7 路径：客户端工具调用，需收集 input 后手动执行搜索
+            block = evt.get("block") or {}
+            tool_name = block.get("name", "")
+            tool_input = block.get("input") or {}
+            print(f"[plan-search] block[{block_idx}] tool_use name={tool_name} input_keys={list(tool_input.keys()) if isinstance(tool_input, dict) else type(tool_input).__name__}")
+            if "search" in tool_name.lower() or "web" in tool_name.lower():
+                tool_use_inputs.append(tool_input)
+            block_idx += 1
+        elif evt_type in ("thinking_delta", "text_delta"):
+            pass  # 搜索任务不需要模型回答正文，跳过
+        elif evt_type in ("message_start", "message_delta", "message_stop", "signature_delta"):
+            pass  # 元事件，跳过
         else:
-            print(f"[plan-search] block[{i}] type={btype}")
+            print(f"[plan-search] block[{block_idx}] type={evt_type}")
+            block_idx += 1
+
+    # M2.7 路径：手动执行客户端工具调用
+    if tool_use_inputs and not candidates:
+        print(f"[plan-search] M2.7 返回 {len(tool_use_inputs)} 个客户端工具调用，手动执行搜索")
+        for ti, tool_input in enumerate(tool_use_inputs):
+            # 提取搜索 query（兼容多种 input 格式）
+            search_query = ""
+            if isinstance(tool_input, dict):
+                search_query = (
+                    tool_input.get("query")
+                    or tool_input.get("search_query")
+                    or tool_input.get("q")
+                    or tool_input.get("keyword")
+                    or str(tool_input)
+                )
+            if not search_query or len(search_query) < 2:
+                print(f"[plan-search] 工具输入[{ti}] 无法提取有效 query: {tool_input!r}")
+                continue
+            search_query = str(search_query)[:500]
+            print(f"[plan-search] 手动搜索 query={search_query!r}")
+
+            # 用 MiniMax 搜索 API 执行搜索（复用 _run_minimax_plan_search 的降级逻辑）
+            try:
+                sub_stream = client.stream_message(
+                    model=settings.model_id,
+                    messages=[{"role": "user", "content": f"搜索：{search_query}"}],
+                    max_tokens=2048,
+                    system=_PLAN_SEARCH_SYSTEM,
+                    tools=[WEB_SEARCH_TOOL],
+                    tool_choice="any",
+                )
+                # 预取触发 HTTP 请求
+                first = next(sub_stream)
+                sub_stream = itertools.chain([first], sub_stream)
+
+                for sub_evt in sub_stream:
+                    if sub_evt.get("type") == "web_search_tool_result":
+                        sub_block = sub_evt.get("block") or {}
+                        items = sub_block.get("content") or []
+                        print(f"[plan-search] 手动搜索结果[{ti}] 含 {len(items)} 条")
+                        for item in items:
+                            if not isinstance(item, dict) or item.get("type") != "web_search_result":
+                                continue
+                            url = str(item.get("url") or "")
+                            title = str(item.get("title") or "")[:240]
+                            content = str(item.get("content") or item.get("page_age") or "")[:1200]
+                            if not url:
+                                continue
+                            candidates.append({
+                                "title": title,
+                                "content": content,
+                                "url": url,
+                            })
+            except MiniMaxAPIError as exc:
+                if exc.status_code in (400, 422):
+                    # 降级：无 tool_choice
+                    print(f"[plan-search] 手动搜索 tool_choice 被拒，降级重试")
+                    try:
+                        sub_stream2 = client.stream_message(
+                            model=settings.model_id,
+                            messages=[{"role": "user", "content": f"搜索：{search_query}"}],
+                            max_tokens=2048,
+                            system=_PLAN_SEARCH_SYSTEM,
+                            tools=[WEB_SEARCH_TOOL],
+                        )
+                        first2 = next(sub_stream2)
+                        sub_stream2 = itertools.chain([first2], sub_stream2)
+                        for sub_evt in sub_stream2:
+                            if sub_evt.get("type") == "web_search_tool_result":
+                                sub_block = sub_evt.get("block") or {}
+                                items = sub_block.get("content") or []
+                                for item in items:
+                                    if not isinstance(item, dict) or item.get("type") != "web_search_result":
+                                        continue
+                                    url = str(item.get("url") or "")
+                                    title = str(item.get("title") or "")[:240]
+                                    content = str(item.get("content") or item.get("page_age") or "")[:1200]
+                                    if not url:
+                                        continue
+                                    candidates.append({
+                                        "title": title,
+                                        "content": content,
+                                        "url": url,
+                                    })
+                    except MiniMaxAPIError as exc2:
+                        print(f"[plan-search] 手动搜索降级仍失败：{exc2}")
+                else:
+                    print(f"[plan-search] 手动搜索失败：{exc}")
+
     print(f"[plan-search] 最终返回 {len(candidates)} 条候选")
     return candidates, None
 
@@ -2816,7 +2951,7 @@ def run_plan_web_search(
             query=query,
             cached=True,
             result_count=len(cached.get("candidates") or []),
-            results=(cached.get("candidates") or [])[:8],
+            results=cached.get("candidates") or [],
             error=cached.get("error"),
         )
         return list(cached.get("candidates") or []), cached.get("error")
@@ -2869,16 +3004,33 @@ def run_plan_web_search(
 
 def get_shared_plan_search_results(
     state: PlanExecuteState | Dict[str, Any],
+    current_task: dict | None = None,
 ) -> tuple[list[dict], str | None]:
-    """Fetch one evidence set for the whole plan execution.
+    """交替搜索 + 共享缓存：奇数 task（1,3,5…）发起专属搜索，偶数 task（2,4…）复用缓存。
 
-    Multiple web-enabled tasks consume the same user-goal evidence. This
-    avoids issuing one near-identical Firecrawl request per task while keeping
-    task-specific prompts responsible for narrowing and interpreting results.
+    Why 交替而非每 task 都搜：
+    - 每 task 都搜 → token 浪费 + 结果高度重叠
+    - 只搜一次 → 所有 task 结果相同，缺乏针对性
+    - 交替搜索 → 奇数 task 用自身 title/description 搜（结果多样），偶数 task 免费复用
+
+    搜索 query 优先级：current_task.title + description > 全局 user_task
     """
-    if "shared_search_results" in state:
+    # 判断当前 task 是否需要发起新搜索（奇数 id）
+    task_id = int(current_task.get("id", 0)) if current_task else 0
+    should_search = (task_id % 2 == 1)  # 1,3,5… 搜索；2,4,6… 复用
+
+    # 已有缓存且当前 task 不需要新搜索 → 直接返回
+    if "shared_search_results" in state and not should_search:
         return list(state.get("shared_search_results") or []), state.get("shared_search_error")
-    candidates, search_error = run_plan_web_search(str(state.get("user_task") or ""), state)
+
+    # 构造搜索 query：优先用当前 task 的标题+描述（更精准），兜底用全局 user_task
+    if current_task and should_search:
+        search_query = f"{current_task.get('title', '')}\n{current_task.get('description', '')}".strip()
+    else:
+        search_query = str(state.get("user_task") or "")
+
+    print(f"[Node: Executor] 搜索决策: task_id={task_id} should_search={should_search} query_len={len(search_query)}")
+    candidates, search_error = run_plan_web_search(search_query, state)
     state["shared_search_results"] = candidates
     if search_error:
         state["shared_search_error"] = search_error
@@ -4100,7 +4252,7 @@ def task_start_node(state: PlanExecuteState):
 
 
 def execute_web_search_agent(state: PlanExecuteState, task: Dict[str, Any]) -> str:
-    candidates, search_error = get_shared_plan_search_results(state)
+    candidates, search_error = get_shared_plan_search_results(state, current_task=task)
     task["source_urls"] = [str(item.get("url")) for item in candidates if item.get("url")][:24]
     task["search_results"] = [
         {
@@ -4108,7 +4260,7 @@ def execute_web_search_agent(state: PlanExecuteState, task: Dict[str, Any]) -> s
             "url": str(item.get("url") or ""),
             "content": str(item.get("content") or "")[:420],
         }
-        for item in candidates[:8]
+        for item in candidates
         if item.get("url")
     ]
     evidence_items = [
@@ -4170,7 +4322,7 @@ def execute_custom_plan_agent(
 ) -> str:
     evidence = ""
     if "web_search" in agent_config.get("tools", []):
-        candidates, search_error = get_shared_plan_search_results(state)
+        candidates, search_error = get_shared_plan_search_results(state, current_task=task)
         task["source_urls"] = [str(item.get("url")) for item in candidates if item.get("url")][:24]
         task["search_results"] = [
             {
@@ -4178,7 +4330,7 @@ def execute_custom_plan_agent(
                 "url": str(item.get("url") or ""),
                 "content": str(item.get("content") or "")[:420],
             }
-            for item in candidates[:8]
+            for item in candidates
             if item.get("url")
         ]
         evidence = "\n\n".join(
@@ -4284,7 +4436,7 @@ def _execute_single_plan_task_impl(state: PlanExecuteState):
     if web_search_enabled:
         try:
             print(f"[Node: Executor] 开始调用 get_shared_plan_search_results")
-            candidates, search_error = get_shared_plan_search_results(state)
+            candidates, search_error = get_shared_plan_search_results(state, current_task=current_task)
             print(f"[Node: Executor] 搜索结果: {len(candidates)} 条候选, error={search_error}")
             current_task["source_urls"] = [str(item.get("url")) for item in candidates if item.get("url")][:24]
             current_task["search_results"] = [
@@ -4293,7 +4445,7 @@ def _execute_single_plan_task_impl(state: PlanExecuteState):
                     "url": str(item.get("url") or ""),
                     "content": str(item.get("content") or "")[:420],
                 }
-                for item in candidates[:8]
+                for item in candidates
                 if item.get("url")
             ]
             evidence_items = []
@@ -4392,10 +4544,12 @@ def task_executor_node(state: PlanExecuteState):
     if len(active_ids) <= 1:
         return _execute_single_plan_task(state)
 
-    # Fetch shared evidence once before threads start. Every web task then
-    # consumes the same bounded snippets instead of racing duplicate requests.
-    if any(next((task for task in tasks if int(task["id"]) == task_id), {}).get("requires_web") for task_id in active_ids):
-        get_shared_plan_search_results(state)
+    # Pre-fetch shared evidence for odd-id tasks before threads start.
+    # Even-id tasks will reuse cached results; odd-id tasks trigger per-task searches.
+    for task_id in active_ids:
+        task_obj = next((t for t in tasks if int(t["id"]) == task_id), None)
+        if task_obj and task_obj.get("requires_web"):
+            get_shared_plan_search_results(state, current_task=task_obj)
 
     print(f"[Node: Executor] 并行执行任务批次: {active_ids}")
     merged_tasks = [dict(task) for task in tasks]
@@ -5802,9 +5956,13 @@ async def create_image_generation(request: ImageDirectRequest):
             connection.execute("UPDATE image_generation_batches SET status = ?, error_message = ? WHERE id = ?", ("failed", str(exc.detail), batch_id)); connection.commit()
         raise
     except Exception as exc:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[image-gen] 502 兜底触发 batch_id={batch_id} model={selected_model} exc_type={type(exc).__name__} exc={exc}")
+        print(tb)
         with sqlite3.connect(SESSION_DB_PATH) as connection:
             connection.execute("UPDATE image_generation_batches SET status = ?, error_message = ? WHERE id = ?", ("failed", str(exc), batch_id)); connection.commit()
-        raise HTTPException(status_code=502, detail="图片下载或供应商响应处理失败")
+        raise HTTPException(status_code=502, detail=f"图片生成失败：{type(exc).__name__}: {exc}")
 
 
 # Research figure generation intentionally has a separate contract from Image Studio.
