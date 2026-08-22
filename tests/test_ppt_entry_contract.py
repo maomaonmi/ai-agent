@@ -37,3 +37,6 @@ def test_sidebar_workspace_is_unique_and_uploads_do_not_stall() -> None:
     assert 'status: "READY"' in market
     assert "可立即使用" in market
     assert "new Map(uploads.map" in market
+    assert "环形模板浏览器" in market
+    assert "orbitDistance" in market
+    assert "onWheel={handleOrbitWheel}" in market
