@@ -68,6 +68,9 @@ function orbitDistance(index: number, activeIndex: number, total: number): numbe
 function OrbitTemplateCard({
   template,
   cover,
+  ringIndex,
+  angle,
+  radius,
   distance,
   onActivate,
   onPreview,
@@ -75,6 +78,9 @@ function OrbitTemplateCard({
 }: {
   template: PptTemplate;
   cover: string;
+  ringIndex: number;
+  angle: number;
+  radius: number;
   distance: number;
   onActivate: () => void;
   onPreview: () => void;
@@ -82,21 +88,15 @@ function OrbitTemplateCard({
 }) {
   const active = distance === 0;
   const magnitude = Math.abs(distance);
-  const orbitAngle = distance * 31;
-  const orbitRadians = (orbitAngle * Math.PI) / 180;
-  const translateX = Math.sin(orbitRadians) * 620;
-  const translateY = -magnitude * 52;
-  const translateZ = (Math.cos(orbitRadians) - 1) * 460;
-  const rotateY = -orbitAngle;
-  const rotateZ = distance * -2.8;
-  const scale = active ? 1 : Math.max(0.58, 1 - magnitude * 0.085);
-  const opacity = magnitude > 4 ? 0 : Math.max(0.16, 1 - magnitude * 0.21);
+  const scale = active ? 1 : Math.max(0.7, 1 - magnitude * 0.045);
+  const opacity = magnitude > 3 ? 0.08 : Math.max(0.28, 1 - magnitude * 0.18);
+  const lift = Math.min(magnitude * 14, 46);
 
   return (
     <article
-      className="group absolute left-1/2 top-[54%] w-[min(60vw,420px)] -translate-x-1/2 -translate-y-1/2 transition-[transform,opacity,filter] duration-500 ease-out motion-reduce:transition-none"
+      className="group absolute left-1/2 top-[54%] w-[min(60vw,420px)] -translate-x-1/2 -translate-y-1/2 transition-[transform,opacity,filter] duration-700 ease-out [backface-visibility:visible] motion-reduce:transition-none"
       style={{
-        transform: `translate(-50%, -50%) translate3d(${translateX}px, ${translateY}px, ${translateZ}px) rotateY(${rotateY}deg) rotateZ(${rotateZ}deg) scale(${scale})`,
+        transform: `translate(-50%, -50%) translateY(-${lift}px) rotateY(${ringIndex * angle}deg) translateZ(${radius}px) scale(${scale})`,
         opacity,
         zIndex: active ? 30 : 20 - magnitude,
         filter: active ? "none" : `blur(${Math.min(magnitude * 0.45, 2)}px)`,
@@ -339,24 +339,40 @@ export default function PptTemplateMarket() {
               onPointerUp={handleOrbitPointerUp}
               onPointerCancel={() => { dragStartX.current = null; }}
               onWheel={handleOrbitWheel}
+              style={{ transformStyle: "preserve-3d" }}
             >
               <div className="pointer-events-none absolute left-1/2 top-[49%] z-0 h-[260px] w-[min(86vw,1240px)] rounded-[50%] border border-slate-300/25 bg-white/20 shadow-[0_0_90px_rgba(148,163,184,0.16)]" style={{ transform: "translate(-50%, -50%) rotateX(64deg)" }} aria-hidden="true" />
               <div className="pointer-events-none absolute inset-x-[8%] bottom-[-40%] h-[70%] rounded-[50%] bg-slate-400/25 blur-3xl" aria-hidden="true" />
               <div className="pointer-events-none absolute inset-x-[7%] bottom-0 h-28 bg-gradient-to-t from-[#fbfcfe] via-[#fbfcfe]/70 to-transparent" aria-hidden="true" />
-              {visibleTemplates.map((template, index) => {
-                const distance = orbitDistance(index, activeOrbitIndex, visibleTemplates.length);
+              {(() => {
+                const orbitAngle = 360 / Math.max(visibleTemplates.length, 1);
+                const orbitRadius = visibleTemplates.length <= 4 ? 360 : 470;
+                const orbitRotation = -activeOrbitIndex * orbitAngle;
                 return (
-                  <OrbitTemplateCard
-                    key={template.id}
-                    template={template}
-                    cover={coverFor(template, index)}
-                    distance={distance}
-                    onActivate={() => setActiveOrbitIndex(index)}
-                    onPreview={() => setSelected(template)}
-                    onUse={() => handleUseTemplate(template)}
-                  />
+                  <div
+                    className="absolute inset-0 z-10 [transform-style:preserve-3d] transition-transform duration-700 ease-out motion-reduce:transition-none"
+                    style={{ transform: `translateY(30px) rotateX(-4deg) rotateY(${orbitRotation}deg)`, transformStyle: "preserve-3d" }}
+                  >
+                    {visibleTemplates.map((template, index) => {
+                      const distance = orbitDistance(index, activeOrbitIndex, visibleTemplates.length);
+                      return (
+                        <OrbitTemplateCard
+                          key={template.id}
+                          template={template}
+                          cover={coverFor(template, index)}
+                          ringIndex={index}
+                          angle={orbitAngle}
+                          radius={orbitRadius}
+                          distance={distance}
+                          onActivate={() => setActiveOrbitIndex(index)}
+                          onPreview={() => setSelected(template)}
+                          onUse={() => handleUseTemplate(template)}
+                        />
+                      );
+                    })}
+                  </div>
                 );
-              })}
+              })()}
               <button type="button" onClick={() => moveOrbit(-1)} aria-label="上一个模板" className="absolute left-5 top-1/2 z-40 flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/90 bg-white/80 text-slate-700 opacity-0 shadow-lg backdrop-blur transition hover:bg-white group-hover/rail:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"><ArrowLeft size={18} /></button>
               <button type="button" onClick={() => moveOrbit(1)} aria-label="下一个模板" className="absolute right-5 top-1/2 z-40 flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/90 bg-white/80 text-slate-700 opacity-0 shadow-lg backdrop-blur transition hover:bg-white group-hover/rail:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"><ArrowRight size={18} /></button>
             </div>
