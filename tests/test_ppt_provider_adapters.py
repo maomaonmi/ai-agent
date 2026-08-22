@@ -498,3 +498,106 @@ def test_web_page_image_extractor_skips_logos_and_small_icon_hints() -> None:
 
     extractor = WebPageImageExtractor(opener=lambda _request: Response())
     assert extractor.extract("https://example.com/article", limit=3) == ["https://example.com/images/hero.webp"]
+
+
+def test_minimax_narrative_generator_strips_think_and_skips_json_mode() -> None:
+    """MiniMax OpenAI 兼容层：<think> 内联剥离 + 不启用 response_format（防御式解析）。"""
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def request_json(endpoint: str, headers: dict[str, str], payload: dict[str, object]):
+        calls.append((endpoint, payload))
+        think = "<think>先分析章节结构，再产出正文。</think>"
+        body = '{"title":"真实标题","subtitle":"观点","body":"这是正文段落。","keyPoints":["事实"],"speakerNotes":"备注"}'
+        return {"choices": [{"message": {"content": think + body}}]}
+
+    generator = SettingsNarrativeGenerator(
+        provider="minimax",
+        model="MiniMax-M2.7",
+        base_url="https://api.minimaxi.com/v1",
+        api_key="mm-key",
+        request_json=request_json,
+        strip_think=True,
+    )
+    result = generator.generate_slide(
+        prompt="人工智能发展",
+        slide={"ordinal": 3, "section": "现状", "direction": "给出判断"},
+        chapter=1,
+        total_slides=16,
+        evidence=[],
+        previous_sections=[],
+    )
+
+    assert result["title"] == "真实标题"
+    assert "<think>" not in str(result["body"])
+    assert "response_format" not in calls[0][1]
+
+
+def test_build_settings_narrative_generator_minimax_uses_compat_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """minimax profile 的 base_url 是 Anthropic 端点，工厂必须换成 /v1 OpenAI 兼容端点。"""
+
+    class ModelStore:
+        def load(self, provider: str):
+            assert provider == "minimax"
+            return type(
+                "Model",
+                (),
+                {
+                    "api_key": "mm-key",
+                    "model_id": "MiniMax-M3",
+                    "base_url": "https://api.minimaxi.com/anthropic",
+                    "temperature": 0.7,
+                    "max_tokens": 4096,
+                },
+            )()
+
+    monkeypatch.setattr("model_settings.ModelSettingsStore", ModelStore)
+    from ppt_materials import build_settings_narrative_generator
+
+    generator = build_settings_narrative_generator("minimax")
+    assert generator is not None
+    assert generator.endpoint == "https://api.minimaxi.com/v1/chat/completions"
+    assert generator.strip_think is True
+
+
+def test_minimax_ai_image_adapter_returns_base64_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    """image-01 base64 直返：adapter 产出 imageData，由 agent loop 统一落盘。"""
+    from minimax.image import GeneratedImage
+    from ppt_materials import MiniMaxAiImageAdapter
+
+    async def fake_generate_image(prompt: str, *, aspect_ratio: str = "1:1", count: int = 1, subject_reference: str | None = None):
+        assert aspect_ratio == "16:9"
+        assert "画面用途：COVER" in prompt
+        return [GeneratedImage(data=b"\x89PNG\r\n\x1a\nfake", mime_type="image/png")]
+
+    monkeypatch.setattr("minimax.image.generate_image", fake_generate_image)
+    adapter = MiniMaxAiImageAdapter(api_key="mm-key")
+    result = adapter.generate(role="COVER", prompt="future of work")
+
+    import base64
+
+    assert result["role"] == "COVER"
+    assert result["assetId"]
+    assert base64.b64decode(result["imageData"]) == b"\x89PNG\r\n\x1a\nfake"
+
+
+def test_build_settings_ai_image_adapter_prefers_glm_then_minimax(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ppt_materials import MiniMaxAiImageAdapter, build_settings_ai_image_adapter
+
+    class ModelStore:
+        def __init__(self, *, glm_key: str, minimax_key: str) -> None:
+            self.glm_key = glm_key
+            self.minimax_key = minimax_key
+
+        def load(self, provider: str):
+            return type("Model", (), {"api_key": self.glm_key if provider == "glm" else self.minimax_key})()
+
+    monkeypatch.setattr("model_settings.ModelSettingsStore", lambda: ModelStore(glm_key="glm-key", minimax_key="mm-key"))
+    glm_first = build_settings_ai_image_adapter()
+    assert glm_first is not None and not isinstance(glm_first, MiniMaxAiImageAdapter)
+
+    monkeypatch.setattr("model_settings.ModelSettingsStore", lambda: ModelStore(glm_key="", minimax_key="mm-key"))
+    fallback = build_settings_ai_image_adapter()
+    assert isinstance(fallback, MiniMaxAiImageAdapter)
+
+    monkeypatch.setattr("model_settings.ModelSettingsStore", lambda: ModelStore(glm_key="", minimax_key=""))
+    assert build_settings_ai_image_adapter() is None

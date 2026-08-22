@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import uuid
 import os
+import base64
 import hashlib
 import re
 import time
@@ -50,6 +51,20 @@ class PresentationForRunNotFound(LookupError):
 
 
 TERMINAL_RUN_STATUSES = frozenset({"COMPLETED", "CANCELLED", "FAILED"})
+
+
+@dataclass(frozen=True, slots=True)
+class _InlineImage:
+    """已解码的生成图片字节（MiniMax image-01 base64 直返路径专用）。
+
+    Why: _persist_downloaded_asset 通过 duck-typing 读取 content/mime_type/
+    sha256/url；用同构小对象让 base64 素材与下载素材共享一条持久化代码路径。
+    """
+
+    content: bytes
+    mime_type: str
+    sha256: str
+    url: str = ""
 
 
 class AgentRunService:
@@ -381,7 +396,7 @@ class AgentRunService:
         owner_scope: str,
         prompt: str,
         max_iterations: int,
-        model_provider: Literal["deepseek", "qwen", "glm"] = "deepseek",
+        model_provider: Literal["deepseek", "qwen", "glm", "minimax"] = "deepseek",
         search_provider: SearchProviderSelection = "auto",
         search_limit: int = 20,
         resume: bool = False,
@@ -1047,6 +1062,7 @@ class AgentRunService:
                             for asset in generated:
                                 normalized = dict(asset)
                                 image_url = normalized.get("imageUrl")
+                                image_data = normalized.get("imageData")
                                 if isinstance(image_url, str) and image_url.startswith(("http://", "https://")) and self.image_downloader is not None:
                                     try:
                                         downloaded = self.image_downloader.download(image_url)
@@ -1054,6 +1070,19 @@ class AgentRunService:
                                     except Exception:
                                         if not self.allow_demo_materials:
                                             raise
+                                elif isinstance(image_data, str) and image_data:
+                                    # Why: MiniMax image-01 走 base64 直返（无 https URL 可回源），
+                                    # 在此处解码后复用与网页素材同一条落盘路径，保证 run state 里
+                                    # 永远是持久化本地 URL。
+                                    decoded = base64.b64decode(image_data)
+                                    sniffed = "image/jpeg" if decoded.startswith(b"\xff\xd8\xff") else "image/png"
+                                    normalized.pop("imageData", None)
+                                    normalized.update(self._persist_downloaded_asset(
+                                        _InlineImage(content=decoded, mime_type=sniffed, sha256=hashlib.sha256(decoded).hexdigest(), url="minimax:image-01"),
+                                        owner_scope=owner_scope,
+                                        kind="PPT_AI_IMAGE",
+                                        prefix="ppt-ai",
+                                    ))
                                 persisted.append(normalized)
                             generated = persisted
                         except Exception as image_error:

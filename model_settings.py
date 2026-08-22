@@ -43,8 +43,12 @@ class ProviderCapabilities:
     """
 
     supports_json_format: bool        # response_format=json_object 是否可靠
-    thinking_control: str             # "glm" | "qwen_budget" | "deepseek" | "none"
+    thinking_control: str             # "glm" | "qwen_budget" | "deepseek" | "minimax" | "none"
     supports_vision: bool             # 当前模型是否可直接消费多模态附件
+    supports_active_cache: bool = False  # 是否支持 Anthropic 主动缓存（cache_control）
+    # Why: MiniMax web_search_20250305 是 Anthropic Messages 协议级 server tool，
+    # 文档未限定模型但实际后端可能拒。agent_loop/chat 据此决定是否注入 web_search tool。
+    supports_server_web_search: bool = True
 
 
 def capabilities_for_model(model_id: str) -> ProviderCapabilities:
@@ -62,6 +66,8 @@ def capabilities_for_model(model_id: str) -> ProviderCapabilities:
                     supports_json_format=variant.get("supports_json_format", True),
                     thinking_control=variant.get("thinking_control", "none"),
                     supports_vision=variant.get("supports_vision", False),
+                    supports_active_cache=variant.get("supports_active_cache", False),
+                    supports_server_web_search=variant.get("supports_server_web_search", True),
                 )
     # 兜底：未知模型走保守默认（与历史行为一致）
     return ProviderCapabilities(True, "none", False)
@@ -118,12 +124,38 @@ MODEL_CATALOG: dict[str, list[dict]] = {
          "supports_vision": False, "supports_json_format": True,
          "thinking_control": "deepseek", "input_context": 1_000_000, "output_context": 384_000},
     ],
+    # Why: MiniMax 主链路走 Anthropic Messages 协议（拿到 M3 thinking 块 / Interleaved
+    # Thinking / 服务端 web_search 的唯一路径），OpenAI 兼容端点仅供 LangGraph/Code 复用。
+    # supports_active_cache: 主动缓存（cache_control）仅 M2.7/M2.5 系列支持，M3 携带会报错。
+    "minimax": [
+        {"value": "minimax:MiniMax-M3", "label": "MiniMax M3 · 旗舰", "model_id": "MiniMax-M3",
+         "supports_vision": True, "supports_json_format": True,
+         "thinking_control": "minimax", "input_context": 1_000_000, "output_context": 32_000,
+         "supports_active_cache": False, "supports_server_web_search": True},
+        {"value": "minimax:MiniMax-M2.7", "label": "MiniMax M2.7 · 均衡", "model_id": "MiniMax-M2.7",
+         "supports_vision": False, "supports_json_format": True,
+         "thinking_control": "minimax", "input_context": 204_800, "output_context": 32_000,
+         "supports_active_cache": True, "supports_server_web_search": True},
+        {"value": "minimax:MiniMax-M2.7-highspeed", "label": "MiniMax M2.7 极速", "model_id": "MiniMax-M2.7-highspeed",
+         "supports_vision": False, "supports_json_format": True,
+         "thinking_control": "minimax", "input_context": 204_800, "output_context": 32_000,
+         "supports_active_cache": True, "supports_server_web_search": True},
+        {"value": "minimax:MiniMax-M2.5", "label": "MiniMax M2.5 · 性价比", "model_id": "MiniMax-M2.5",
+         "supports_vision": False, "supports_json_format": True,
+         "thinking_control": "minimax", "input_context": 204_800, "output_context": 32_000,
+         "supports_active_cache": True, "supports_server_web_search": True},
+        {"value": "minimax:MiniMax-M2.5-highspeed", "label": "MiniMax M2.5 极速", "model_id": "MiniMax-M2.5-highspeed",
+         "supports_vision": False, "supports_json_format": True,
+         "thinking_control": "minimax", "input_context": 204_800, "output_context": 32_000,
+         "supports_active_cache": True, "supports_server_web_search": True},
+    ],
 }
 
 
 class ModelSettings(BaseModel):
-    provider: Literal["deepseek", "glm", "qwen", "custom"] = "deepseek"
-    api_format: Literal["openai_chat_completions"] = "openai_chat_completions"
+    provider: Literal["deepseek", "glm", "qwen", "minimax", "custom"] = "deepseek"
+    # Why: minimax 主链路走 Anthropic Messages 协议；其余供应商维持 OpenAI 兼容。
+    api_format: Literal["openai_chat_completions", "anthropic_messages"] = "openai_chat_completions"
     base_url: str = "https://api.deepseek.com"
     model_id: str = "deepseek-v4-flash"
     api_key: str = ""
@@ -226,6 +258,17 @@ class ModelSettingsStore:
                 return ModelSettings(provider="glm", base_url="https://open.bigmodel.cn/api/paas/v4", model_id="glm-5v-turbo", display_name="GLM-5V Turbo", multimodal=True)
             if selected == "qwen":
                 return ModelSettings(provider="qwen", base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", model_id="qwen3.7-plus", display_name="千问 Qwen3.7 Plus", thinking_budget=8_000)
+            if selected == "minimax":
+                # Why: Anthropic 兼容端点是主链路（M3 thinking 块 / Interleaved Thinking / server web_search）。
+                return ModelSettings(
+                    provider="minimax",
+                    api_format="anthropic_messages",
+                    base_url="https://api.minimaxi.com/anthropic",
+                    model_id="MiniMax-M3",
+                    display_name="MiniMax M3",
+                    input_context=1_000_000,
+                    output_context=32_000,
+                )
             return ModelSettings(provider=selected)
 
     def save(self, settings: ModelSettings) -> ModelSettings:

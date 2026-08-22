@@ -936,6 +936,7 @@ class SettingsNarrativeGenerator:
         temperature: float = 0.7,
         max_tokens: int = 2_000,
         request_json: JsonRequest | None = None,
+        strip_think: bool = False,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -944,6 +945,9 @@ class SettingsNarrativeGenerator:
         self.temperature = max(0.0, min(2.0, float(temperature)))
         self.max_tokens = max(256, min(65_536, int(max_tokens)))
         self.request_json = request_json or _narrative_json_request
+        # Why: MiniMax OpenAI 兼容层可能把 interleaved thinking 以 <think> 标签
+        # 内联在 content 里，JSON 解析前必须剥离（GLM/千问无此行为）。
+        self.strip_think = strip_think
 
     @staticmethod
     def _content_from_response(payload: Mapping[str, object]) -> str:
@@ -1102,6 +1106,10 @@ class SettingsNarrativeGenerator:
             payload,
         )
         content = self._content_from_response(response)
+        if self.strip_think:
+            from minimax.openai_compat import strip_think_tags
+
+            content = strip_think_tags(content)
         result = self._parse_json(content)
         if not result.get("title") or not result.get("body"):
             raise ProviderRequestFailed("narrative model returned an incomplete section")
@@ -1117,14 +1125,24 @@ def build_settings_narrative_generator(provider: str, *, request_json: JsonReque
     settings = ModelSettingsStore().load(provider)
     if not settings.api_key or not settings.base_url or not settings.model_id:
         return None
+    base_url = settings.base_url
+    strip_think = False
+    if provider == "minimax":
+        # Why: minimax profile 的 base_url 是 Anthropic 端点（主链路用），
+        # PPT 正文生成走 OpenAI 兼容协议，必须换成 /v1 端点。
+        from minimax.openai_compat import openai_compat_credentials
+
+        _, base_url = openai_compat_credentials(settings)
+        strip_think = True
     return SettingsNarrativeGenerator(
         provider=provider,
         model=settings.model_id,
-        base_url=settings.base_url,
+        base_url=base_url,
         api_key=settings.api_key,
         temperature=min(1.0, settings.temperature),
         max_tokens=min(8_000, settings.max_tokens),
         request_json=request_json,
+        strip_think=strip_think,
     )
 
 
@@ -1140,15 +1158,60 @@ def generate_required_ai_images(adapter: AiImageAdapter, *, prompt: str) -> list
         return list(executor.map(generate, _AI_IMAGE_ROLES))
 
 
-def build_settings_ai_image_adapter(*, request_json: JsonRequest | None = None) -> SettingsAiImageAdapter | None:
-    """Build the image adapter from the configured GLM profile when available."""
+class MiniMaxAiImageAdapter:
+    """MiniMax image-01 adapter for PPT cover/mid/end visuals.
+
+    Why: image-01 仅支持 base64 直返（T9 图像工作台同款协议），无法给出可回源
+    的 https URL；因此本 adapter 返回 imageData，由 agent loop 在持有
+    owner_scope 的位置统一落盘（与网页图片素材同一条持久化路径）。
+    """
+
+    def __init__(self, *, api_key: str) -> None:
+        self.api_key = api_key
+
+    def generate(self, *, role: str, prompt: str) -> dict[str, object]:
+        if role not in _AI_IMAGE_ROLES:
+            raise ValueError("AI image role must be COVER, MID_BACKGROUND, or END")
+        if not self.api_key:
+            raise ProviderNotConfigured("MiniMax image provider is not configured")
+        import asyncio
+        import base64 as _base64
+
+        from minimax import image as minimax_image
+
+        # generate_required_ai_images 在线程池里并发调用本方法；工作线程没有
+        # 事件循环，asyncio.run 各自建临时 loop 是安全且互不干扰的。
+        images = asyncio.run(
+            minimax_image.generate_image(
+                f"{prompt}\n画面用途：{role}"[:1000],
+                aspect_ratio="16:9",
+                count=1,
+            )
+        )
+        return {
+            "role": role,
+            "assetId": hashlib.sha256(f"{role}:{prompt}".encode()).hexdigest()[:16],
+            "imageData": _base64.b64encode(images[0].data).decode("ascii"),
+        }
+
+
+def build_settings_ai_image_adapter(*, request_json: JsonRequest | None = None) -> SettingsAiImageAdapter | MiniMaxAiImageAdapter | None:
+    """Build the image adapter from the configured profiles.
+
+    Why: GLM 保持首选（既有行为零回归）；GLM 未配置但 MiniMax 已配置时回退
+    image-01，让只配了 MiniMax 的用户也能走 provider 模式出全套 AI 素材。
+    """
 
     from model_settings import ModelSettingsStore
 
-    settings = ModelSettingsStore().load("glm")
-    if not settings.api_key:
-        return None
-    return SettingsAiImageAdapter(api_key=settings.api_key, request_json=request_json)
+    store = ModelSettingsStore()
+    glm_settings = store.load("glm")
+    if glm_settings.api_key:
+        return SettingsAiImageAdapter(api_key=glm_settings.api_key, request_json=request_json)
+    minimax_settings = store.load("minimax")
+    if minimax_settings.api_key:
+        return MiniMaxAiImageAdapter(api_key=minimax_settings.api_key)
+    return None
 
 
 @dataclass(slots=True)

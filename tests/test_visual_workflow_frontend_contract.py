@@ -9,7 +9,7 @@ def test_visual_workflow_is_reachable_from_sidebar_and_chat_view():
     chat = (FRONTEND / "components" / "ChatInterface.tsx").read_text(encoding="utf-8")
     workspace = (FRONTEND / "features" / "visual-workflow" / "VisualWorkflowWorkspace.tsx").read_text(encoding="utf-8")
 
-    assert "AI 工作流" in sidebar
+    assert "视频流工作台" in sidebar
     assert "onOpenVisualWorkflow" in sidebar
     assert "'/visual-workflow'" in chat
     assert "VisualWorkflowWorkspace" not in chat
@@ -24,8 +24,39 @@ def test_visual_workflow_has_a_dedicated_next_route():
     route_client = (FRONTEND / "app" / "visual-workflow" / "VisualWorkflowRoute.tsx").read_text(encoding="utf-8")
 
     assert "VisualWorkflowRoute" in route
-    assert "useRouter" in route_client
-    assert "h-screen" in route_client
+    assert "VisualWorkflowHub" in route_client
+
+
+def test_visual_workflow_hub_lists_history_and_editor_has_a_dedicated_path():
+    hub = (FRONTEND / "features" / "visual-workflow" / "VisualWorkflowHub.tsx").read_text(encoding="utf-8")
+    canvas_route = (FRONTEND / "app" / "visual-workflow" / "VisualWorkflowCanvasRoute.tsx").read_text(encoding="utf-8")
+    canvas_page = (FRONTEND / "app" / "visual-workflow" / "canvas" / "[workflowId]" / "page.tsx").read_text(encoding="utf-8")
+
+    assert "listVisualWorkflows" in hub
+    assert "createVisualWorkflow" in hub
+    assert "新建画布" in hub
+    assert "历史画布" in hub
+    assert "/visual-workflow/canvas/" in hub
+    assert "useParams" in canvas_route
+    assert "workflowId" in canvas_route
+    assert "VisualWorkflowCanvasRoute" in canvas_page
+
+
+def test_visual_workflow_run_artifacts_are_serialized_and_rehydrated():
+    types = (FRONTEND / "features" / "visual-workflow" / "types.ts").read_text(encoding="utf-8")
+    store = (FRONTEND / "features" / "visual-workflow" / "store.ts").read_text(encoding="utf-8")
+
+    assert "outputArtifacts" in types
+    assert "runtimeArtifacts: Array.isArray(node.config.outputArtifacts)" in types
+    assert "config: { ...node.data.config, outputArtifacts: nextArtifacts }" in store
+    assert "statuses[node.id] === 'success'" in store
+
+
+def test_visual_workflow_run_statuses_are_normalized_before_persistence():
+    workspace = (FRONTEND / "features" / "visual-workflow" / "VisualWorkflowWorkspace.tsx").read_text(encoding="utf-8")
+
+    assert "nodeRun.status === 'SUCCEEDED' ? 'success'" in workspace
+    assert "nodeRun.status === 'FAILED' ? 'error'" in workspace
 
 
 def test_visual_workflow_frontend_uses_typed_canvas_and_theme_aware_styles():

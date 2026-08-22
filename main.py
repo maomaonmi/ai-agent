@@ -66,6 +66,16 @@ from thesis_writing import (
     normalize_search_results,
 )
 from glm_adapter import ChatAttachment, build_user_content, choose_glm_model, reasoning_from_delta, validate_attachment_mix
+# Why: MiniMax 主链路（Anthropic Messages 协议）收敛在自包含包内，main.py 仅薄分发。
+from minimax.chat import generate_minimax_chat_events
+from minimax.agent_loop import generate_minimax_agent_events
+from minimax.research import generate_minimax_research_events
+from minimax.openai_compat import (
+    OPENAI_COMPAT_BASE_URL,
+    ThinkTagStreamer,
+    extract_reasoning as minimax_extract_reasoning,
+    strip_think_tags as minimax_strip_think_tags,
+)
 from App import create_code_router
 from App import _build_memory_prompt_suffix, _skill_matched_events
 from HOOK.agent_hook_engine import HookContext, HookType, global_hook_registry
@@ -162,8 +172,22 @@ if not _FIRECRAWL_KEY:
 
 model_settings_store = ModelSettingsStore()
 _active_model = model_settings_store.load()
+
+
+def _openai_compat_view(settings: ModelSettings) -> str:
+    """OpenAI 兼容客户端（ChatOpenAI/AsyncOpenAI）视角的 base_url。
+
+    Why: minimax 主链路 base_url 是 Anthropic 端点，OpenAI 协议客户端必须
+    换用 /v1 兼容端点（LangGraph 多智能体 / MCP 预检轮 / plan 链路复用），
+    否则协议不匹配直接 404。
+    """
+    if settings.provider == "minimax":
+        return OPENAI_COMPAT_BASE_URL
+    return settings.base_url
+
+
 DEEPSEEK_API_KEY = _active_model.api_key or os.getenv("DEEPSEEK_API_KEY", "not-configured")
-DEEPSEEK_BASE_URL = _active_model.base_url
+DEEPSEEK_BASE_URL = _openai_compat_view(_active_model)
 ACTIVE_MODEL_ID = _active_model.model_id
 RERANK_API_KEY = _service_cfg.rerank_api_key or os.getenv("RERANK_API_KEY", "")
 if not RERANK_API_KEY:
@@ -401,6 +425,14 @@ def _build_video_providers() -> dict[str, Any]:
         providers["zhipu"] = ZhipuVideoProvider(
             glm_settings.api_key,
             base_url=os.getenv("ZHIPU_VIDEO_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
+        )
+    minimax_settings = model_settings_store.load("minimax")
+    if minimax_settings.api_key:
+        from minimax.video import MiniMaxVideoProvider
+
+        providers["minimax"] = MiniMaxVideoProvider(
+            minimax_settings.api_key,
+            base_url=os.getenv("MINIMAX_VIDEO_BASE_URL", "https://api.minimaxi.com/v2"),
         )
     return providers
 
@@ -1681,8 +1713,10 @@ def resolve_runtime_mode(
     web = settings.web_search
     deep = settings.deep_thinking
 
-    # 1) wants_web：对 research / code / plan 等组合模式也开 auto 解析
-    auto_treated_as_web_for = {"web", "research"}
+    # 1) wants_web：对 research / plan / distributed_plan 等组合模式也开 auto 解析
+    # Why: plan/distributed_plan 的 task 执行依赖搜索证据注入，
+    #   不加入此集合会导致 auto 模式下 wants_web=False，搜索被完全跳过。
+    auto_treated_as_web_for = {"web", "research", "plan", "distributed_plan"}
     if web == "on":
         wants_web = True
     else:
@@ -1734,7 +1768,8 @@ class ChatRequest(BaseModel):
     #   firecrawl：Firecrawl /v1/deep-research 异步 Job
     #   self-built：自研 day32(意图裂变+搜索+切片+Reranker) + day33(R1 推理)
     #   qwen：千问原生深度研究模型（DashScope HTTP API，支持两步式调用）
-    research_engine: Literal["agent-loop", "firecrawl", "self-built", "qwen"] = "agent-loop"
+    #   minimax：MiniMax 原生调研（Anthropic Messages + web_search server tool）
+    research_engine: Literal["agent-loop", "firecrawl", "self-built", "qwen", "minimax"] = "agent-loop"
     # Firecrawl Deep Research 参数：maxDepth(1-12) / timeLimit(30-600s) / maxUrls(1-1000)
     research_options: Optional[Dict] = None
 
@@ -1806,6 +1841,7 @@ PLAN_FAST_MODEL_DEFAULTS = {
     "deepseek": "deepseek-v4-flash",
     "glm": "glm-5-turbo",
     "qwen": "qwen3.7-flash",
+    "minimax": "MiniMax-M2.7-highspeed",
 }
 _PLAN_EVENT_SINK: ContextVar[Optional[Callable[[Dict[str, Any]], None]]] = ContextVar(
     "plan_event_sink", default=None
@@ -2679,6 +2715,85 @@ def _rerank_or_keep(candidates: list[dict], user_query: str) -> list[dict]:
         return result
 
 
+def _run_minimax_plan_search(query: str) -> tuple[list[dict], str | None]:
+    """MiniMax 原生服务端搜索（Anthropic Messages 协议）→ plan 模式候选列表。
+
+    Why 独立函数：plan 链路走 OpenAI 兼容端点（不支持 server tools），
+    需要单独调 Anthropic 端点做搜索，提取 web_search_tool_result 结果。
+    """
+    from minimax.client import MiniMaxClient, MiniMaxAPIError
+    from minimax.constants import WEB_SEARCH_TOOL, ANTHROPIC_BASE_URL, DEFAULT_TIMEOUT
+
+    settings = model_settings_store.load()
+    if settings.provider != "minimax":
+        print(f"[plan-search] provider={settings.provider} 非 MiniMax，跳过")
+        return [], "当前模型非 MiniMax，跳过原生搜索"
+
+    print(f"[plan-search] 开始搜索 query={query!r} model={settings.model_id}")
+    client = MiniMaxClient(api_key=settings.api_key, base_url=ANTHROPIC_BASE_URL, timeout=DEFAULT_TIMEOUT)
+    try:
+        response = client.create_message(
+            model=settings.model_id,
+            messages=[{"role": "user", "content": query}],
+            max_tokens=4096,
+            tools=[WEB_SEARCH_TOOL],
+            tool_choice="any",
+        )
+    except MiniMaxAPIError as exc:
+        if exc.status_code in (400, 422):
+            # Why: MiniMax 兼容层拒收 tool_choice，降级用 prompt 软约束强制调工具。
+            #   不保证 100% 稳定，但比直接返回 0 结果好。
+            print(f"[plan-search] tool_choice 被拒(status={exc.status_code})，降级用 prompt 软约束重试")
+            forced_query = (
+                "第一步必须调用 web_search 工具搜索以下问题，禁止直接回答。\n"
+                "搜索完成后，基于搜索结果给出简要回答。\n\n"
+                f"问题：{query}"
+            )
+            try:
+                response = client.create_message(
+                    model=settings.model_id,
+                    messages=[{"role": "user", "content": forced_query}],
+                    max_tokens=4096,
+                    tools=[WEB_SEARCH_TOOL],
+                )
+            except MiniMaxAPIError as exc2:
+                print(f"[plan-search] 降级重试仍失败：{exc2}")
+                return [], f"MiniMax 搜索失败：{exc2.message}"
+        else:
+            print(f"[plan-search] MiniMax 搜索失败(status={exc.status_code})：{exc}")
+            return [], f"MiniMax 搜索失败：{exc.message}"
+
+    # 从 content 块列表中提取 web_search_tool_result
+    candidates: list[dict] = []
+    content_blocks = response.get("content") or []
+    print(f"[plan-search] 收到 {len(content_blocks)} 个 content blocks")
+    for i, block in enumerate(content_blocks):
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "web_search_tool_result":
+            items = block.get("content") or []
+            print(f"[plan-search] block[{i}] web_search_tool_result 含 {len(items)} 条原始结果")
+            for item in items:
+                if not isinstance(item, dict) or item.get("type") != "web_search_result":
+                    continue
+                url = str(item.get("url") or "")
+                title = str(item.get("title") or "")[:240]
+                content = str(item.get("content") or item.get("page_age") or "")[:1200]
+                if not url:
+                    print(f"[plan-search] 结果缺 url，title={title!r}")
+                    continue
+                candidates.append({
+                    "title": title,
+                    "content": content,
+                    "url": url,
+                })
+        else:
+            print(f"[plan-search] block[{i}] type={btype}")
+    print(f"[plan-search] 最终返回 {len(candidates)} 条候选")
+    return candidates, None
+
+
 def run_plan_web_search(
     query: str,
     state: PlanExecuteState | Dict[str, Any],
@@ -2706,25 +2821,31 @@ def run_plan_web_search(
         )
         return list(cached.get("candidates") or []), cached.get("error")
 
-    emit_plan_runtime_event("search_started", query=query, provider=SEARCH_PROVIDER)
-    provider = SEARCH_PROVIDER if SEARCH_PROVIDER in {"tavily", "firecrawl"} else "firecrawl"
-    if provider == "tavily":
-        candidates, fatal_error, _scrape_count = _run_tavily_search(query)
+    # MiniMax 原生搜索分支：当 provider=minimax 时走 Anthropic 端点 server tools
+    active_settings = model_settings_store.load()
+    if active_settings.provider == "minimax":
+        emit_plan_runtime_event("search_started", query=query, provider="minimax")
+        candidates, fatal_error = _run_minimax_plan_search(query)
     else:
-        raw_options = state.get("web_search_options") or {}
-        try:
-            options = WebSearchOptions.model_validate(raw_options)
-        except Exception:
-            options = WebSearchOptions()
-        # Plan tasks need evidence quickly. Search snippets/highlights are the
-        # default source; full-page scraping remains available to the dedicated
-        # research workflow but is deliberately disabled for Plan-and-Execute.
-        options = options.model_copy(update={"scrape_top_n": 0})
-        candidates, fatal_error, _scrape_count = _run_firecrawl_search(
-            query,
-            options=options,
-            fast=True,
-        )
+        emit_plan_runtime_event("search_started", query=query, provider=SEARCH_PROVIDER)
+        provider = SEARCH_PROVIDER if SEARCH_PROVIDER in {"tavily", "firecrawl"} else "firecrawl"
+        if provider == "tavily":
+            candidates, fatal_error, _scrape_count = _run_tavily_search(query)
+        else:
+            raw_options = state.get("web_search_options") or {}
+            try:
+                options = WebSearchOptions.model_validate(raw_options)
+            except Exception:
+                options = WebSearchOptions()
+            # Plan tasks need evidence quickly. Search snippets/highlights are the
+            # default source; full-page scraping remains available to the dedicated
+            # research workflow but is deliberately disabled for Plan-and-Execute.
+            options = options.model_copy(update={"scrape_top_n": 0})
+            candidates, fatal_error, _scrape_count = _run_firecrawl_search(
+                query,
+                options=options,
+                fast=True,
+            )
     normalized = [
         {
             "title": str(item.get("title") or "")[:240],
@@ -2740,7 +2861,7 @@ def run_plan_web_search(
         query=query,
         cached=False,
         result_count=len(normalized),
-        results=normalized[:8],
+        results=normalized,
         error=fatal_error,
     )
     return normalized, fatal_error
@@ -3080,6 +3201,9 @@ async def chat_node(state: GroundedState):
         elif thinking_caps.thinking_control == "qwen_budget":
             budget = min(8_000, max(limits["answer_tokens"] - 1_024, 256))
             extra_body = {"enable_thinking": True, "thinking_budget": budget}
+        elif thinking_caps.thinking_control == "minimax":
+            # MiniMax OpenAI 兼容路径：思考内容分离到 reasoning_details（无 effort 档位参数）。
+            extra_body = {"reasoning_split": True}
 
     # ---------- 原生联网搜索（按 wants_web 正交维度启用，不再仅 mode=="web"）----------
     # GLM：通过 tools 数组声明 web_search 工具（官方文档 zai-sdk 示例），tool_choice=auto 让模型按需调用。
@@ -3141,6 +3265,8 @@ async def chat_node(state: GroundedState):
     answer_parts: list[str] = []
     stream_usage = None
     stream_model = ACTIVE_MODEL_ID
+    # Why: MiniMax OpenAI 兼容路径的 <think> 混入 content 兜底剥离（流式状态机）。
+    think_stripper = ThinkTagStreamer() if thinking_caps.thinking_control == "minimax" else None
 
     stream = await llm_client.chat.completions.create(**create_kwargs)
     async for chunk in stream:
@@ -3152,18 +3278,29 @@ async def chat_node(state: GroundedState):
             # usage-only chunk（或空 keep-alive chunk），无正文可推
             continue
         delta = chunk.choices[0].delta
-        # 推理流：DeepSeek / GLM 走 delta.reasoning_content（glm_adapter 统一提取）
-        reasoning_piece = reasoning_from_delta(delta) if use_deep else ""
+        # 推理流：DeepSeek / GLM 走 delta.reasoning_content（glm_adapter 统一提取）；
+        # MiniMax 走 delta.reasoning_details（reasoning_split=True）。
+        reasoning_piece = ""
+        if use_deep:
+            reasoning_piece = reasoning_from_delta(delta) or minimax_extract_reasoning(delta)
         if reasoning_piece:
             reasoning_parts.append(reasoning_piece)
             if sink is not None:
                 await sink("reasoning_delta", reasoning_piece)
+        # Why <think> 剥离：MiniMax 未开 reasoning_split 时思考标签混入 content 分片，
+        # 跨 chunk 状态机剥离（开标签与内容可能分属不同 chunk）。
         piece = delta.content or ""
+        if think_stripper is not None:
+            piece = think_stripper.feed(piece)
         if piece:
             answer_parts.append(piece)
             if sink is not None:
                 await sink("token", piece)
 
+    if think_stripper is not None:
+        tail_piece = think_stripper.flush()
+        if tail_piece:
+            answer_parts.append(tail_piece)
     final_text = "".join(answer_parts)
     reasoning = "".join(reasoning_parts)
     response_ai = AIMessage(content=final_text)
@@ -3250,6 +3387,8 @@ def web_analyst_node(state: GroundedState):
         elif thinking_caps.thinking_control == "qwen_budget":
             budget = min(8_000, max(limits["answer_tokens"] - 1_024, 256))
             extra_body = {"enable_thinking": True, "thinking_budget": budget}
+        elif thinking_caps.thinking_control == "minimax":
+            extra_body = {"reasoning_split": True}
         if extra_body is not None:
             create_kwargs["extra_body"] = extra_body
         response = OpenAI(
@@ -3258,7 +3397,13 @@ def web_analyst_node(state: GroundedState):
         ).chat.completions.create(**create_kwargs)
         token_usage = _response_token_usage(response)
         answer = response.choices[0].message.content or ""
-        reasoning = response.choices[0].message.reasoning_content or ""
+        # Why getattr + reasoning_details 双路径：MiniMax 思考在 reasoning_details
+        # 字段（reasoning_split=True），GLM/DeepSeek 在 reasoning_content。
+        reasoning = (
+            getattr(response.choices[0].message, "reasoning_content", None)
+            or minimax_extract_reasoning(response.choices[0].message)
+            or ""
+        )
         pc.log(
             f"**联网+深度** 推理过程 {len(reasoning)} 字 (provider={thinking_caps.thinking_control})",
             status="completed",
@@ -3747,7 +3892,10 @@ def plan_llm_invoke(
             or PLAN_FAST_MODEL_DEFAULTS.get(settings.provider, settings.model_id)
         )
         api_key = settings.api_key or api_key
-        base_url = settings.base_url or base_url
+        # Why _openai_compat_view：minimax 的 settings.base_url 是 Anthropic 端点，
+        # ChatOpenAI（OpenAI 协议）直连必 404；fast 模型统一换 /v1 兼容端点。
+        # 非 fast 分支维持模块级快照语义（DEEPSEEK_BASE_URL 已在 PUT 接口同步 compat 视角）。
+        base_url = (_openai_compat_view(settings) if settings.base_url else base_url) or base_url
     client = ChatOpenAI(
         model=model_id,
         api_key=api_key,
@@ -3759,6 +3907,10 @@ def plan_llm_invoke(
         HumanMessage(content=user_content),
     ]
     if stream:
+        # Why 出口剥离 <think>：MiniMax highspeed 变体（OpenAI 兼容端点）会把思考
+        # 混入 content 分片；不剥离则 task_delta/report_delta 把思考噪声流给前端。
+        # 跨 chunk 状态机处理"开标签与思考内容分属不同分片"的拆分场景。
+        thinker = ThinkTagStreamer()
         parts: list[str] = []
         for chunk in client.stream(messages):
             content = chunk.content
@@ -3772,17 +3924,19 @@ def plan_llm_invoke(
                 )
             else:
                 text = str(content or "")
-            if text:
-                parts.append(text)
+            clean = thinker.feed(text)
+            if clean:
+                parts.append(clean)
                 task_id = _PLAN_TASK_ID.get()
                 if task_id is not None:
-                    emit_plan_runtime_event("task_delta", task_id=task_id, delta=text)
+                    emit_plan_runtime_event("task_delta", task_id=task_id, delta=clean)
                 else:
-                    emit_plan_runtime_event("report_delta", delta=text)
+                    emit_plan_runtime_event("report_delta", delta=clean)
         return "".join(parts)
     response = client.invoke(messages)
     _response_token_usage(response)
-    return str(response.content)
+    # 非流式同款出口剥离：planner/replanner 的 JSON 解析不被 think 前缀污染。
+    return minimax_strip_think_tags(str(response.content))
 
 
 def load_callable_agent_catalog() -> Dict[str, Dict[str, Any]]:
@@ -3844,6 +3998,8 @@ requires_web 仅在 assigned_agent=web_search_agent 时为 true。
 """
     system_prompt = """你是 Plan-and-Execute 系统的 Planner。
 把用户的复杂目标拆成 3-6 个可独立执行、顺序明确的任务。
+**硬性约束：必须输出至少 3 个任务，最多 6 个任务。少于 3 个视为失败。**
+每个任务必须是不同维度的子问题，禁止合并或概括。
 """ + assignment_contract + """
 仅输出 JSON，不要输出 Markdown 或解释：
 {
@@ -3857,7 +4013,8 @@ requires_web 仅在 assigned_agent=web_search_agent 时为 true。
   ]
 }
 需要检索最新信息、价格、政策或市场数据时 requires_web=true。
-任务必须服务于最终目标，不要包含“输出最终答案”这种由 Summarizer 负责的步骤。"""
+任务必须服务于最终目标，不要包含“输出最终答案”这种由 Summarizer 负责的步骤。
+**再次强调：tasks 数组必须包含 3-6 个元素，这是强制要求。**"""
     fallback_tasks = [
         {
             "title": "梳理目标与约束",
@@ -3892,6 +4049,22 @@ requires_web 仅在 assigned_agent=web_search_agent 时为 true。
     if not tasks:
         tasks = normalize_plan_tasks(
             fallback_tasks,
+            limit=PLAN_MAX_TASKS,
+            allowed_custom_agents=allowed_custom_agents,
+        )
+    # Why: MiniMax M3 的 Planner 遵循度弱，可能只拆 1 个 task。
+    #   兜底：少于 3 个时用 fallback 补齐，确保至少 3 轮执行。
+    if len(tasks) < 3:
+        print(f"[Node: Planner] LLM 只拆了 {len(tasks)} 个 task，用 fallback 补齐到 3 个")
+        existing_titles = {t["title"] for t in tasks}
+        for fb in fallback_tasks:
+            if len(tasks) >= 3:
+                break
+            if fb["title"] not in existing_titles:
+                tasks.append(dict(fb))
+                existing_titles.add(fb["title"])
+        tasks = normalize_plan_tasks(
+            tasks,
             limit=PLAN_MAX_TASKS,
             allowed_custom_agents=allowed_custom_agents,
         )
@@ -4103,9 +4276,16 @@ def _execute_single_plan_task_impl(state: PlanExecuteState):
         }
 
     evidence = ""
-    if current_task.get("requires_web"):
+    web_search_enabled = bool(state.get("web_search_enabled", True))
+    print(f"[Node: Executor] web_search_enabled={web_search_enabled} (state keys: {list(state.keys())[:10]})")
+    # Why: Planner LLM 经常把"看似理论"的任务标 requires_web=false，导致搜索被跳过。
+    #   当 web_search_enabled=True 时，无论 requires_web 如何都注入搜索证据，
+    #   确保 Executor 有外部资料可用（证据为空时降级为"未检索到有效资料"）。
+    if web_search_enabled:
         try:
+            print(f"[Node: Executor] 开始调用 get_shared_plan_search_results")
             candidates, search_error = get_shared_plan_search_results(state)
+            print(f"[Node: Executor] 搜索结果: {len(candidates)} 条候选, error={search_error}")
             current_task["source_urls"] = [str(item.get("url")) for item in candidates if item.get("url")][:24]
             current_task["search_results"] = [
                 {
@@ -5376,6 +5556,7 @@ IMAGE_MODEL_CAPABILITIES = [
     {"id": "z-image-turbo", "name": "Z-Image Turbo", "provider": "qianwen", "description": "极速低成本的写实人像与商品图", "max_outputs": 1, "max_width": 2048, "max_height": 2048, "supports_negative_prompt": False, "enabled": True},
     {"id": "cogview-4", "name": "智谱 CogView-4", "provider": "zhipu", "description": "中文文字、国风与复杂语义", "max_outputs": 4, "max_width": 2048, "max_height": 2048, "supports_negative_prompt": False, "enabled": True},
     {"id": "glm-image", "name": "智谱 GLM-Image", "provider": "zhipu", "description": "知识密集版面与通用高质量生图", "max_outputs": 4, "max_width": 2048, "max_height": 2048, "supports_negative_prompt": False, "enabled": True},
+    {"id": "image-01", "name": "MiniMax image-01", "provider": "minimax", "description": "创意海报、插画与电影级构图（支持参考图）", "max_outputs": 4, "max_width": 2048, "max_height": 2048, "supports_negative_prompt": False, "enabled": True},
 ]
 
 
@@ -5415,6 +5596,9 @@ def _image_director_result(request: ImageDirectRequest) -> dict[str, Any]:
     elif speed_first:
         recommended = "z-image-turbo"
         reasons = ["检测到速度或成本优先"]
+    elif re.search(r"海报|插画|艺术|电影感|概念设计|创意|参考图|同款", request.raw_prompt, re.I):
+        recommended = "image-01"
+        reasons = ["检测到创意视觉或参考图改写需求"]
     elif has_cjk:
         recommended = "qwen-image-3.0-pro"
         reasons = ["中文语义与复杂构图需要高质量模型"]
@@ -5577,6 +5761,8 @@ async def create_image_generation(request: ImageDirectRequest):
         connection.execute("INSERT INTO image_generation_batches (id, raw_prompt, enhanced_prompt, model, provider, ratio, count, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (batch_id, request.raw_prompt, director["enhanced_prompt_zh"], selected_model, capability["provider"], request.ratio, count, "generating", now))
         connection.commit()
     try:
+        remote_urls: list[str] = []
+        assets: list[dict[str, Any]] = []
         if capability["provider"] == "zhipu":
             remote_urls = await _call_zhipu_image(selected_model, director["enhanced_prompt_zh"], count, request.ratio)
         elif selected_model in {"qwen-image-3.0-pro", "qwen-image-3.0"}:
@@ -5585,9 +5771,23 @@ async def create_image_generation(request: ImageDirectRequest):
             remote_urls = await _call_dashscope_multimodal_image(selected_model, director["enhanced_prompt_zh"], count, request.ratio, prompt_extend=False, thinking_mode=True, reference_image=request.reference_image)
         elif selected_model == "z-image-turbo":
             remote_urls = await _call_dashscope_multimodal_image(selected_model, director["enhanced_prompt_zh"][:800], 1, request.ratio, prompt_extend=False, reference_image=request.reference_image)
+        elif capability["provider"] == "minimax":
+            # Why: image-01 走 base64 直返（response_format=base64），无 URL 回源，
+            # 直接落盘本地资产；官方 subject_reference 仅接受 https 公网图片，
+            # data URL 参考图静默降级为纯文生图（不阻断请求）。
+            from minimax.image import MiniMaxImageError, generate_image, save_image
+            try:
+                generated = await generate_image(
+                    director["enhanced_prompt_zh"],
+                    aspect_ratio=request.ratio,
+                    count=count,
+                    subject_reference=request.reference_image if (request.reference_image or "").startswith("https://") else None,
+                )
+            except MiniMaxImageError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=str(exc))
+            assets = [save_image(image, asset_id=str(uuid.uuid4()), batch_dir=IMAGE_ASSET_DIR / batch_id) for image in generated]
         else:
             raise HTTPException(status_code=503, detail="当前图片模型暂未接入该图像协议")
-        assets = []
         for remote_url in remote_urls:
             asset = await _download_image(remote_url, str(uuid.uuid4()), batch_id)
             assets.append(asset)
@@ -5909,11 +6109,33 @@ async def create_research_figure_job(request: ResearchFigureJobRequest):
     report_hash = _research_report_hash(request.report, source_urls)
     with sqlite3.connect(SESSION_DB_PATH) as connection:
         connection.row_factory = sqlite3.Row
-        existing = connection.execute("SELECT id FROM research_figure_jobs WHERE session_id IS ? AND report_hash = ? AND policy = ? ORDER BY created_at DESC LIMIT 1", (request.session_id, report_hash, request.policy)).fetchone()
+        existing = connection.execute("SELECT id, status FROM research_figure_jobs WHERE session_id IS ? AND report_hash = ? AND policy = ? ORDER BY created_at DESC LIMIT 1", (request.session_id, report_hash, request.policy)).fetchone()
     if existing:
-        payload = _research_job_payload(existing["id"])
-        if payload and payload["status"] in {"queued", "generating", "succeeded"}:
-            return payload
+        existing_id = existing["id"]
+        existing_status = existing["status"]
+        # Why: 复用而非新插——避免 (session_id, report_hash, policy) UNIQUE 约束失败。
+        #   succeeded 直接返回；failed/cancelled 重置为 queued 复用同一行。
+        if existing_status == "succeeded":
+            return _research_job_payload(existing_id)
+        if existing_status in {"queued", "generating"}:
+            return _research_job_payload(existing_id)
+        # failed / cancelled：复用同一 job_id，重置状态并清空旧图。
+        with sqlite3.connect(SESSION_DB_PATH) as connection:
+            connection.execute(
+                "DELETE FROM research_figures WHERE job_id = ?",
+                (existing_id,),
+            )
+            connection.execute(
+                "UPDATE research_figure_jobs SET status = ?, error_message = NULL, completed_at = NULL, created_at = ? WHERE id = ?",
+                ("queued", time.time(), existing_id),
+            )
+            connection.commit()
+        if len(RESEARCH_FIGURE_TASKS) >= RESEARCH_FIGURE_MAX_IN_FLIGHT:
+            with sqlite3.connect(SESSION_DB_PATH) as connection:
+                connection.execute("UPDATE research_figure_jobs SET status = ?, error_message = ?, completed_at = ? WHERE id = ?", ("failed", "当前研究配图任务较多，请稍后重试", time.time(), existing_id)); connection.commit()
+            raise HTTPException(status_code=429, detail="当前研究配图任务较多，请稍后重试")
+        RESEARCH_FIGURE_TASKS[existing_id] = asyncio.create_task(_run_research_figure_job(existing_id, request.report, request.policy))
+        return _research_job_payload(existing_id)
     job_id = str(uuid.uuid4())
     with sqlite3.connect(SESSION_DB_PATH) as connection:
         connection.execute("INSERT INTO research_figure_jobs (id, session_id, report_version, report_hash, report_text, policy, max_images, context_mode, target_ordinal, source_urls_json, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (job_id, request.session_id, request.report_version, report_hash, request.report, request.policy, request.max_images, request.context_mode, None, json.dumps(source_urls, ensure_ascii=False), "queued", time.time())); connection.commit()
@@ -6588,7 +6810,7 @@ async def update_model_settings(settings: ModelSettings):
     global DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, ACTIVE_MODEL_ID
     model_settings_store.save(settings)
     DEEPSEEK_API_KEY = settings.api_key or os.getenv("DEEPSEEK_API_KEY", "not-configured")
-    DEEPSEEK_BASE_URL = settings.base_url
+    DEEPSEEK_BASE_URL = _openai_compat_view(settings)
     ACTIVE_MODEL_ID = settings.model_id
     return model_settings_store.public()
 
@@ -7097,17 +7319,25 @@ def generate_thesis_outline_events(request: ThesisOutlineRequest, settings: Mode
             stream=True,
             max_tokens=min(settings.max_tokens, 8_000),
             temperature=0.35,
-            extra_body={"enable_thinking": False},
+            # Why: enable_thinking 是千问协议字段；MiniMax OpenAI 兼容层不识别，禁传。
+            extra_body={"enable_thinking": False} if request.provider == "qwen" else None,
         )
         buffer = ""
         semantic_events = 0
         completion_emitted = False
+        # Why: MiniMax interleaved thinking 以 <think> 内联 content 分片，
+        # 必须流式剥离——NDJSON 行解析与前端打字光标都不能吃进思考文本。
+        think_stripper = ThinkTagStreamer() if request.provider == "minimax" else None
         for chunk in stream:
             if not chunk.choices:
                 continue
             token = str(getattr(chunk.choices[0].delta, "content", None) or "")
             if not token:
                 continue
+            if think_stripper is not None:
+                token = think_stripper.feed(token)
+                if not token:
+                    continue
             # 原始模型 token 也实时下发，前端可显示真实生成光标；结构节点则按完整 NDJSON 行落库。
             yield event("thesis_outline_token", {"type": "token", "token": token})
             buffer += token.replace("```json", "").replace("```", "")
@@ -7152,13 +7382,33 @@ def generate_thesis_outline_events(request: ThesisOutlineRequest, settings: Mode
         })
 
 
+def _thesis_model_settings(provider: str) -> ModelSettings:
+    """写作链路统一取 profile：minimax 时 base_url 换成 OpenAI 兼容端点。
+
+    Why: minimax profile 的 base_url 是 Anthropic 端点（对话主链路用），
+    大纲/正文走 OpenAI chat/completions 协议，必须换 /v1 端点。
+    """
+    settings = model_settings_store.load(provider)
+    if provider == "minimax":
+        from minimax.openai_compat import openai_compat_credentials
+
+        _, compat_base_url = openai_compat_credentials(settings)
+        settings = settings.model_copy(update={"base_url": compat_base_url})
+    return settings
+
+
+def _thesis_missing_key_message(provider: str) -> str:
+    label = "MiniMax" if provider == "minimax" else "千问"
+    return f"请先在运行设置中配置 {label} API Key"
+
+
 @app.post("/api/writing/thesis/outline/stream")
 async def stream_thesis_outline(request: ThesisOutlineRequest):
-    qwen_settings = model_settings_store.load("qwen")
-    if not qwen_settings.api_key:
-        raise HTTPException(status_code=422, detail="请先在运行设置中配置千问 API Key")
+    thesis_settings = _thesis_model_settings(request.provider)
+    if not thesis_settings.api_key:
+        raise HTTPException(status_code=422, detail=_thesis_missing_key_message(request.provider))
     return StreamingResponse(
-        generate_thesis_outline_events(request, qwen_settings),
+        generate_thesis_outline_events(request, thesis_settings),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -7409,13 +7659,72 @@ async def generate_thesis_deep_reference_events(request: ThesisReferenceRequest,
                 })
 
 
+def generate_thesis_reference_events_via_minimax(request: ThesisReferenceRequest, settings: ModelSettings):
+    """MiniMax 服务端 web_search 版参考资料检索（与千问 Deep Research 链路事件同构）。
+
+    Why: DashScope Deep Research 是千问专属协议（X-DashScope-SSE + qwen-deep-research），
+    minimax 无对应端点；改走 Anthropic 协议 tools=web_search_20250305 服务端搜索，
+    每章一次定向检索，事件序列与前端消费契约完全对齐。
+    """
+    from minimax import WEB_SEARCH_TOOL
+    from minimax.chat import extract_web_docs
+    from minimax.client import MiniMaxClient
+
+    def event(name: str, data: dict) -> str:
+        return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    client = MiniMaxClient(settings.api_key)
+    seen_urls: set[str] = set()
+    for chapter in request.chapters:
+        yield event("thesis_chapter_search_started", {"type": "chapter_search_started", "chapter_id": chapter.id})
+        query = f"论文《{request.instruction}》章节「{chapter.title}」的权威参考资料" + (f"：{chapter.summary[:200]}" if chapter.summary else "")
+        chapter_docs: list[dict] = []
+        try:
+            for evt in client.stream_message(
+                model=settings.model_id,
+                messages=[{"role": "user", "content": f"检索以下主题的权威来源（论文、政府、高校及研究机构优先），无需回答内容本身：\n{query}"}],
+                max_tokens=1_024,
+                tools=[WEB_SEARCH_TOOL],
+            ):
+                if evt.get("type") != "web_search_tool_result":
+                    continue
+                for doc in extract_web_docs(evt.get("block") or {}):
+                    url = str(doc.get("url") or "")
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        chapter_docs.append(doc)
+        except Exception as exc:
+            logger.exception("[writing] MiniMax web_search 论文资料检索失败")
+            yield event("thesis_chapter_search_failed", {
+                "type": "chapter_search_failed", "chapter_id": chapter.id,
+                "message": str(exc) or "MiniMax 资料检索失败",
+            })
+            continue
+        sequence = 0
+        for doc in chapter_docs[:6]:
+            normalized = normalize_search_results(chapter.id, [doc], limit=1)
+            if not normalized:
+                continue
+            sequence += 1
+            normalized[0]["id"] = f"{chapter.id}-ref-{sequence}"
+            yield event("thesis_reference_found", {"type": "reference_found", **normalized[0]})
+        yield event("thesis_chapter_search_completed", {
+            "type": "chapter_search_completed", "chapter_id": chapter.id, "count": sequence,
+        })
+
+
 @app.post("/api/writing/thesis/references/stream")
 async def stream_thesis_references(request: ThesisReferenceRequest):
-    qwen_settings = model_settings_store.load("qwen")
-    if not qwen_settings.api_key:
-        raise HTTPException(status_code=422, detail="请先在运行设置中配置千问 API Key")
+    thesis_settings = _thesis_model_settings(request.provider)
+    if not thesis_settings.api_key:
+        raise HTTPException(status_code=422, detail=_thesis_missing_key_message(request.provider))
+    generator = (
+        generate_thesis_reference_events_via_minimax(request, thesis_settings)
+        if request.provider == "minimax"
+        else generate_thesis_deep_reference_events(request, thesis_settings)
+    )
     return StreamingResponse(
-        generate_thesis_deep_reference_events(request, qwen_settings),
+        generator,
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
@@ -7444,17 +7753,23 @@ def generate_thesis_body_events(request: ThesisBodyRequest, settings: ModelSetti
                 stream=True,
                 temperature=0.45,
                 max_tokens=min(settings.max_tokens, max(1_500, min(8_000, chapter.target_words * 2 or 3_000))),
-                extra_body={"enable_thinking": False},
+                extra_body={"enable_thinking": False} if request.provider == "qwen" else None,
             )
             chapter_text = ""
             emitted_reference_ids: set[str] = set()
             allowed_reference_ids = {reference.id for reference in chapter.references}
+            # Why: 同大纲链路——MiniMax <think> 内联剥离，思考文本不得进入正文。
+            think_stripper = ThinkTagStreamer() if request.provider == "minimax" else None
             for chunk in stream:
                 if not chunk.choices:
                     continue
                 token = str(getattr(chunk.choices[0].delta, "content", None) or "")
                 if not token:
                     continue
+                if think_stripper is not None:
+                    token = think_stripper.feed(token)
+                    if not token:
+                        continue
                 chapter_text += token
                 yield event("thesis_body_token", {
                     "type": "body_token", "chapter_id": chapter.id, "token": token,
@@ -7475,9 +7790,11 @@ def generate_thesis_body_events(request: ThesisBodyRequest, settings: ModelSetti
                     messages=[{"role": "user", "content": build_citation_verification_prompt(chapter, chapter_text, emitted_reference_ids)}],
                     temperature=0,
                     max_tokens=1_500,
-                    extra_body={"enable_thinking": False},
+                    extra_body={"enable_thinking": False} if request.provider == "qwen" else None,
                 )
                 verification_text = str(verification.choices[0].message.content or "").strip().replace("```json", "").replace("```", "")
+                if request.provider == "minimax":
+                    verification_text = minimax_strip_think_tags(verification_text)
                 try:
                     verification_payload = json.loads(verification_text)
                 except json.JSONDecodeError:
@@ -7507,11 +7824,11 @@ def generate_thesis_body_events(request: ThesisBodyRequest, settings: ModelSetti
 
 @app.post("/api/writing/thesis/body/stream")
 async def stream_thesis_body(request: ThesisBodyRequest):
-    qwen_settings = model_settings_store.load("qwen")
-    if not qwen_settings.api_key:
-        raise HTTPException(status_code=422, detail="请先在运行设置中配置千问 API Key")
+    thesis_settings = _thesis_model_settings(request.provider)
+    if not thesis_settings.api_key:
+        raise HTTPException(status_code=422, detail=_thesis_missing_key_message(request.provider))
     return StreamingResponse(
-        generate_thesis_body_events(request, qwen_settings),
+        generate_thesis_body_events(request, thesis_settings),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
     )
@@ -7526,14 +7843,14 @@ async def chat_stream(request: ChatRequest):
         # Why: 附件门禁走能力矩阵——GLM 在 provider 层有 vision_model_id 自动切换兜底；
         # 其余供应商要求当前模型本身支持视觉（如千问 Qwen-VL Max），否则明确拒绝。
         if active_settings.provider != "glm" and not capabilities_for_model(active_settings.model_id).supports_vision:
-            raise HTTPException(status_code=422, detail="当前模型不支持多模态附件，请切换到视觉模型（GLM-5V Turbo / 千问 Qwen-VL Max）")
+            raise HTTPException(status_code=422, detail="当前模型不支持多模态附件，请切换到视觉模型（GLM-5V Turbo / 千问 Qwen-VL Max / MiniMax M3）")
         if request.mode not in {"standard", "deep"}:
             raise HTTPException(status_code=422, detail="附件目前仅支持标准对话和深度思考模式")
         try:
             validate_attachment_mix(request.attachments)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if active_settings.provider in {"glm", "qwen"} and request.mode in {"standard", "deep", "web", "research"}:
+    if active_settings.provider in {"glm", "qwen", "minimax"} and request.mode in {"standard", "deep", "web", "research"}:
         async def direct_stream_with_mcp():
             runtime = request.runtime_settings or RuntimeSettings()
             _base_mode, wants_web, _use_deep = resolve_runtime_mode(request.mode, runtime)
@@ -7551,8 +7868,11 @@ async def chat_stream(request: ChatRequest):
                 tracker = TokenUsageConversation(session_id=request.session_id, mode=request.mode)
             tracker_token = activate_tracker(tracker)
             mcp_system_prompt = None
+            # Why: MiniMax M3 走 Anthropic 原生 tool_use + Interleaved Thinking 循环
+            # （主模型自主决策调工具），跳过"决策模型预检轮 + 结果注入 system"模式。
+            use_native_tool_loop = active_settings.provider == "minimax" and runtime.mcp_mode != "off"
             print(f"[DEBUG] direct_stream_with_mcp: mcp_mode={runtime.mcp_mode}, provider={active_settings.provider}, mode={request.mode}, wants_web={wants_web}, deep={_use_deep}")
-            if runtime.mcp_mode != "off":
+            if runtime.mcp_mode != "off" and not use_native_tool_loop:
                 # 双保险：等待MCP进程就绪，防止lifespan时序问题
                 for _ in range(5):
                     if mcp_pool.all_tool_specs():
@@ -7578,7 +7898,47 @@ async def chat_stream(request: ChatRequest):
                     logger.exception("[mcp] direct chat 工具预检轮失败，降级为无工具继续。")
                     yield f"event: mcp\ndata: {json.dumps({'mcp_phase': 'error'}, ensure_ascii=False)}\n\n"
             try:
-                for chunk in generate_direct_chat_events(request, active_settings, mcp_system_prompt, token_usage_tracker=tracker):
+                # Why: MiniMax 走 Anthropic Messages 协议独立生成器（事件契约与 GLM/千问直连对齐），
+                # 深度思考/联网由薄分发注入；GLM/千问维持 OpenAI 兼容直连。
+                if use_native_tool_loop:
+                    allowed_tools = session_mcp_allowed(runtime)
+                    ready_specs = []
+                    for _ in range(5):
+                        ready_specs = mcp_pool.all_tool_specs(allowed_tools)
+                        if ready_specs:
+                            break
+                        await asyncio.sleep(1)
+
+                    async def _mcp_dispatch(tool_name: str, tool_args: dict) -> str:
+                        return await mcp_pool.dispatch(tool_name, tool_args, allowed_tools)
+
+                    if ready_specs:
+                        async for chunk in generate_minimax_agent_events(
+                            request,
+                            active_settings,
+                            wants_web=wants_web,
+                            use_deep=_use_deep,
+                            memory_engine=memory_engine,
+                            openai_tool_specs=ready_specs,
+                            dispatch=_mcp_dispatch,
+                        ):
+                            yield chunk
+                        return
+                    # 无就绪工具：降级为单轮直连（下方 stream_gen 路径）
+                    logger.info("[minimax] 无就绪 MCP 工具，降级单轮直连。")
+                if active_settings.provider == "minimax":
+                    stream_gen = generate_minimax_chat_events(
+                        request,
+                        active_settings,
+                        mcp_system_prompt,
+                        wants_web=wants_web,
+                        use_deep=_use_deep,
+                        memory_engine=memory_engine,
+                        token_usage_tracker=tracker,
+                    )
+                else:
+                    stream_gen = generate_direct_chat_events(request, active_settings, mcp_system_prompt, token_usage_tracker=tracker)
+                for chunk in stream_gen:
                     yield chunk
             finally:
                 global_hook_registry.trigger(
@@ -8238,6 +8598,41 @@ async def deep_research(request: ChatRequest):
                 feedback_answer,
                 research_options,
             ), "qwen-deep-research"),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+
+    # Why: MiniMax 原生调研走 Anthropic Messages 协议（web_search server tool +
+    #   Interleaved Thinking），多轮检索在服务端单请求内完成，客户端零轮转。
+    #   API Key 取自激活的模型设置（用户在前端设置页配置 minimax provider）。
+    if research_engine == "minimax":
+        active_settings = model_settings_store.load()
+        if active_settings.provider != "minimax":
+            raise HTTPException(
+                status_code=400,
+                detail="MiniMax 原生调研需要先在设置中激活 MiniMax 模型",
+            )
+        if not active_settings.api_key:
+            raise HTTPException(status_code=400, detail="未配置 MiniMax API Key，请在设置中配置")
+
+        async def _minimax_research_stream() -> AsyncGenerator[str, None]:
+            # 同步生成器包装：Anthropic SSE 阻塞读在默认线程池外直接迭代
+            # （与 /chat 直连 minimax 分支同款模式，避免引入线程池跳变开销）。
+            for chunk in generate_minimax_research_events(
+                request.message,
+                request.session_id,
+                active_settings,
+                memory_engine,
+                research_options,
+            ):
+                yield chunk
+
+        return StreamingResponse(
+            tracked_research_stream(_minimax_research_stream(), f"minimax-{active_settings.model_id}"),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",

@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from main import (
@@ -335,6 +336,49 @@ class PlanModelProviderTests(unittest.TestCase):
                 self.assertEqual(result, '{"tasks": []}')
                 self.assertEqual(chat_cls.call_args.kwargs["model"], model_id)
                 self.assertEqual(chat_cls.call_args.kwargs["base_url"], base_url)
+
+    def test_plan_fast_llm_minimax_uses_compat_endpoint_and_default_fast_model(self):
+        """Why: minimax settings.base_url 是 Anthropic 端点，fast 分支必须换 OpenAI
+        兼容端点（否则 ChatOpenAI 404），且 fast 模型默认走 highspeed 变体。"""
+        fake_settings = SimpleNamespace(
+            provider="minimax",
+            model_id="MiniMax-M3",
+            api_key="mm-key",
+            base_url="https://api.minimaxi.com/anthropic",
+        )
+        with patch("main.model_settings_store") as store, patch(
+            "main.ChatOpenAI"
+        ) as chat_cls, patch.dict("os.environ", {}, clear=False):
+            import os
+            store.load.return_value = fake_settings
+            os.environ.pop("PLAN_FAST_MODEL_ID", None)
+            chat_cls.return_value.invoke.return_value.content = '{"tasks": []}'
+
+            plan_llm_invoke("system", "user", fast=True)
+
+            kwargs = chat_cls.call_args.kwargs
+            self.assertEqual(kwargs["model"], "MiniMax-M2.7-highspeed")
+            self.assertEqual(kwargs["base_url"], "https://api.minimaxi.com/v1")
+            self.assertEqual(kwargs["api_key"], "mm-key")
+
+    def test_plan_llm_strips_minimax_think_prefix_from_invoke_result(self):
+        """Why: MiniMax highspeed 变体把思考混入 content；不剥离则 planner 的
+        JSON 解析被 <think> 前缀污染。"""
+        fake_settings = SimpleNamespace(
+            provider="minimax",
+            model_id="MiniMax-M2.7-highspeed",
+            api_key="mm-key",
+            base_url="https://api.minimaxi.com/v1",
+        )
+        with patch("main.model_settings_store") as store, patch("main.ChatOpenAI") as chat_cls:
+            store.load.return_value = fake_settings
+            chat_cls.return_value.invoke.return_value.content = (
+                "<think>先拆解任务…包含示例 {\"bad\": 1}</think>{\"tasks\": []}"
+            )
+
+            result = plan_llm_invoke("system", "user")
+
+            self.assertEqual(result, '{"tasks": []}')
 
 if __name__ == "__main__":
     unittest.main()
