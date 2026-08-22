@@ -1,0 +1,194 @@
+{
+  "schemaVersion": 1,
+  "presentationId": "presentation-001",
+  "revision": 3,
+  "title": "AI PPT 契约样例",
+  "aspectRatio": "16:9",
+  "canvas": {
+    "width": 13.333,
+    "height": 7.5
+  },
+  "theme": {
+    "name": "Aurora",
+    "colors": {
+      "background": "#0B1020",
+      "surface": "#151C33",
+      "text": "#F7F8FC",
+      "mutedText": "#AAB2C8",
+      "accent1": "#7657FF",
+      "accent2": "#39C6B4"
+    },
+    "fonts": {
+      "heading": "Microsoft YaHei",
+      "body": "Microsoft YaHei",
+      "mono": "Cascadia Mono"
+    }
+  },
+  "slides": [
+    {
+      "id": "slide-001",
+      "order": 0,
+      "layoutId": "layout-title-content",
+      "background": {
+        "type": "SOLID",
+        "color": "#0B1020"
+      },
+      "elements": [
+        {
+          "type": "TEXT",
+          "id": "element-title",
+          "x": 0.06,
+          "y": 0.06,
+          "width": 0.52,
+          "height": 0.12,
+          "rotation": 0,
+          "zIndex": 2,
+          "opacity": 1,
+          "isLocked": false,
+          "isHidden": false,
+          "text": "Agent 构建演示文稿",
+          "style": {
+            "fontFamily": "Microsoft YaHei",
+            "fontSize": 32,
+            "color": "#F7F8FC",
+            "bold": true,
+            "italic": false,
+            "underline": false,
+            "align": "LEFT",
+            "verticalAlign": "MIDDLE"
+          }
+        },
+        {
+          "type": "IMAGE",
+          "id": "element-web-image",
+          "x": 0.62,
+          "y": 0.08,
+          "width": 0.3,
+          "height": 0.32,
+          "rotation": 0,
+          "zIndex": 1,
+          "opacity": 1,
+          "isLocked": false,
+          "isHidden": false,
+          "assetId": "asset-web-001",
+          "alt": "网页资料图片",
+          "fit": "COVER"
+        },
+        {
+          "type": "SHAPE",
+          "id": "element-card",
+          "x": 0.06,
+          "y": 0.24,
+          "width": 0.5,
+          "height": 0.22,
+          "rotation": 0,
+          "zIndex": 0,
+          "opacity": 0.96,
+          "isLocked": false,
+          "isHidden": false,
+          "shapeType": "ROUND_RECT",
+          "fill": "#151C33",
+          "stroke": "#7657FF",
+          "strokeWidth": 1.5
+        },
+        {
+          "type": "TABLE",
+          "id": "element-table",
+          "x": 0.06,
+          "y": 0.52,
+          "width": 0.4,
+          "height": 0.26,
+          "rotation": 0,
+          "zIndex": 2,
+          "opacity": 1,
+          "isLocked": false,
+          "isHidden": false,
+          "rows": [
+            [
+              { "text": "素材", "fill": "#7657FF" },
+              { "text": "数量", "fill": "#7657FF" }
+            ],
+            [
+              { "text": "网页图片" },
+              { "text": "3" }
+            ]
+          ],
+          "borderColor": "#D8DCE8"
+        },
+        {
+          "type": "CHART",
+          "id": "element-chart",
+          "x": 0.5,
+          "y": 0.5,
+          "width": 0.42,
+          "height": 0.28,
+          "rotation": 0,
+          "zIndex": 2,
+          "opacity": 1,
+          "isLocked": false,
+          "isHidden": false,
+          "chartType": "BAR",
+          "categories": ["网页", "AI"],
+          "series": [
+            { "name": "图片", "values": [3, 3], "color": "#39C6B4" }
+          ],
+          "showLegend": true
+        },
+        {
+          "type": "MEDIA",
+          "id": "element-media",
+          "x": 0.62,
+          "y": 0.1,
+          "width": 0.28,
+          "height": 0.22,
+          "rotation": 0,
+          "zIndex": 3,
+          "opacity": 1,
+          "isLocked": false,
+          "isHidden": true,
+          "mediaType": "ONLINE",
+          "url": "https://www.youtube.com/embed/dQw4w9WgXcQ",
+          "posterAssetId": "asset-poster-001"
+        },
+        {
+          "type": "GROUP",
+          "id": "element-group",
+          "x": 0.04,
+          "y": 0.22,
+          "width": 0.54,
+          "height": 0.58,
+          "rotation": 0,
+          "zIndex": 4,
+          "opacity": 1,
+          "isLocked": false,
+          "isHidden": false,
+          "childElementIds": ["element-card", "element-table"]
+        }
+      ],
+      "animations": [
+        {
+          "id": "animation-001",
+          "targetElementId": "element-title",
+          "category": "ENTRANCE",
+          "effect": "FADE",
+          "trigger": "ON_CLICK",
+          "order": 0,
+          "durationMs": 600,
+          "delayMs": 0
+        }
+      ],
+      "transition": {
+        "effect": "FADE",
+        "durationMs": 600,
+        "advanceOnClick": true
+      },
+      "notes": "介绍 AI 工作流和素材来源。"
+    }
+  ],
+  "metadata": {
+    "templateId": "template-aurora",
+    "language": "zh-CN",
+    "createdAt": "2026-08-20T00:00:00Z",
+    "updatedAt": "2026-08-20T00:05:00Z"
+  }
+}

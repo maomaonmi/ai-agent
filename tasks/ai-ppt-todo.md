@@ -10,9 +10,9 @@
 
 **Acceptance criteria:**
 
-- [ ] Windows 默认路径和 `LIBREOFFICE_PATH` 均可解析。
-- [ ] 并发转换使用独立用户配置目录。
-- [ ] 未安装时返回结构化 `LIBREOFFICE_NOT_AVAILABLE`。
+- [x] Windows 默认路径和 `LIBREOFFICE_PATH` 均可解析。
+- [x] 并发转换使用独立用户配置目录。
+- [x] 未安装时返回结构化 `LIBREOFFICE_NOT_AVAILABLE`。
 
 **Verification:** `python -m pytest -q tests/test_ppt_runtime.py`
 
@@ -26,8 +26,8 @@
 
 **Acceptance criteria:**
 
-- [ ] 样例覆盖全部约定元素。
-- [ ] 解包关系和 XML 校验通过。
+- [x] 样例覆盖全部约定元素。
+- [x] 解包关系和 XML 校验通过。
 - [ ] LibreOffice 转 PDF 成功，真实 PowerPoint 打开无修复提示。
 
 **Verification:** `npm run build`；`python -m pytest -q tests/test_ppt_ooxml_spike.py`；人工 PowerPoint 验收记录
@@ -38,7 +38,7 @@
 
 ## Checkpoint A：高风险能力
 
-- [ ] LibreOffice 探测与转换稳定。
+- [x] LibreOffice 探测与转换稳定。
 - [ ] 全能力样例不触发 PowerPoint 修复。
 - [ ] 动画不通过时暂停后续高级编辑，先提交兼容性结论。
 
@@ -50,9 +50,9 @@
 
 **Acceptance criteria:**
 
-- [ ] 全部元素几何和样式字段有边界校验。
-- [ ] 未知字段被拒绝，旧文档可通过 schemaVersion 路由迁移。
-- [ ] TypeScript 与 Pydantic Golden JSON 一致。
+- [x] 全部元素几何和样式字段有边界校验。
+- [x] 未知字段被拒绝，旧文档可通过 schemaVersion 路由迁移。
+- [x] TypeScript 与 Pydantic Golden JSON 一致。
 
 **Verification:** `python -m pytest -q tests/test_ppt_models.py`; `npm run lint`
 
@@ -66,9 +66,9 @@
 
 **Acceptance criteria:**
 
-- [ ] 新增/删除/排序页与全部元素操作可归约。
-- [ ] 重复 operationId 不重复应用。
-- [ ] 过期 baseRevision 返回冲突而不覆盖数据。
+- [x] 新增/删除/排序页与全部元素操作可归约。
+- [x] 重复 operationId 不重复应用。
+- [x] 过期 baseRevision 返回冲突而不覆盖数据。
 
 **Verification:** `python -m pytest -q tests/test_ppt_operations.py`
 
@@ -82,9 +82,9 @@
 
 **Acceptance criteria:**
 
-- [ ] 初始化可重复执行。
-- [ ] Run 事件 `(runId, sequence)` 唯一且 append-only。
-- [ ] 模板与资产 owner 过滤生效。
+- [x] 初始化可重复执行。
+- [x] Run 事件 `(runId, sequence)` 唯一且 append-only。
+- [x] 模板与资产 owner 过滤生效。
 
 **Verification:** `python -m pytest -q tests/test_ppt_repository.py`
 
@@ -94,8 +94,8 @@
 
 ## Checkpoint B：数据基础
 
-- [ ] 模型、操作和 Repository 测试通过。
-- [ ] 不修改现有会话表语义。
+- [x] 模型、操作和 Repository 测试通过。
+- [x] 不修改现有会话表语义。
 - [ ] `python -m pytest -q` 无回归。
 
 ## Phase 2：模板市场纵向切片
@@ -106,9 +106,9 @@
 
 **Acceptance criteria:**
 
-- [ ] 列表支持分页、场景、来源和关键字过滤。
-- [ ] 私有模板越权访问返回 404。
-- [ ] 删除幂等且不暴露磁盘路径。
+- [x] 列表支持分页、场景、来源和关键字过滤。
+- [x] 私有模板越权访问返回 404。
+- [x] 删除幂等且不暴露磁盘路径。
 
 **Verification:** `python -m pytest -q tests/test_ppt_template_api.py`
 
@@ -122,9 +122,9 @@
 
 **Acceptance criteria:**
 
-- [ ] API 响应和统一错误被类型化。
-- [ ] 列表支持取消旧请求和分页追加。
-- [ ] 上传状态可在页面重挂载后恢复查询。
+- [x] API 响应和统一错误被类型化。
+- [x] 列表支持取消旧请求和分页追加。
+- [x] 上传状态可在页面重挂载后恢复查询。
 
 **Verification:** `npm run lint`; `npm run build`
 
@@ -138,9 +138,10 @@
 
 **Acceptance criteria:**
 
-- [ ] 两个入口都导航到 `/ppt`。
+- [x] “更多 → PPT 创作”导航到 `/ppt` 模板市场。
+- [x] 展开/折叠侧边栏的 AI PPT 导航到带唯一 session 参数的新工作台。
 - [ ] 不改变聊天会话模式和当前消息。
-- [ ] 刷新 `/ppt` 可直接打开。
+- [x] 刷新 `/ppt` 可直接打开。
 
 **Verification:** `python -m pytest -q tests/test_ppt_entry_contract.py`; `npm run build`
 
@@ -154,9 +155,9 @@
 
 **Acceptance criteria:**
 
-- [ ] 卡片悬停显示预览和使用按钮。
-- [ ] 私有模板有明确标识和管理操作。
-- [ ] 键盘焦点可触达卡片操作，移动端不依赖 hover。
+- [x] 卡片悬停显示预览和使用按钮。
+- [x] 私有模板上传状态有明确的阶段和 READY 后立即使用操作。
+- [x] 键盘焦点可触达卡片操作，移动端不依赖 hover。
 
 **Verification:** `npm run lint`; `npm run build`; 浏览器手工检查 1280/1440/1920px
 
@@ -170,8 +171,8 @@
 
 **Acceptance criteria:**
 
-- [ ] 所有预览页可访问，第一页优先加载。
-- [ ] 弹窗焦点被正确约束，Escape 可关闭。
+- [x] 所有预览页可访问，第一页优先加载。
+- [x] 弹窗焦点被正确约束，Escape 可关闭。
 - [ ] 缺字体、媒体和动画提示可见。
 
 **Verification:** `npm run build`; 浏览器键盘与全屏检查
@@ -249,7 +250,9 @@
 
 **Acceptance criteria:**
 
-- [ ] 使用模板可创建 Presentation 并打开工作台。
+- [x] 使用模板可打开工作台；Next 15 动态参数使用异步 `params`，避免运行时错误。
+- [x] 工作台首屏包含 AI 工作流、缩略图导航、画布和演讲者备注区域。
+- [x] 侧边栏新建入口显示正常 AI 对话窗口，发送消息后才启动工作流；链路总卡、阶段卡和左右分栏均可伸缩。
 - [ ] 刷新后恢复当前修订。
 - [ ] 不存在或无权文稿显示稳定错误页。
 
@@ -633,4 +636,3 @@
 - [ ] 真实 PPTX 不是整页截图，所有承诺元素保持结构化可编辑。
 - [ ] 模板与素材隐私、安全和来源审计通过。
 - [ ] 可以进入人工产品验收。
-

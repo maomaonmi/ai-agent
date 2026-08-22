@@ -1,29 +1,28 @@
-# AI 生图广场 Design QA
+# AI PPT 工作台视觉 QA
 
-- Source visual truth: `C:/Users/xys/AppData/Local/Temp/codex-clipboard-f4140203-6511-4873-9776-c98c00ec7efa.png`, `C:/Users/xys/AppData/Local/Temp/codex-clipboard-c30f234e-1b66-4b7b-bd44-cd1ddd2abc7e.png`
-- Intended viewport/state: standalone AI image ecosystem plaza with light/dark appearance, upload flow, carousel and gallery
-- Implementation: `frontend/ai-agent/src/features/picture/ImagePlazaWorkspace.tsx`
-- Static checks: `npx tsc --noEmit`, scoped ESLint, and `python -m py_compile main.py` passed; image director tests passed (6/6)
-- Browser interactions tested: unavailable in this environment
-- Console errors checked: unavailable in this environment
+source visual truth: `C:/Users/xys/AppData/Local/Temp/codex-clipboard-62ca529d-fc5c-4a8d-9230-4eda1f7bd8ed.png`（对话 + 编辑器参考）与 `C:/Users/xys/AppData/Local/Temp/codex-clipboard-e3e60254-c91f-4c63-aaff-7e0a16a256a8.png`（工作流参考）。
 
-## Design decisions verified statically
+implementation screenshot: `frontend/ai-agent/design-qa-chat-initial.png`（首次进入，应用内浏览器，1280×720，device scale 1）；交互后补充证据为 `frontend/ai-agent/design-qa-chat-final.png`。
 
-- Dark, high-contrast studio shell combines the reference gallery's immersion with the reference generator's control density.
-- Left panel owns prompt, model routing, ratio, output count, resolution and CTA; right panel is image-first and uses a responsive masonry gallery.
-- Lightbox includes download, prompt reuse (做同款), and a clearly marked next-stage reference-image action.
-- The UI never fabricates image assets: empty and history states render only persisted API results.
-- Light/dark surfaces now use the existing `dark` document class, so SettingsDialog changes apply without a second theme store.
-- Layout is mobile-first: single-column at narrow widths, two columns from `lg`, and a responsive masonry gallery from `sm`/`2xl`.
-- The desktop shell no longer uses a fixed `max-width`; it fills the available viewport after the conversation sidebar, removing the large side gutters visible at 80% zoom.
-- “更多 → AI 生图” now opens a full-viewport plaza; the previous generator remains available from “开始创作/进入工作台”.
-- Entry points are intentionally split: the sidebar AI 生图 button opens the generator workspace, while the composer’s “更多 → AI 生图” opens the ecosystem plaza.
-- The plaza has a header ecosystem nav, a prompt-led creation hero, a five-card auto-advancing carousel (three cards on smaller screens, five on wide screens) inspired by the third reference, and a searchable/category-filtered masonry gallery.
-- “上传图片” accepts PNG/JPG/WebP, validates size and file signatures on the server, and persists assets in SQLite plus `data/image-studio/uploads` so “我的发布” survives reloads.
-- Every carousel/gallery card opens a responsive detail dialog with image preview, tags, copyable prompt, English prompt, negative prompt, and “立即试用”; uploaded assets invoke the configured GLM-5V/Qwen-VL analyzer and cache the result, with an explicit editable fallback when no vision key is configured.
+state: `/ppt/workspace/new?source=sidebar&session=chat-layout-2`；空白新工作台，发送“做一份关于团队协作的 8 页 PPT”后，工作流运行中。
 
-## Blocking gap
+comparison evidence:
 
-The configured tool context does not expose an in-app browser/DevTools controller, so a runtime screenshot, responsive viewport pass, and console inspection could not be completed. Run the app locally and capture the image-studio route before sign-off.
+- Full view：首次进入左侧显示正常 AI 对话、可折叠工作流卡片和输入框；右侧为缩略图、工具栏、16:9 画布和备注区，保持参考图的左右层级。
+- Focused regions：左侧链路卡片可展开/收起每个阶段；右侧新增幻灯片、插入图表和文本编辑控件已在真实浏览器交互中验证。
+- Typography：沿用项目 system/PingFang fallback，标题与阶段标题使用明确的 semibold 层级，小字使用高对比 slate 色。
+- Spacing/layout：对话区、拖拽分隔线、缩略图轨和画布区均使用稳定边界；左栏宽度可在 320–620px 之间拖动。
+- Colors/tokens：使用白色工作区、浅灰画布、violet 主行动色和 emerald 自动保存状态，匹配参考图的安静编辑器语言。
+- Imagery：使用项目内生成的真实 PNG 视觉资产；素材卡保留“网页图片 / AI 生成图片”来源标记。
+- Copy/content：首次进入显示“等待你的指令”，发送后才显示用户/助手消息和运行态，避免进入即自动执行。
 
-final result: blocked
+comparison history:
+
+1. 旧版问题：侧边栏进入后沿用 `aurora-strategy` 种子，视觉上像打开历史模板。修复：`source=sidebar` 使用唯一 session 参数和 blank seed，标题改为“新建 AI PPT”。
+2. 旧版问题：进入页面立即启动工作流。修复：`running` 初始为 false，只有发送输入或点击开始后启动。
+3. 旧版问题：左侧只有固定时间线。修复：改为对话消息 + 总链路折叠卡 + 阶段级折叠，并加入可拖拽宽度分隔线。
+4. 旧版问题：工作台直接引入 PptxGenJS 导致浏览器 `node:fs`/`node:https` 编译错误。修复：导出移至 `/api/ppt/export` Node 路由；新页面控制台已验证零错误、零警告。
+
+primary interactions tested: 侧边栏 AI PPT → 新空白工作台；输入并发送需求；展开/收起 AI 工作流链路与阶段；插入图表；新建幻灯片；模板市场“使用此模板”进入模板工作台；服务端导出接口返回 200 有效 PPTX。
+
+final result: passed
