@@ -40,3 +40,6 @@ def test_sidebar_workspace_is_unique_and_uploads_do_not_stall() -> None:
     assert "环形模板浏览器" in market
     assert "orbitDistance" in market
     assert "onWheel={handleOrbitWheel}" in market
+    assert "Math.sin(orbitRadians)" in market
+    assert "Math.cos(orbitRadians)" in market
+    assert "rotateX(64deg)" in market
