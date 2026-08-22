@@ -82,17 +82,19 @@ function OrbitTemplateCard({
 }) {
   const active = distance === 0;
   const magnitude = Math.abs(distance);
-  const translateX = distance * (active ? 0 : 190 + Math.min(magnitude, 3) * 20);
-  const translateZ = -magnitude * 76;
-  const rotateY = distance * -24;
-  const scale = active ? 1 : Math.max(0.58, 1 - magnitude * 0.1);
-  const opacity = magnitude > 4 ? 0 : Math.max(0.22, 1 - magnitude * 0.2);
+  const translateX = distance * (active ? 0 : 245 + Math.min(magnitude, 3) * 28);
+  const translateY = magnitude * 18;
+  const translateZ = -magnitude * 105;
+  const rotateY = distance * -21;
+  const rotateZ = distance * -2.5;
+  const scale = active ? 1 : Math.max(0.54, 1 - magnitude * 0.11);
+  const opacity = magnitude > 4 ? 0 : Math.max(0.16, 1 - magnitude * 0.21);
 
   return (
     <article
-      className="group absolute left-1/2 top-[53%] w-[min(72vw,360px)] -translate-x-1/2 -translate-y-1/2 transition-[transform,opacity,filter] duration-500 ease-out motion-reduce:transition-none"
+      className="group absolute left-1/2 top-[54%] w-[min(60vw,420px)] -translate-x-1/2 -translate-y-1/2 transition-[transform,opacity,filter] duration-500 ease-out motion-reduce:transition-none"
       style={{
-        transform: `translate(-50%, -50%) translate3d(${translateX}px, 0, ${translateZ}px) rotateY(${rotateY}deg) scale(${scale})`,
+        transform: `translate(-50%, -50%) translate3d(${translateX}px, ${translateY}px, ${translateZ}px) rotateY(${rotateY}deg) rotateZ(${rotateZ}deg) scale(${scale})`,
         opacity,
         zIndex: active ? 30 : 20 - magnitude,
         filter: active ? "none" : `blur(${Math.min(magnitude * 0.45, 2)}px)`,
@@ -100,28 +102,21 @@ function OrbitTemplateCard({
       }}
       aria-hidden={magnitude > 4}
     >
-      <div className={`overflow-hidden rounded-[24px] border bg-white shadow-[0_24px_70px_rgba(15,23,42,0.2)] ${active ? "border-slate-900/20 ring-4 ring-white/70" : "border-white/70"}`}>
+      <div className={`overflow-hidden rounded-[26px] border bg-white shadow-[0_28px_80px_rgba(15,23,42,0.2)] ${active ? "border-white ring-4 ring-white/80" : "border-white/60"}`}>
         <button
           type="button"
           onClick={onActivate}
           aria-label={`查看模板：${template.name}`}
           aria-current={active ? "true" : undefined}
-          className="group relative block aspect-[16/10] w-full overflow-hidden bg-slate-950 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-400"
+          className="group relative block aspect-[0.76] w-full overflow-hidden bg-slate-950 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-400"
         >
-          <Image src={cover} alt={`${template.name} 模板封面`} fill sizes="(max-width: 768px) 72vw, 360px" className="object-cover transition duration-500 group-hover:scale-[1.04]" />
-          <span className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-slate-950/5 to-transparent" />
-          <span className="absolute left-4 top-4 inline-flex items-center gap-1 rounded-full border border-white/20 bg-slate-950/40 px-2.5 py-1 text-[10px] font-semibold text-white backdrop-blur-md">
-            {template.isPrivate ? "私有模板" : "精选模板"}
-          </span>
-          <span className="absolute inset-x-4 bottom-4 text-lg font-semibold tracking-tight text-white">{template.name}</span>
+          <Image src={cover} alt={`${template.name} 模板封面`} fill sizes="(max-width: 768px) 60vw, 420px" className="object-cover transition duration-500 group-hover:scale-[1.04]" />
+          <span className="absolute inset-0 bg-gradient-to-t from-slate-950/40 via-transparent to-white/5 opacity-70 transition group-hover:opacity-100" />
+          <span className="sr-only">{template.isPrivate ? "私有模板" : "精选模板"}，{template.name}</span>
         </button>
-        <div className="flex items-center justify-between gap-3 px-4 py-3.5">
-          <p className="min-w-0 truncate text-xs text-slate-500">{template.description || "智能版式与完整主题"}</p>
-          <span className="shrink-0 text-[11px] font-medium text-slate-400">{template.pageCount || 12} 页</span>
-        </div>
-        <div className={`grid grid-cols-2 gap-2 border-t border-slate-100 px-4 py-3 transition-opacity ${active ? "" : "opacity-0 group-hover:opacity-100"}`}>
-          <button type="button" onClick={onPreview} className="h-9 rounded-full border border-slate-200 text-xs font-semibold text-slate-700 transition hover:border-slate-400 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">预览</button>
-          <button type="button" onClick={onUse} className="h-9 rounded-full bg-violet-600 text-xs font-semibold text-white transition hover:bg-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">使用模板</button>
+        <div className="pointer-events-none absolute inset-x-4 bottom-4 flex translate-y-2 items-center gap-2 opacity-0 transition group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100">
+          <button type="button" onClick={onPreview} className="h-9 flex-1 rounded-full border border-white/60 bg-white/90 text-xs font-semibold text-slate-800 shadow-lg backdrop-blur transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">预览</button>
+          <button type="button" onClick={onUse} className="h-9 flex-1 rounded-full bg-violet-600 text-xs font-semibold text-white shadow-lg transition hover:bg-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">使用模板</button>
         </div>
       </div>
     </article>
@@ -333,7 +328,7 @@ export default function PptTemplateMarket() {
 
           {visibleTemplates.length > 0 ? (
             <div
-              className="relative mt-6 h-[455px] overflow-hidden rounded-[30px] border border-slate-200 bg-[radial-gradient(circle_at_50%_30%,#ffffff_0%,#f5f7fb_54%,#e9edf4_100%)] shadow-[0_24px_70px_rgba(15,23,42,0.08)] [perspective:1600px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+              className="group/rail relative mt-6 h-[520px] overflow-hidden rounded-[30px] border border-white/70 bg-[#fbfcfe] shadow-[0_24px_70px_rgba(15,23,42,0.08)] [background-image:radial-gradient(#dce3ed_1.2px,transparent_1.2px),radial-gradient(#e8edf4_1px,transparent_1px),radial-gradient(circle_at_50%_38%,#ffffff_0%,#f7f9fc_56%,#edf1f7_100%)] [background-position:0_0,16px_18px,0_0] [background-size:28px_28px,44px_44px,100%_100%] [perspective:1800px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
               role="region"
               aria-label="环形模板浏览器"
               tabIndex={0}
@@ -343,8 +338,8 @@ export default function PptTemplateMarket() {
               onPointerCancel={() => { dragStartX.current = null; }}
               onWheel={handleOrbitWheel}
             >
-              <div className="pointer-events-none absolute inset-x-[8%] bottom-[-40%] h-[70%] rounded-[50%] bg-slate-400/20 blur-3xl" aria-hidden="true" />
-              <div className="pointer-events-none absolute inset-x-0 top-8 flex items-center justify-center gap-2 text-xs font-medium tracking-[0.18em] text-slate-400" aria-hidden="true"><span className="h-px w-12 bg-slate-300" />环形浏览 · 滚轮或拖拽切换<span className="h-px w-12 bg-slate-300" /></div>
+              <div className="pointer-events-none absolute inset-x-[8%] bottom-[-40%] h-[70%] rounded-[50%] bg-slate-400/25 blur-3xl" aria-hidden="true" />
+              <div className="pointer-events-none absolute inset-x-[7%] bottom-0 h-28 bg-gradient-to-t from-[#fbfcfe] via-[#fbfcfe]/70 to-transparent" aria-hidden="true" />
               {visibleTemplates.map((template, index) => {
                 const distance = orbitDistance(index, activeOrbitIndex, visibleTemplates.length);
                 return (
@@ -359,11 +354,8 @@ export default function PptTemplateMarket() {
                   />
                 );
               })}
-              <button type="button" onClick={() => moveOrbit(-1)} aria-label="上一个模板" className="absolute left-4 top-1/2 z-40 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/80 bg-white/80 text-slate-700 shadow-lg backdrop-blur transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"><ArrowLeft size={18} /></button>
-              <button type="button" onClick={() => moveOrbit(1)} aria-label="下一个模板" className="absolute right-4 top-1/2 z-40 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/80 bg-white/80 text-slate-700 shadow-lg backdrop-blur transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"><ArrowRight size={18} /></button>
-              <div className="absolute inset-x-0 bottom-5 z-40 flex items-center justify-center gap-1.5" aria-label="模板位置">
-                {visibleTemplates.slice(0, 12).map((template, index) => <button key={template.id} type="button" onClick={() => setActiveOrbitIndex(index)} aria-label={`切换到模板：${template.name}`} aria-current={activeOrbitIndex === index ? "true" : undefined} className={`h-1.5 rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${activeOrbitIndex === index ? "w-7 bg-slate-900" : "w-1.5 bg-slate-300 hover:bg-slate-500"}`} />)}
-              </div>
+              <button type="button" onClick={() => moveOrbit(-1)} aria-label="上一个模板" className="absolute left-5 top-1/2 z-40 flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/90 bg-white/80 text-slate-700 opacity-0 shadow-lg backdrop-blur transition hover:bg-white group-hover/rail:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"><ArrowLeft size={18} /></button>
+              <button type="button" onClick={() => moveOrbit(1)} aria-label="下一个模板" className="absolute right-5 top-1/2 z-40 flex h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/90 bg-white/80 text-slate-700 opacity-0 shadow-lg backdrop-blur transition hover:bg-white group-hover/rail:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"><ArrowRight size={18} /></button>
             </div>
           ) : (
             <div className="mt-6 flex min-h-[300px] flex-col items-center justify-center rounded-[30px] border border-dashed border-slate-300 bg-white text-center">
