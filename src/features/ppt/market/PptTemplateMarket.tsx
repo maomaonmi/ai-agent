@@ -3,7 +3,7 @@
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -21,7 +21,6 @@ import {
 
 import type { PptTemplate } from "../api";
 import { usePptMarketStore } from "../store";
-import TemplateCard from "./TemplateCard";
 import TemplatePreviewDialog from "./TemplatePreviewDialog";
 
 
@@ -56,10 +55,86 @@ function coverFor(template: PptTemplate, index = 0): string {
 }
 
 
+function orbitDistance(index: number, activeIndex: number, total: number): number {
+  if (total <= 1) return 0;
+  let distance = index - activeIndex;
+  const half = total / 2;
+  if (distance > half) distance -= total;
+  if (distance < -half) distance += total;
+  return distance;
+}
+
+
+function OrbitTemplateCard({
+  template,
+  cover,
+  distance,
+  onActivate,
+  onPreview,
+  onUse,
+}: {
+  template: PptTemplate;
+  cover: string;
+  distance: number;
+  onActivate: () => void;
+  onPreview: () => void;
+  onUse: () => void;
+}) {
+  const active = distance === 0;
+  const magnitude = Math.abs(distance);
+  const translateX = distance * (active ? 0 : 190 + Math.min(magnitude, 3) * 20);
+  const translateZ = -magnitude * 76;
+  const rotateY = distance * -24;
+  const scale = active ? 1 : Math.max(0.58, 1 - magnitude * 0.1);
+  const opacity = magnitude > 4 ? 0 : Math.max(0.22, 1 - magnitude * 0.2);
+
+  return (
+    <article
+      className="group absolute left-1/2 top-[53%] w-[min(72vw,360px)] -translate-x-1/2 -translate-y-1/2 transition-[transform,opacity,filter] duration-500 ease-out motion-reduce:transition-none"
+      style={{
+        transform: `translate(-50%, -50%) translate3d(${translateX}px, 0, ${translateZ}px) rotateY(${rotateY}deg) scale(${scale})`,
+        opacity,
+        zIndex: active ? 30 : 20 - magnitude,
+        filter: active ? "none" : `blur(${Math.min(magnitude * 0.45, 2)}px)`,
+        pointerEvents: magnitude > 4 ? "none" : "auto",
+      }}
+      aria-hidden={magnitude > 4}
+    >
+      <div className={`overflow-hidden rounded-[24px] border bg-white shadow-[0_24px_70px_rgba(15,23,42,0.2)] ${active ? "border-slate-900/20 ring-4 ring-white/70" : "border-white/70"}`}>
+        <button
+          type="button"
+          onClick={onActivate}
+          aria-label={`查看模板：${template.name}`}
+          aria-current={active ? "true" : undefined}
+          className="group relative block aspect-[16/10] w-full overflow-hidden bg-slate-950 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-400"
+        >
+          <Image src={cover} alt={`${template.name} 模板封面`} fill sizes="(max-width: 768px) 72vw, 360px" className="object-cover transition duration-500 group-hover:scale-[1.04]" />
+          <span className="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-slate-950/5 to-transparent" />
+          <span className="absolute left-4 top-4 inline-flex items-center gap-1 rounded-full border border-white/20 bg-slate-950/40 px-2.5 py-1 text-[10px] font-semibold text-white backdrop-blur-md">
+            {template.isPrivate ? "私有模板" : "精选模板"}
+          </span>
+          <span className="absolute inset-x-4 bottom-4 text-lg font-semibold tracking-tight text-white">{template.name}</span>
+        </button>
+        <div className="flex items-center justify-between gap-3 px-4 py-3.5">
+          <p className="min-w-0 truncate text-xs text-slate-500">{template.description || "智能版式与完整主题"}</p>
+          <span className="shrink-0 text-[11px] font-medium text-slate-400">{template.pageCount || 12} 页</span>
+        </div>
+        <div className={`grid grid-cols-2 gap-2 border-t border-slate-100 px-4 py-3 transition-opacity ${active ? "" : "opacity-0 group-hover:opacity-100"}`}>
+          <button type="button" onClick={onPreview} className="h-9 rounded-full border border-slate-200 text-xs font-semibold text-slate-700 transition hover:border-slate-400 hover:text-slate-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">预览</button>
+          <button type="button" onClick={onUse} className="h-9 rounded-full bg-violet-600 text-xs font-semibold text-white transition hover:bg-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">使用模板</button>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+
 export default function PptTemplateMarket() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dragStartX = useRef<number | null>(null);
   const [selected, setSelected] = useState<PptTemplate | null>(null);
+  const [activeOrbitIndex, setActiveOrbitIndex] = useState(0);
   const {
     templates,
     loading,
@@ -96,6 +171,43 @@ export default function PptTemplateMarket() {
     ));
   }, [filters.query, filters.scene, filters.source, sourceTemplates]);
 
+  useEffect(() => {
+    setActiveOrbitIndex((current) => visibleTemplates.length === 0 ? 0 : Math.min(current, visibleTemplates.length - 1));
+  }, [visibleTemplates.length]);
+
+  const moveOrbit = (delta: number) => {
+    if (visibleTemplates.length === 0) return;
+    setActiveOrbitIndex((current) => (current + delta + visibleTemplates.length) % visibleTemplates.length);
+  };
+
+  const handleOrbitKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      moveOrbit(-1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      moveOrbit(1);
+    }
+  };
+
+  const handleOrbitPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    dragStartX.current = event.clientX;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleOrbitPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (dragStartX.current === null) return;
+    const delta = event.clientX - dragStartX.current;
+    dragStartX.current = null;
+    if (Math.abs(delta) >= 36) moveOrbit(delta > 0 ? -1 : 1);
+  };
+
+  const handleOrbitWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    if (Math.abs(event.deltaX) < 8 && Math.abs(event.deltaY) < 8) return;
+    event.preventDefault();
+    moveOrbit(event.deltaX + event.deltaY > 0 ? 1 : -1);
+  };
+
   const selectScene = (scene: string | null) => {
     setFilters({ scene });
     window.setTimeout(() => void loadFirstPage(), 0);
@@ -122,7 +234,7 @@ export default function PptTemplateMarket() {
     window.setTimeout(() => upsertUpload({ ...queued, status: "READY", progress: 100 }), 520);
   };
 
-  const useTemplate = (template: PptTemplate) => {
+  const handleUseTemplate = (template: PptTemplate) => {
     router.push(`/ppt/workspace/new?templateId=${encodeURIComponent(template.id)}`);
   };
 
@@ -219,26 +331,54 @@ export default function PptTemplateMarket() {
             <p className="mt-5 text-xs text-slate-400">暂时使用本地精选模板 · {error}</p>
           )}
 
-          <div className="mt-6 grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3">
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="group flex min-h-[290px] flex-col items-center justify-center rounded-[22px] border border-dashed border-slate-300 bg-white px-6 text-center transition hover:border-violet-400 hover:bg-violet-50/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+          {visibleTemplates.length > 0 ? (
+            <div
+              className="relative mt-6 h-[455px] overflow-hidden rounded-[30px] border border-slate-200 bg-[radial-gradient(circle_at_50%_30%,#ffffff_0%,#f5f7fb_54%,#e9edf4_100%)] shadow-[0_24px_70px_rgba(15,23,42,0.08)] [perspective:1600px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+              role="region"
+              aria-label="环形模板浏览器"
+              tabIndex={0}
+              onKeyDown={handleOrbitKeyDown}
+              onPointerDown={handleOrbitPointerDown}
+              onPointerUp={handleOrbitPointerUp}
+              onPointerCancel={() => { dragStartX.current = null; }}
+              onWheel={handleOrbitWheel}
             >
-              <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-violet-100 text-violet-700 transition group-hover:scale-105"><UploadCloud size={24} /></span>
-              <span className="mt-5 text-base font-semibold text-slate-900">上传你的 PPT 模板</span>
-              <span className="mt-2 max-w-xs text-sm leading-6 text-slate-500">仅提取主题、配色与版式；原文件保持私有，并支持全部页面预览。</span>
-              <span className="mt-4 text-xs font-medium text-violet-700">支持 .pptx / .potx · 最大 100MB</span>
-            </button>
-            {visibleTemplates.map((template, index) => (
-              <TemplateCard
-                key={template.id}
-                template={template}
-                cover={coverFor(template, index)}
-                onPreview={setSelected}
-                onUse={useTemplate}
-              />
-            ))}
+              <div className="pointer-events-none absolute inset-x-[8%] bottom-[-40%] h-[70%] rounded-[50%] bg-slate-400/20 blur-3xl" aria-hidden="true" />
+              <div className="pointer-events-none absolute inset-x-0 top-8 flex items-center justify-center gap-2 text-xs font-medium tracking-[0.18em] text-slate-400" aria-hidden="true"><span className="h-px w-12 bg-slate-300" />环形浏览 · 滚轮或拖拽切换<span className="h-px w-12 bg-slate-300" /></div>
+              {visibleTemplates.map((template, index) => {
+                const distance = orbitDistance(index, activeOrbitIndex, visibleTemplates.length);
+                return (
+                  <OrbitTemplateCard
+                    key={template.id}
+                    template={template}
+                    cover={coverFor(template, index)}
+                    distance={distance}
+                    onActivate={() => setActiveOrbitIndex(index)}
+                    onPreview={() => setSelected(template)}
+                    onUse={() => handleUseTemplate(template)}
+                  />
+                );
+              })}
+              <button type="button" onClick={() => moveOrbit(-1)} aria-label="上一个模板" className="absolute left-4 top-1/2 z-40 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/80 bg-white/80 text-slate-700 shadow-lg backdrop-blur transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"><ArrowLeft size={18} /></button>
+              <button type="button" onClick={() => moveOrbit(1)} aria-label="下一个模板" className="absolute right-4 top-1/2 z-40 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-full border border-white/80 bg-white/80 text-slate-700 shadow-lg backdrop-blur transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"><ArrowRight size={18} /></button>
+              <div className="absolute inset-x-0 bottom-5 z-40 flex items-center justify-center gap-1.5" aria-label="模板位置">
+                {visibleTemplates.slice(0, 12).map((template, index) => <button key={template.id} type="button" onClick={() => setActiveOrbitIndex(index)} aria-label={`切换到模板：${template.name}`} aria-current={activeOrbitIndex === index ? "true" : undefined} className={`h-1.5 rounded-full transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${activeOrbitIndex === index ? "w-7 bg-slate-900" : "w-1.5 bg-slate-300 hover:bg-slate-500"}`} />)}
+              </div>
+            </div>
+          ) : (
+            <div className="mt-6 flex min-h-[300px] flex-col items-center justify-center rounded-[30px] border border-dashed border-slate-300 bg-white text-center">
+              <Search size={28} className="text-slate-300" />
+              <p className="mt-3 text-sm font-semibold text-slate-700">没有找到匹配的模板</p>
+              <p className="mt-1 text-xs text-slate-400">试试其他关键词或切换场景</p>
+            </div>
+          )}
+
+          <div className="mt-5 flex flex-col items-center justify-between gap-4 rounded-[22px] border border-dashed border-slate-300 bg-white px-5 py-4 sm:flex-row">
+            <div className="flex items-center gap-3">
+              <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-violet-100 text-violet-700"><UploadCloud size={19} /></span>
+              <div><p className="text-sm font-semibold text-slate-900">使用你的 PPT 作为私有模板</p><p className="mt-1 text-xs text-slate-500">仅提取主题、配色与版式；原文件保持私有，并支持完整预览。</p></div>
+            </div>
+            <button type="button" onClick={() => fileInputRef.current?.click()} className="inline-flex h-10 shrink-0 items-center gap-2 rounded-full bg-slate-950 px-4 text-xs font-semibold text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"><UploadCloud size={15} />上传模板</button>
           </div>
 
           {templates.length > 0 && (
@@ -255,7 +395,7 @@ export default function PptTemplateMarket() {
           cover={coverFor(selected, visibleTemplates.findIndex((item) => item.id === selected.id))}
           open
           onClose={() => setSelected(null)}
-          onUse={useTemplate}
+          onUse={handleUseTemplate}
         />
       )}
     </div>
