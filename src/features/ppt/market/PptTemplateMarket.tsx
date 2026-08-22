@@ -94,7 +94,7 @@ function OrbitTemplateCard({
 
   return (
     <article
-      className="group absolute left-1/2 top-[54%] w-[min(60vw,420px)] -translate-x-1/2 -translate-y-1/2 transition-[transform,opacity,filter] duration-700 ease-out [backface-visibility:visible] motion-reduce:transition-none"
+      className="group absolute left-1/2 top-[54%] w-[min(74vw,680px)] -translate-x-1/2 -translate-y-1/2 transition-[transform,opacity,filter] duration-700 ease-out [backface-visibility:visible] motion-reduce:transition-none"
       style={{
         transform: `translate(-50%, -50%) translateY(-${lift}px) rotateY(${ringIndex * angle}deg) translateZ(${radius}px) scale(${scale})`,
         opacity,
@@ -110,7 +110,7 @@ function OrbitTemplateCard({
           onClick={onActivate}
           aria-label={`查看模板：${template.name}`}
           aria-current={active ? "true" : undefined}
-          className="group relative block aspect-[0.76] w-full overflow-hidden bg-slate-950 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-400"
+          className="group relative block aspect-[16/10] w-full overflow-hidden bg-slate-950 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-400"
         >
           <Image src={cover} alt={`${template.name} 模板封面`} fill sizes="(max-width: 768px) 60vw, 420px" className="object-cover transition duration-500 group-hover:scale-[1.04]" />
           <span className="absolute inset-0 bg-gradient-to-t from-slate-950/40 via-transparent to-white/5 opacity-70 transition group-hover:opacity-100" />
@@ -330,7 +330,7 @@ export default function PptTemplateMarket() {
 
           {visibleTemplates.length > 0 ? (
             <div
-              className="group/rail relative mt-6 h-[520px] overflow-hidden rounded-[30px] border border-white/70 bg-[#fbfcfe] shadow-[0_24px_70px_rgba(15,23,42,0.08)] [background-image:radial-gradient(#dce3ed_1.2px,transparent_1.2px),radial-gradient(#e8edf4_1px,transparent_1px),radial-gradient(circle_at_50%_38%,#ffffff_0%,#f7f9fc_56%,#edf1f7_100%)] [background-position:0_0,16px_18px,0_0] [background-size:28px_28px,44px_44px,100%_100%] [perspective:1800px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+              className="group/rail relative mt-6 h-[620px] overflow-hidden rounded-[30px] border border-white/70 bg-[#fbfcfe] shadow-[0_24px_70px_rgba(15,23,42,0.08)] [background-image:radial-gradient(#dce3ed_1.2px,transparent_1.2px),radial-gradient(#e8edf4_1px,transparent_1px),radial-gradient(circle_at_50%_38%,#ffffff_0%,#f7f9fc_56%,#edf1f7_100%)] [background-position:0_0,16px_18px,0_0] [background-size:28px_28px,44px_44px,100%_100%] [perspective:1800px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
               role="region"
               aria-label="环形模板浏览器"
               tabIndex={0}
@@ -346,7 +346,7 @@ export default function PptTemplateMarket() {
               <div className="pointer-events-none absolute inset-x-[7%] bottom-0 h-28 bg-gradient-to-t from-[#fbfcfe] via-[#fbfcfe]/70 to-transparent" aria-hidden="true" />
               {(() => {
                 const orbitAngle = 360 / Math.max(visibleTemplates.length, 1);
-                const orbitRadius = visibleTemplates.length <= 4 ? 360 : 470;
+                const orbitRadius = visibleTemplates.length <= 4 ? 460 : 620;
                 const orbitRotation = -activeOrbitIndex * orbitAngle;
                 return (
                   <div
