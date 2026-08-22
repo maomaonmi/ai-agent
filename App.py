@@ -27,6 +27,12 @@ from pydantic import BaseModel, Field, field_validator
 from glm_adapter import ChatAttachment, build_user_content, validate_attachment_mix
 # Why: 供应商能力判断唯一入口——禁止再新增 `"xxx" in model.lower()` 字符串嗅探。
 from model_settings import capabilities_for_model, ensure_direct_connection
+# Why: MiniMax 主链路是 Anthropic 端点，Code 模式走 OpenAI 兼容端点 + 思考剥离。
+from minimax.openai_compat import (
+    OPENAI_COMPAT_BASE_URL,
+    ThinkTagStreamer,
+    extract_reasoning as minimax_extract_reasoning,
+)
 from terminal_service import TERMINAL_POOL as _DEFAULT_TERMINAL_POOL, filter_command
 from mcp_manager import parse_tool_name
 from HOOK.agent_hook_engine import HookContext, HookRegistry, HookType, global_hook_registry
@@ -493,9 +499,16 @@ async def stream_json_completion(
                 # Why: 官方文档明确思考模式启用时 temperature/top_p 不报错但不生效，
                 # 显式移除避免误导调试；非思考模式保留 temperature 让用户可调。
                 create_kwargs.pop("temperature", None)
+        elif caps.thinking_control == "minimax":
+            # MiniMax OpenAI 兼容路径：无 thinking 开关参数；reasoning_split 把思考
+            # 分离到 reasoning_details（消费点双路径提取），content 残留 <think> 由剥离器兜底。
+            if thinking != "disabled":
+                create_kwargs["extra_body"] = {"reasoning_split": True}
         logger.debug("[stream_json_completion] 发起流式请求 ...")
         stream = await client.chat.completions.create(**create_kwargs)
         logger.debug("[stream_json_completion] 流式请求已建立，开始累积 ...")
+        # Why: MiniMax <think> 混入 content 的跨 chunk 状态剥离（reasoning_split 兜底）。
+        think_stripper = ThinkTagStreamer() if caps.thinking_control == "minimax" else None
         async for chunk in stream:
             if getattr(chunk, "usage", None) is not None:
                 latest_usage = observe_response(chunk, model_override=model)
@@ -505,7 +518,10 @@ async def stream_json_completion(
             if delta is None:
                 continue
             content = getattr(delta, "content", None)
-            reasoning = getattr(delta, "reasoning_content", None)
+            if content and think_stripper is not None:
+                content = think_stripper.feed(content)
+            # MiniMax 思考在 reasoning_details；GLM/DeepSeek 在 reasoning_content。
+            reasoning = getattr(delta, "reasoning_content", None) or minimax_extract_reasoning(delta)
             if reasoning:
                 accumulated_reasoning += reasoning
                 sse_events.append(format_sse({
@@ -579,8 +595,12 @@ async def stream_json_completion(
         fallback = await client.chat.completions.create(**fallback_kwargs)
         latest_usage = observe_response(fallback, model_override=model)
         full_text = fallback.choices[0].message.content or ""
-        if not full_text and hasattr(fallback.choices[0].message, "reasoning_content"):
-            full_text = fallback.choices[0].message.reasoning_content or ""
+        if not full_text:
+            full_text = (
+                getattr(fallback.choices[0].message, "reasoning_content", None)
+                or minimax_extract_reasoning(fallback.choices[0].message)
+                or ""
+            )
         if full_text:
             sse_events.append(format_sse({
                 "type": "agent_activity",
@@ -4049,8 +4069,12 @@ async def decompose_fullstack_task(
             kwargs["response_format"] = {"type": "json_object"}
         completion = await client.chat.completions.create(**kwargs)
         raw = completion.choices[0].message.content or ""
-        if not raw and hasattr(completion.choices[0].message, "reasoning_content"):
-            raw = completion.choices[0].message.reasoning_content or ""
+        if not raw:
+            raw = (
+                getattr(completion.choices[0].message, "reasoning_content", None)
+                or minimax_extract_reasoning(completion.choices[0].message)
+                or ""
+            )
         parsed = json.loads(raw[raw.find("{"):raw.rfind("}") + 1] if "{" in raw else "{}")
         if not parsed.get("need_decompose", False):
             return []
@@ -5777,9 +5801,12 @@ def create_code_router(
             effort = current[3] if len(current) > 3 else "high"
             ensure_direct_connection(current_base_url)
             return AsyncOpenAI(api_key=current_api_key, base_url=current_base_url), current_model, effort, None
-        ensure_direct_connection(current.base_url)
+        # Why: MiniMax 主链路 base_url 是 Anthropic 端点；Code 模式 OpenAI 客户端
+        # 必须换用 /v1 兼容端点，否则协议不匹配 404。
+        resolved_base_url = OPENAI_COMPAT_BASE_URL if current.provider == "minimax" else current.base_url
+        ensure_direct_connection(resolved_base_url)
         return (
-            AsyncOpenAI(api_key=current.api_key or "not-configured", base_url=current.base_url),
+            AsyncOpenAI(api_key=current.api_key or "not-configured", base_url=resolved_base_url),
             current.model_id,
             current.reasoning_effort,
             current.thinking_budget,

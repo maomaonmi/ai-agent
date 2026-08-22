@@ -21,6 +21,7 @@ def test_video_capabilities_expose_official_models_and_limits():
     models = {item["id"]: item for item in get_video_capabilities()}
 
     assert set(models) == {
+        "MiniMax-H3",
         "happyhorse-1.1-t2v",
         "happyhorse-1.0-t2v",
         "wan3.0-video",

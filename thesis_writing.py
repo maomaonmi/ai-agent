@@ -17,6 +17,10 @@ from pydantic import BaseModel, Field
 
 ThesisTargetWords = Literal[3000, 5000, 8000, 10000, 15000, 20000, 30000]
 
+# Why: 写作链路 provider 化——默认 qwen 保证存量请求零回归；minimax 走
+# OpenAI 兼容适配（大纲/正文）与服务端 web_search（参考资料）。
+ThesisProvider = Literal["qwen", "minimax"]
+
 
 class ThesisOutlineRequest(BaseModel):
     instruction: str = Field(min_length=2, max_length=20_000)
@@ -25,6 +29,7 @@ class ThesisOutlineRequest(BaseModel):
     target_words: ThesisTargetWords | None = None
     session_id: str | None = Field(default=None, min_length=8, max_length=64)
     previous_outline: dict | None = None
+    provider: ThesisProvider = "qwen"
 
 
 class ThesisReferenceChapter(BaseModel):
@@ -36,6 +41,7 @@ class ThesisReferenceChapter(BaseModel):
 class ThesisReferenceRequest(BaseModel):
     instruction: str = Field(min_length=2, max_length=20_000)
     chapters: list[ThesisReferenceChapter] = Field(min_length=1, max_length=12)
+    provider: ThesisProvider = "qwen"
 
 
 class ThesisBodyReference(BaseModel):
@@ -65,6 +71,7 @@ class ThesisBodyRequest(BaseModel):
     title: str = Field(min_length=2, max_length=1_000)
     chapters: list[ThesisBodyChapter] = Field(min_length=1, max_length=12)
     completed_chapter_ids: list[str] = Field(default_factory=list, max_length=12)
+    provider: ThesisProvider = "qwen"
 
 
 def build_thesis_chapter_prompt(request: ThesisBodyRequest, chapter: ThesisBodyChapter) -> str:

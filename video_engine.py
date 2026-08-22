@@ -264,6 +264,20 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "max_reference_videos": 0, "max_references": 3,
         "docs_url": "https://docs.bigmodel.cn/cn/guide/models/video-generation/vidu2",
     },
+    {
+        # Why: H3 是全模式全能模型——t2v/首帧/首尾帧/多素材参考一站式；
+        # ratio "auto" 仅对 i2v 类模式合法（官方恒 adaptive），t2v/r2v 在 Provider 内收敛为 16:9。
+        "id": "MiniMax-H3", "name": "MiniMax H3", "provider": "minimax",
+        "description": "全能视频生成：文生视频、首尾帧与图视频混合参考",
+        "modes": ["text_to_video", "image_to_video", "start_end_video", "reference_to_video"],
+        "future_modes": [],
+        "ratios": ["16:9", "9:16", "1:1", "4:3", "3:4", "auto"],
+        "resolutions": ["768P", "2K"],
+        "duration_min": 4, "duration_max": 15, "durations": [],
+        "supports_audio": True, "supports_audio_input": False, "enabled": True,
+        "max_reference_videos": 3, "max_references": 12,
+        "docs_url": "https://platform.minimaxi.com/document/Video%20Generation",
+    },
 )
 
 
@@ -295,7 +309,7 @@ class VideoGenerationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["text_to_video", "image_to_video", "start_end_video", "reference_to_video"] = "text_to_video"
-    prompt: str = Field(default="", max_length=5000)
+    prompt: str = Field(default="", max_length=7000)
     model: str
     ratio: str = "16:9"
     duration: int = Field(default=5, ge=2, le=30)
@@ -330,8 +344,8 @@ class VideoGenerationRequest(BaseModel):
     @classmethod
     def normalize_resolution(cls, value: str) -> str:
         normalized = value.strip().upper()
-        if normalized not in {"480P", "720P", "1080P", "2K", "4K"}:
-            raise ValueError("resolution 必须是 480P、720P、1080P、2K 或 4K")
+        if normalized not in {"480P", "720P", "768P", "1080P", "2K", "4K"}:
+            raise ValueError("resolution 必须是 480P、720P、768P、1080P、2K 或 4K")
         return normalized
 
     @field_validator("audio_url")
@@ -370,7 +384,7 @@ class VideoGenerationRequest(BaseModel):
             raise ValueError("尾帧 URL 仅用于首尾帧模式")
         if self.model == "wan2.7-i2v" and not self.prompt:
             raise ValueError("wan2.7-i2v 的 prompt 不能为空")
-        prompt_limit = 800 if self.model == "wan2.2-kf2v-flash" else 1500 if self.model.startswith("wan2.6-i2v") else 512 if self.model.startswith("vidu2-") else 5000
+        prompt_limit = 800 if self.model == "wan2.2-kf2v-flash" else 1500 if self.model.startswith("wan2.6-i2v") else 512 if self.model.startswith("vidu2-") else 7000 if self.model == "MiniMax-H3" else 5000
         if len(self.prompt) > prompt_limit:
             raise ValueError(f"{self.model} 的 prompt 不能超过 {prompt_limit} 个字符")
         if self.shot_type and not self.model.startswith("wan2.6-i2v"):
@@ -406,6 +420,15 @@ class VideoGenerationRequest(BaseModel):
             raise ValueError(f"{self.model} 不支持参考音频")
         if self.model == "cogvideox-3" and self.quality not in {"quality", "speed"}:
             raise ValueError("CogVideoX-3 的 quality 必须是 quality 或 speed")
+        if self.model == "MiniMax-H3":
+            # Why: H3 官方素材上限（图 9 / 视频 3 / 混合 12）在创建前本地拦截，
+            # 违规请求不发起 API 调用；混合总数已由通用 max_references=12 约束。
+            image_count = sum(item.media_kind == "reference_image" for item in self.references)
+            video_count = sum(item.media_kind == "reference_video" for item in self.references)
+            if image_count > 9:
+                raise ValueError("MiniMax-H3 最多支持 9 张参考图片")
+            if video_count > 3:
+                raise ValueError("MiniMax-H3 最多支持 3 个参考视频")
         return self
 
 
@@ -463,11 +486,12 @@ class VideoProvider(Protocol):
 
 def _map_provider_status(value: Any) -> VideoTaskStatus:
     normalized = str(value or "UNKNOWN").upper()
-    if normalized == "PENDING":
+    # Why: MiniMax H3 用 queued/preparing 表示排队中，归一为 PENDING 避免落 UNKNOWN 终态误判。
+    if normalized in {"PENDING", "QUEUED", "PREPARING"}:
         return VideoTaskStatus.PENDING
     if normalized in {"RUNNING", "PROCESSING"}:
         return VideoTaskStatus.RUNNING
-    if normalized in {"SUCCEEDED", "SUCCESS", "COMPLETED"}:
+    if normalized in {"SUCCEEDED", "SUCCEED", "SUCCESS", "COMPLETED"}:
         return VideoTaskStatus.SUCCEEDED
     if normalized in {"FAILED", "FAIL", "ERROR"}:
         return VideoTaskStatus.FAILED
