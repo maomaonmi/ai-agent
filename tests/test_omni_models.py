@@ -2,6 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from omni_models import (
+    ArtifactCreateRequest,
     ArtifactCreatedEvent,
     ArtifactModel,
     ArtifactVersionModel,
@@ -88,4 +89,15 @@ def test_contracts_reject_unknown_fields_at_the_api_boundary():
         ProjectCreateRequest.model_validate({
             "name": "项目 A",
             "unexpected": "must not leak into storage",
+        })
+
+
+def test_artifact_snapshot_rejects_unbounded_payloads():
+    with pytest.raises(ValidationError):
+        ArtifactCreateRequest.model_validate({
+            "messageId": "message-1",
+            "kind": "document",
+            "title": "过大文档",
+            "sourceRef": {"type": "writing_document", "documentId": "doc-1", "revision": 1},
+            "payload": {"format": "markdown", "content": "x" * 2_000_000},
         })

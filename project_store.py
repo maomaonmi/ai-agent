@@ -193,6 +193,16 @@ class ProjectStore:
                 "UPDATE projects SET updated_at = ? WHERE id = ?",
                 (now, project_id),
             )
+            has_artifacts = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'"
+            ).fetchone()
+            if has_artifacts:
+                # Only origin artifacts move with their conversation. Artifacts
+                # merely referenced from another project retain their owner.
+                connection.execute(
+                    "UPDATE artifacts SET project_id = ?, updated_at = ? WHERE origin_conversation_id = ?",
+                    (project_id, now, session_id),
+                )
 
     def remove_conversation(self, session_id: str) -> None:
         with self._connection() as connection:
@@ -202,6 +212,14 @@ class ProjectStore:
             )
             if cursor.rowcount == 0:
                 raise SessionNotFoundError(session_id)
+            has_artifacts = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'artifacts'"
+            ).fetchone()
+            if has_artifacts:
+                connection.execute(
+                    "UPDATE artifacts SET project_id = NULL, updated_at = ? WHERE origin_conversation_id = ?",
+                    (time.time(), session_id),
+                )
 
     def get_conversation_project_id(self, session_id: str) -> str | None:
         with self._connection() as connection:

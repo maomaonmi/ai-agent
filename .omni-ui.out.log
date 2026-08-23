@@ -1,0 +1,16 @@
+
+> ai-agent@0.1.0 dev:webpack
+> next dev
+
+  ▲ Next.js 15.0.0
+  - Local:        http://localhost:3001
+  - Environments: .env.local
+
+ ✓ Starting...
+ ✓ Ready in 1950ms
+ ○ Compiling / ...
+ ✓ Compiled / in 6.6s (2390 modules)
+ GET / 200 in 7107ms
+ ✓ Compiled in 549ms (1063 modules)
+ ✓ Compiled in 108ms (1049 modules)
+[?25h

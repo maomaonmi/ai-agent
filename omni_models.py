@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 def _to_camel(value: str) -> str:
@@ -129,9 +130,50 @@ class ArtifactVersionModel(OmniContractModel):
     parent_version_id: Identifier | None = None
     status: Literal["draft", "generating", "ready", "failed"]
     source_ref: ArtifactSourceRef
+    payload: Any = None
     summary: Annotated[str, Field(max_length=20_000)]
     created_by_message_id: Identifier | None = None
     created_at: datetime
+
+
+class ArtifactCreateRequest(OmniContractModel):
+    message_id: Identifier
+    kind: ArtifactKind
+    title: Annotated[str, Field(min_length=1, max_length=200)]
+    summary: Annotated[str, Field(max_length=20_000)] = ""
+    source_ref: ArtifactSourceRef
+    payload: Any = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    status: Literal["draft", "generating", "ready", "failed"] = "ready"
+
+    @model_validator(mode="after")
+    def validate_snapshot_size(self):
+        # Both user input and LLM output cross this boundary. Keep immutable
+        # previews bounded so a single request cannot inflate SQLite without limit.
+        encoded = json.dumps(
+            {"payload": self.payload, "metadata": self.metadata},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(encoded) > 2_000_000:
+            raise ValueError("作品版本快照不能超过 2MB。")
+        return self
+
+
+class ArtifactVersionCreateRequest(OmniContractModel):
+    conversation_id: Identifier
+    message_id: Identifier
+    summary: Annotated[str, Field(max_length=20_000)] = ""
+    source_ref: ArtifactSourceRef
+    payload: Any = None
+    status: Literal["draft", "generating", "ready", "failed"] = "ready"
+
+    @model_validator(mode="after")
+    def validate_snapshot_size(self):
+        encoded = json.dumps(self.payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if len(encoded) > 2_000_000:
+            raise ValueError("作品版本快照不能超过 2MB。")
+        return self
 
 
 class MessageArtifactLinkModel(OmniContractModel):
@@ -148,6 +190,13 @@ class MessageArtifactLinkModel(OmniContractModel):
 class ArtifactMention(OmniContractModel):
     artifact_id: Identifier
     version_id: Identifier | None = None
+
+
+class ArtifactReferenceRequest(OmniContractModel):
+    message_id: Identifier
+    artifact_id: Identifier
+    version_id: Identifier | None = None
+    display_order: Annotated[int, Field(ge=0, le=49)] = 0
 
 
 class ArtifactSummary(OmniContractModel):
