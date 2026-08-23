@@ -13,6 +13,7 @@ from typing import Any
 
 
 SESSION_MODES = {
+    "omni",
     "standard",
     "deep",
     "web",

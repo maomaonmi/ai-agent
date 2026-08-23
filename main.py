@@ -1771,7 +1771,7 @@ class HookDraftRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     mode: Literal[
-        "standard", "deep", "web", "research", "agent", "plan",
+        "omni", "standard", "deep", "web", "research", "agent", "plan",
         "distributed_plan", "code", "writing",
     ] = "standard"
     # 多智能体模式：前端可动态传入自定义 Agent
@@ -1799,7 +1799,7 @@ class ChatRequest(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     mode: Literal[
-        "standard", "deep", "web", "research", "agent", "plan",
+        "omni", "standard", "deep", "web", "research", "agent", "plan",
         "distributed_plan", "code", "writing",
     ] = "standard"
     title: str = Field(default="新会话", max_length=40)
@@ -8377,7 +8377,7 @@ async def chat_stream(request: ChatRequest):
             validate_attachment_mix(request.attachments)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-    if active_settings.provider in {"glm", "qwen", "minimax"} and request.mode in {"standard", "deep", "web", "research"}:
+    if active_settings.provider in {"glm", "qwen", "minimax"} and request.mode in {"omni", "standard", "deep", "web", "research"}:
         async def direct_stream_with_mcp():
             runtime = request.runtime_settings or RuntimeSettings()
             _base_mode, wants_web, _use_deep = resolve_runtime_mode(request.mode, runtime)

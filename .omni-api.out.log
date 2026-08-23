@@ -151,3 +151,298 @@ INFO:     127.0.0.1:63661 - "GET /api/ppt/runs/run-6650e61c0b704437af53db262410d
 INFO:     127.0.0.1:63661 - "GET /api/ppt/runs/run-6650e61c0b704437af53db262410db4f HTTP/1.1" 200 OK
 INFO:     127.0.0.1:58650 - "OPTIONS /api/ppt/presentations/presentation-fca18eb5-d76f-4114-9e08-f0f61687648b/operations HTTP/1.1" 200 OK
 INFO:     127.0.0.1:58650 - "POST /api/ppt/presentations/presentation-fca18eb5-d76f-4114-9e08-f0f61687648b/operations HTTP/1.1" 422 Unprocessable Content
+INFO:     127.0.0.1:59888 - "OPTIONS /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52888 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64788 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59308 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59385 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52888 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57764 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64788 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59308 - "GET /api/memory/skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59385 - "GET /api/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52888 - "GET /api/ppt/runs/history?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57764 - "GET /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64788 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52888 - "GET /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52888 - "GET /api/memory/vfs/restore/73dbef32-13b0-4199-8771-c62ffc507a7c HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52888 - "OPTIONS /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64788 - "GET /api/conversations/73dbef32-13b0-4199-8771-c62ffc507a7c/artifact-links HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:57764 - "POST /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57764 - "OPTIONS /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57764 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57764 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60619 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55949 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56339 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58775 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62156 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55787 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60619 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60473 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63451 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60858 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54776 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60473 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56914 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51820 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51555 - "GET /api/code-projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51555 - "GET /api/code-projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55484 - "GET /api/image/batches?limit=48 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55445 - "GET /api/image/plaza/assets?limit=48 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55484 - "GET /api/image/batches?limit=48 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55445 - "GET /api/image/plaza/assets?limit=48 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64479 - "GET /api/image/assets/e0e29967-2194-40b2-a63f-222bdb9c0201 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53055 - "GET /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58772 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65415 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61869 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50975 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59252 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53055 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58772 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62621 - "GET /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55166 - "OPTIONS /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55166 - "GET /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62770 - "GET /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/memory/skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/ppt/runs/history?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64843 - "GET /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64843 - "GET /api/memory/vfs/restore/73dbef32-13b0-4199-8771-c62ffc507a7c HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64843 - "OPTIONS /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64843 - "POST /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52833 - "GET /api/conversations/73dbef32-13b0-4199-8771-c62ffc507a7c/artifact-links HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:50342 - "OPTIONS /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50342 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55859 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55210 - "OPTIONS /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63721 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49526 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58185 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58667 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63721 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51651 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49526 - "GET /api/memory/skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58185 - "GET /api/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55254 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58667 - "GET /api/ppt/runs/history?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63721 - "GET /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51651 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58185 - "GET /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58185 - "GET /api/memory/vfs/restore/73dbef32-13b0-4199-8771-c62ffc507a7c HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58185 - "OPTIONS /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51651 - "GET /api/conversations/73dbef32-13b0-4199-8771-c62ffc507a7c/artifact-links HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58185 - "POST /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58185 - "OPTIONS /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58185 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51537 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62431 - "OPTIONS /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55195 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58135 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54447 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58225 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55195 - "GET /api/memory/skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51927 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58135 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54447 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58225 - "GET /api/ppt/runs/history?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55195 - "GET /api/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51927 - "GET /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58135 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55195 - "GET /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55195 - "GET /api/memory/vfs/restore/73dbef32-13b0-4199-8771-c62ffc507a7c HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55195 - "OPTIONS /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55195 - "GET /api/conversations/73dbef32-13b0-4199-8771-c62ffc507a7c/artifact-links HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:58135 - "POST /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58135 - "OPTIONS /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55195 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55195 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53770 - "GET /api/code-projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53770 - "GET /api/code-projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54224 - "GET /api/video/tasks?page=1&pageSize=100&status=SUCCEEDED HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55204 - "GET /api/video/tasks?page=1&pageSize=100&status=SUCCEEDED HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50322 - "GET /api/video/assets/1db1ae06-4aba-48cd-b8b8-2a38d2daed03 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:63871 - "GET /api/video/assets/612b2479-4506-4f09-a905-4ef808d07446 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:62644 - "GET /api/video/assets/ffcd9bf2-799a-4893-832a-91334afc9698 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:56752 - "GET /api/video/assets/ecd516c2-04d7-4e6d-8384-6f83d2c07cd8 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:57488 - "GET /api/video/assets/8969611a-76e1-4fe9-847e-d93e48b4b650 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:57263 - "GET /api/video/assets/9c97bda8-32e0-4e9c-ac3d-c34824546707 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:60761 - "GET /api/video/assets/9aaef97d-a3e9-4e3a-9aea-605f850c9f12 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:60767 - "GET /api/video/assets/9c97bda8-32e0-4e9c-ac3d-c34824546707 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:53092 - "GET /api/video/assets/9aaef97d-a3e9-4e3a-9aea-605f850c9f12 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:61288 - "GET /api/video/assets/9c97bda8-32e0-4e9c-ac3d-c34824546707 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:62755 - "GET /api/video/assets/9c97bda8-32e0-4e9c-ac3d-c34824546707 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:57757 - "GET /api/video/assets/9aaef97d-a3e9-4e3a-9aea-605f850c9f12 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:54058 - "GET /api/video/assets/ffcd9bf2-799a-4893-832a-91334afc9698 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:57850 - "GET /api/video/assets/1db1ae06-4aba-48cd-b8b8-2a38d2daed03 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:62760 - "GET /api/video/assets/612b2479-4506-4f09-a905-4ef808d07446 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:64305 - "GET /api/video/assets/ecd516c2-04d7-4e6d-8384-6f83d2c07cd8 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:62104 - "GET /api/video/assets/8969611a-76e1-4fe9-847e-d93e48b4b650 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:54058 - "GET /api/video/assets/9c97bda8-32e0-4e9c-ac3d-c34824546707 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:57850 - "GET /api/video/assets/9aaef97d-a3e9-4e3a-9aea-605f850c9f12 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:57850 - "GET /api/video/assets/9aaef97d-a3e9-4e3a-9aea-605f850c9f12 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:54058 - "GET /api/video/assets/9c97bda8-32e0-4e9c-ac3d-c34824546707 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:64305 - "GET /api/video/assets/ffcd9bf2-799a-4893-832a-91334afc9698 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:62104 - "GET /api/video/assets/ecd516c2-04d7-4e6d-8384-6f83d2c07cd8 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:62760 - "GET /api/video/assets/612b2479-4506-4f09-a905-4ef808d07446 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:64599 - "GET /api/video/assets/8969611a-76e1-4fe9-847e-d93e48b4b650 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:62104 - "GET /api/video/assets/ffcd9bf2-799a-4893-832a-91334afc9698 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:62760 - "GET /api/video/assets/612b2479-4506-4f09-a905-4ef808d07446 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:62760 - "GET /api/video/assets/1db1ae06-4aba-48cd-b8b8-2a38d2daed03 HTTP/1.1" 206 Partial Content
+INFO:     127.0.0.1:62034 - "GET /api/image/batches?limit=48 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52933 - "GET /api/image/plaza/assets?limit=48 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62034 - "GET /api/image/batches?limit=48 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52933 - "GET /api/image/plaza/assets?limit=48 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55952 - "GET /api/ppt/presentations/presentation-fca18eb5-d76f-4114-9e08-f0f61687648b HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55952 - "POST /api/ppt/runs/run-6650e61c0b704437af53db262410db4f/repair-assets HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55952 - "OPTIONS /api/ppt/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55952 - "POST /api/ppt/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55952 - "GET /api/ppt/runs/run-6650e61c0b704437af53db262410db4f HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55952 - "GET /api/ppt/runs/run-6650e61c0b704437af53db262410db4f/events?follow=true HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60687 - "GET /api/ppt/assets/ppt-web-b9d481216f8abeef093bc8dddc63dfdf-3477cdab15/content HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58283 - "GET /api/ppt/assets/ppt-web-8bac874ed33a39b3b4a69a562c60936f-3477cdab15/content HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58428 - "GET /api/ppt/assets/ppt-web-7afd58c507d3f4685925cebed6fd5f95-3477cdab15/content HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52563 - "GET /api/ppt/assets/ppt-ai-50b9e887d2d25f0d172949540d3d9c6a-3477cdab15/content HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63040 - "GET /api/ppt/assets/ppt-ai-598906219c089d0011784b41adc2a4c2-3477cdab15/content HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50378 - "GET /api/ppt/assets/ppt-web-46d937d53600e02d586a25f4c4b17d3d-3477cdab15/content HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60687 - "GET /api/ppt/assets/ppt-web-a2757839c35fc374dbec8a3cab2dbc54-3477cdab15/content HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58428 - "GET /api/ppt/assets/ppt-web-e21203fc24fd8ba090f1d8f69f8d2ee8-3477cdab15/content HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55952 - "GET /api/ppt/runs/run-6650e61c0b704437af53db262410db4f HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55952 - "OPTIONS /api/ppt/runs/run-6650e61c0b704437af53db262410db4f/events?follow=true HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55952 - "GET /api/ppt/runs/run-6650e61c0b704437af53db262410db4f/events?follow=true HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55952 - "GET /api/ppt/runs/run-6650e61c0b704437af53db262410db4f HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52755 - "GET /api/ppt/assets/ppt-web-29f6e6895a0e52202257bd48bac0ebdf-3477cdab15/content HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52755 - "GET /api/ppt/assets/ppt-web-1774264f0287c1355fa5ea4ed365183d-3477cdab15/content HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59107 - "GET /api/ppt/templates?page=1&pageSize=24 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56135 - "GET /api/ppt/presentations/presentation-fca18eb5-d76f-4114-9e08-f0f61687648b HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56135 - "GET /api/ppt/presentations/presentation-fca18eb5-d76f-4114-9e08-f0f61687648b HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56135 - "POST /api/ppt/runs/run-6650e61c0b704437af53db262410db4f/repair-assets HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56135 - "OPTIONS /api/ppt/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56135 - "POST /api/ppt/runs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56135 - "GET /api/ppt/runs/run-6650e61c0b704437af53db262410db4f HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56135 - "GET /api/ppt/runs/run-6650e61c0b704437af53db262410db4f/events?follow=true HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "OPTIONS /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/ppt/runs/history?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/memory/skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "GET /api/memory/vfs/restore/73dbef32-13b0-4199-8771-c62ffc507a7c HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "OPTIONS /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49588 - "GET /api/conversations/73dbef32-13b0-4199-8771-c62ffc507a7c/artifact-links HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:63222 - "POST /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "OPTIONS /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:63222 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64409 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57222 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62090 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53392 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50882 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53142 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64409 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57222 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62090 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53392 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50882 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53142 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64409 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57222 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54985 - "GET /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57513 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50098 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61500 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57967 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54985 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57513 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57833 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50098 - "GET /api/memory/skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61500 - "GET /api/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57967 - "GET /api/ppt/runs/history?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54985 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61500 - "GET /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61500 - "GET /api/memory/vfs/restore/73dbef32-13b0-4199-8771-c62ffc507a7c HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61500 - "POST /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54985 - "GET /api/conversations/73dbef32-13b0-4199-8771-c62ffc507a7c/artifact-links HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:54985 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61500 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57967 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50098 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57833 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57513 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54985 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61500 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57967 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50098 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57833 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57513 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54985 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61500 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61500 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61500 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56095 - "GET /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62059 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59991 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59751 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55279 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59259 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56095 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62059 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59991 - "GET /api/memory/skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55279 - "GET /api/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59751 - "GET /api/ppt/runs/history?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59259 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59259 - "GET /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59259 - "GET /api/memory/vfs/restore/73dbef32-13b0-4199-8771-c62ffc507a7c HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59259 - "POST /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55279 - "GET /api/conversations/73dbef32-13b0-4199-8771-c62ffc507a7c/artifact-links HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:55279 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55279 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62551 - "GET /api/agents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60742 - "GET /api/memory/skills?status=published HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58280 - "GET /api/mcp/marketplace HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58280 - "GET /api/code-projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60742 - "GET /api/code-projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49880 - "OPTIONS /api/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49880 - "POST /api/sessions HTTP/1.1" 422 Unprocessable Content
+INFO:     127.0.0.1:52929 - "POST /api/sessions HTTP/1.1" 422 Unprocessable Content
+INFO:     127.0.0.1:62350 - "OPTIONS /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/settings/model?provider=deepseek HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/settings/model?provider=glm HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/settings/model?provider=qwen HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/settings/model?provider=minimax HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/settings/model?provider=custom HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/settings/model-catalog HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/memory/skills HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/sessions HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/ppt/runs/history?limit=50 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/settings/model HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/projects HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/memory/vfs/restore/73dbef32-13b0-4199-8771-c62ffc507a7c HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "OPTIONS /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "GET /api/conversations/73dbef32-13b0-4199-8771-c62ffc507a7c/artifact-links HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:62350 - "POST /api/plan/figures/jobs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "OPTIONS /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62350 - "PUT /api/sessions/73dbef32-13b0-4199-8771-c62ffc507a7c/history HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53522 - "POST /api/sessions HTTP/1.1" 422 Unprocessable Content
