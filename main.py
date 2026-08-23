@@ -54,6 +54,8 @@ from agent_factory import (
     generate_agent_config,
 )
 from session_memory import SessionNotFoundError, SessionStore
+from project_store import ProjectNotFoundError, ProjectStore
+from omni_models import ProjectCreateRequest, ProjectModel, ProjectUpdateRequest
 from model_settings import MODEL_CATALOG, ModelSettings, ModelSettingsStore, ServiceSettings, ServiceSettingsStore, apply_network_proxy, capabilities_for_model
 from thesis_writing import (
     ThesisBodyRequest,
@@ -383,6 +385,7 @@ def _initialize_image_store() -> None:
 
 _initialize_image_store()
 session_store = SessionStore(SESSION_DB_PATH)
+project_store = ProjectStore(SESSION_DB_PATH)
 video_job_repository = VideoJobRepository(SESSION_DB_PATH)
 visual_workflow_repository = VisualWorkflowRepository(SESSION_DB_PATH)
 ppt_repository = PptRepository(SESSION_DB_PATH)
@@ -427,9 +430,9 @@ def _build_video_providers() -> dict[str, Any]:
             base_url=os.getenv("ZHIPU_VIDEO_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
         )
     minimax_settings = model_settings_store.load("minimax")
-    # Why: 专项生成（图像/视频）优先用 minimax_video_api_key，留空时回退到普通 api_key。
-    # 部分套餐（如 Max）的套餐 Key 与普通 API Key 不同，需要单独配置。
-    minimax_video_key = (minimax_settings.minimax_video_api_key or minimax_settings.api_key or "").strip()
+    # Why: H3 视频走普通 Key（sk-api- 前缀）；套餐 Key（tokenplan，sk-cp- 前缀）不支持 H3，
+    # 只能用于文本/搜索/PPT。因此视频生成只用 api_key，不落回套餐 Key。
+    minimax_video_key = (minimax_settings.api_key or "").strip()
     if minimax_video_key:
         from minimax.video import MiniMaxVideoProvider
 
@@ -2750,7 +2753,9 @@ def _run_minimax_plan_search(query: str) -> tuple[list[dict], str | None]:
         return [], "当前模型非 MiniMax，跳过原生搜索"
 
     print(f"[plan-search] 开始搜索 query={query!r} model={settings.model_id}")
-    client = MiniMaxClient(api_key=settings.api_key, base_url=ANTHROPIC_BASE_URL, timeout=DEFAULT_TIMEOUT)
+    # Why: 文本/搜索走套餐 Key（tokenplan，sk-cp-），普通 Key（sk-api-）仅视频 H3 专用。
+    plan_search_key = (settings.minimax_video_api_key or settings.api_key or "").strip()
+    client = MiniMaxClient(api_key=plan_search_key, base_url=ANTHROPIC_BASE_URL, timeout=DEFAULT_TIMEOUT)
 
     def _do_stream(*, with_tool_choice: bool) -> Iterator[dict]:
         """执行流式搜索，产出 SSE 事件。"""
@@ -7293,6 +7298,78 @@ async def list_sessions():
     return {"sessions": sessions, "count": len(sessions)}
 
 
+def _project_payload(project) -> dict[str, Any]:
+    payload = ProjectModel.model_validate(project.to_dict()).model_dump(
+        mode="json",
+        by_alias=True,
+    )
+    payload["conversationIds"] = project_store.list_conversation_ids(project.id)
+    return payload
+
+
+@app.get("/api/projects")
+async def list_projects(include_archived: bool = False):
+    projects = [
+        _project_payload(project)
+        for project in project_store.list(include_archived=include_archived)
+    ]
+    return {"projects": projects, "count": len(projects)}
+
+
+@app.post("/api/projects", status_code=201)
+async def create_project(request: ProjectCreateRequest):
+    project = project_store.create(request.name, request.description)
+    return _project_payload(project)
+
+
+@app.patch("/api/projects/{project_id}")
+async def update_project(project_id: str, request: ProjectUpdateRequest):
+    try:
+        project = project_store.update(
+            project_id,
+            name=request.name,
+            description=request.description,
+            archived=request.is_archived,
+        )
+        return _project_payload(project)
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail="项目不存在。")
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error))
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: str):
+    try:
+        project_store.delete(project_id)
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail="项目不存在。")
+    return {"status": "success", "deleted": project_id}
+
+
+@app.post("/api/projects/{project_id}/conversations/{session_id}")
+async def assign_conversation_to_project(project_id: str, session_id: str):
+    try:
+        project_store.assign_conversation(project_id, session_id)
+    except ProjectNotFoundError:
+        raise HTTPException(status_code=404, detail="项目不存在。")
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="会话不存在。")
+    return {"status": "success", "sessionId": session_id, "projectId": project_id}
+
+
+@app.delete("/api/projects/{project_id}/conversations/{session_id}")
+async def remove_conversation_from_project(project_id: str, session_id: str):
+    try:
+        current_project_id = project_store.get_conversation_project_id(session_id)
+        if current_project_id != project_id:
+            raise HTTPException(status_code=409, detail="会话不属于该项目。")
+        project_store.remove_conversation(session_id)
+    except SessionNotFoundError:
+        raise HTTPException(status_code=404, detail="会话不存在。")
+    return {"status": "success", "sessionId": session_id, "projectId": None}
+
+
 @app.post("/api/sessions", status_code=201)
 async def create_session(request: CreateSessionRequest):
     return session_store.create(request.mode, request.title).to_dict()
@@ -7831,7 +7908,9 @@ def generate_thesis_reference_events_via_minimax(request: ThesisReferenceRequest
     def event(name: str, data: dict) -> str:
         return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-    client = MiniMaxClient(settings.api_key)
+    # Why: 搜索链路走套餐 Key（tokenplan），普通 Key 仅视频 H3 专用；getattr 兼容非 minimax provider。
+    thesis_search_key = (getattr(settings, "minimax_video_api_key", "") or settings.api_key or "").strip()
+    client = MiniMaxClient(thesis_search_key)
     seen_urls: set[str] = set()
     for chapter in request.chapters:
         yield event("thesis_chapter_search_started", {"type": "chapter_search_started", "chapter_id": chapter.id})

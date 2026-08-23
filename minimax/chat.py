@@ -281,7 +281,9 @@ def generate_minimax_chat_events(
         system, tools = apply_cache_breakpoints(model_id, system=system, tools=tools)
         thinking_payload = build_thinking_payload(thinking, settings, max_tokens)
 
-        client = MiniMaxClient(api_key=settings.api_key, base_url=settings.base_url)
+        # Why: 文本对话走套餐 Key（tokenplan），普通 Key 仅供视频 H3。
+        chat_key = (settings.minimax_video_api_key or settings.api_key or "").strip()
+        client = MiniMaxClient(api_key=chat_key, base_url=settings.base_url)
         stream = client.stream_message(
             model=model_id,
             messages=messages,

@@ -373,6 +373,139 @@ class GlmWebSearchAdapter:
         return _normalize_search_response(response)
 
 
+class MiniMaxSearchAdapter:
+    """MiniMax 原生服务端搜索（Anthropic Messages 协议 + web_search_20250305 server tool）。
+
+    Why 独立 adapter：MiniMax 搜索走 Anthropic Messages SSE 流式协议，
+    与 qwen/glm 的 REST 搜索接口完全不同，需要单独封装。
+    """
+
+    provider = "minimax"
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str = "MiniMax-M3",
+        base_url: str | None = None,
+        request_json: JsonRequest | None = None,
+    ) -> None:
+        self.api_key = api_key
+        self.model = model
+        self.base_url = (base_url or os.getenv("MINIMAX_ANTHROPIC_BASE_URL", "https://api.minimaxi.com/anthropic")).rstrip("/")
+        self.request_json = request_json or _default_json_request
+
+    def __call__(self, query: str, limit: int) -> list[dict[str, object]]:
+        print(f"[ppt-minimax-search] __call__ 入口 query={query[:80]!r} limit={limit} api_key={'有' if self.api_key else '无'} model={self.model} base_url={self.base_url}")
+        if not self.api_key:
+            raise ProviderNotConfigured("minimax provider is not configured")
+        _validate_https_url(self.base_url)
+
+        # Why: 复用成熟 MiniMaxClient（system list→string 归一化、tool_choice 仅在
+        #   tools 非空时透传、SSE 帧解析、异常映射都用主链路同源实现），避免手写
+        #   HttpClient 与主链路格式不一致导致搜索失败/结果丢失。
+        from minimax.client import MiniMaxClient, MiniMaxAPIError
+
+        system = (
+            "你是一个联网搜索助手。用户会提出一个问题，你必须先调用 web_search 工具搜索相关信息，"
+            "然后基于搜索结果给出简要回答。\n\n"
+            "## 行为约束\n"
+            "1. **第一步必须调用 web_search 工具**——禁止在未调用工具的情况下直接回答。\n"
+            "2. 搜索完成后，用 2-3 句话简要总结搜索结果，不需要写长文。\n"
+            "3. 如果搜索结果不足，如实说明信息缺口。"
+        )
+        web_search_tool = {"type": "web_search_20250305", "name": "web_search"}
+
+        candidates: list[dict[str, object]] = []
+        tool_use_inputs: list[dict] = []
+
+        def _run(choice: str | None) -> list[dict]:
+            client = MiniMaxClient(api_key=self.api_key, base_url=self.base_url)
+            return list(client.stream_message(
+                model=self.model,
+                messages=[{"role": "user", "content": query}],
+                max_tokens=4096,
+                system=system,
+                tools=[web_search_tool],
+                tool_choice=choice,
+            ))
+
+        try:
+            events = _run("any")
+        except MiniMaxAPIError as exc:
+            # Why: 兼容层拒收 tool_choice 只返 "invalid params"，任何 4xx 一律降级
+            #   无 tool_choice 重试（与 minimax/research.py 同策略）。
+            if exc.status_code in (400, 422):
+                print(f"[ppt-minimax-search] 兼容层 {exc.status_code} 拒收，降级无 tool_choice 重试 model={self.model}")
+                try:
+                    events = _run(None)
+                except MiniMaxAPIError as exc2:
+                    print(f"[ppt-minimax-search] 降级重试仍失败 {exc2.status_code}: {exc2}")
+                    raise ProviderRequestFailed(f"MiniMax search failed: {exc2}") from exc2
+            else:
+                print(f"[ppt-minimax-search] MiniMaxAPIError {exc.status_code}: {exc}")
+                raise ProviderRequestFailed(f"MiniMax search failed: {exc}") from exc
+
+        for evt in events:
+            evt_type = evt.get("type", "")
+            if evt_type == "web_search_tool_result":
+                block = evt.get("block") or {}
+                for item in block.get("content") or []:
+                    if not isinstance(item, dict) or item.get("type") != "web_search_result":
+                        continue
+                    url = str(item.get("url") or "")
+                    title = str(item.get("title") or "")[:500]
+                    content = str(item.get("content") or "")[:1200]
+                    if url:
+                        candidates.append({"title": title, "content": content, "url": url})
+            elif evt_type in ("tool_use", "server_tool_use"):
+                tool_input = (evt.get("block") or {}).get("input") or {}
+                if isinstance(tool_input, dict):
+                    tool_use_inputs.append(tool_input)
+
+        print(f"[ppt-minimax-search] 完成：{len(candidates)} 条候选, {len(tool_use_inputs)} 个工具调用")
+
+        # MiniMax M2 系列返回客户端 tool_use（无服务端搜索结果），需手动执行搜索。
+        if tool_use_inputs and not candidates:
+            for tool_input in tool_use_inputs:
+                search_query = (
+                    tool_input.get("query")
+                    or tool_input.get("search_query")
+                    or tool_input.get("q")
+                    or tool_input.get("keyword")
+                    or str(tool_input)
+                )
+                if not search_query or len(str(search_query)) < 2:
+                    continue
+                try:
+                    client = MiniMaxClient(api_key=self.api_key, base_url=self.base_url)
+                    sub_events = list(client.stream_message(
+                        model=self.model,
+                        messages=[{"role": "user", "content": f"搜索：{str(search_query)[:500]}"}],
+                        max_tokens=2048,
+                        system=system,
+                        tools=[web_search_tool],
+                        tool_choice="any",
+                    ))
+                    for evt in sub_events:
+                        if evt.get("type") != "web_search_tool_result":
+                            continue
+                        for item in (evt.get("block") or {}).get("content") or []:
+                            if not isinstance(item, dict) or item.get("type") != "web_search_result":
+                                continue
+                            url = str(item.get("url") or "")
+                            if url:
+                                candidates.append({
+                                    "title": str(item.get("title") or "")[:500],
+                                    "content": str(item.get("content") or "")[:1200],
+                                    "url": url,
+                                })
+                except MiniMaxAPIError as exc:
+                    print(f"[ppt-minimax-search] M2 手动搜索失败 {exc.status_code}: {exc}")
+
+        return candidates[: min(limit, _MAX_SEARCH_RESULTS)]
+
+
 class OpenAICompatibleNativeSearchAdapter:
     """Use a configured Qwen/GLM chat endpoint with its native web search mode."""
 
@@ -535,6 +668,18 @@ def build_settings_search_adapters(*, request_json: JsonRequest | None = None) -
                 api_key=settings.api_key,
                 request_json=request_json,
             )
+    # Why: MiniMax 搜索走 Anthropic Messages SSE 协议，与 qwen/glm REST 接口不同，
+    # 需要单独注册 MiniMaxSearchAdapter。注册条件与 key 取值都要同时兼容普通 Key
+    # (api_key) 和套餐 Key (minimax_video_api_key)：用户可能只配置了二选一，
+    # 若只用普通 api_key 判断会导致 adapter 未注册、搜索直接落入 demo-fallback。
+    minimax_settings = models.load("minimax")
+    minimax_mm_key = (minimax_settings.minimax_video_api_key or minimax_settings.api_key or "").strip()
+    if minimax_mm_key:
+        adapters["minimax"] = MiniMaxSearchAdapter(
+            api_key=minimax_mm_key,
+            model=minimax_settings.model_id,
+            request_json=request_json,
+        )
     return adapters
 
 
@@ -586,7 +731,7 @@ class SearchCoordinator:
     def _provider_name(provider: str) -> SearchProvider:
         if provider == "deepseek":
             return "firecrawl"
-        if provider in {"qwen", "glm", "firecrawl"}:
+        if provider in {"qwen", "glm", "firecrawl", "minimax"}:
             return provider  # type: ignore[return-value]
         raise ValueError(f"unsupported search provider: {provider}")
 
@@ -1209,8 +1354,11 @@ def build_settings_ai_image_adapter(*, request_json: JsonRequest | None = None) 
     if glm_settings.api_key:
         return SettingsAiImageAdapter(api_key=glm_settings.api_key, request_json=request_json)
     minimax_settings = store.load("minimax")
-    if minimax_settings.api_key:
-        return MiniMaxAiImageAdapter(api_key=minimax_settings.api_key)
+    # Why: image-01 走套餐 Key（minimax_video_api_key），与普通文本 api_key 不同。
+    # 留空时回退到普通 api_key，兼容只配了普通 Key 的用户。
+    image_key = (minimax_settings.minimax_video_api_key or minimax_settings.api_key or "").strip()
+    if image_key:
+        return MiniMaxAiImageAdapter(api_key=image_key)
     return None
 
 

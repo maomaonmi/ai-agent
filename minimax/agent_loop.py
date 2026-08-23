@@ -277,7 +277,9 @@ async def generate_minimax_agent_events(
             messages.append({"role": "user", "content": request.message})
 
         _, tools_payload = apply_cache_breakpoints(model_id, system=None, tools=server_tools or None)
-        client = MiniMaxClient(api_key=settings.api_key, base_url=settings.base_url)
+        # Why: 智能体对话走套餐 Key（tokenplan），普通 Key 仅供视频 H3。
+        loop_key = (settings.minimax_video_api_key or settings.api_key or "").strip()
+        client = MiniMaxClient(api_key=loop_key, base_url=settings.base_url)
 
         for round_no in range(1, rounds_limit + 1):
             assembler = StreamAssembler()

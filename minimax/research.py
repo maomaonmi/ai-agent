@@ -160,7 +160,9 @@ def generate_minimax_research_events(
         except Exception:
             logger.exception("[minimax-research] 记忆滑窗注入失败 sid=%s，降级无记忆。", session_id)
 
-    client = MiniMaxClient(api_key=settings.api_key, base_url=settings.base_url)
+    # Why: 文本生成/搜索走套餐 Key（tokenplan），普通 Key 仅供视频 H3。
+    research_key = (settings.minimax_video_api_key or settings.api_key or "").strip()
+    client = MiniMaxClient(api_key=research_key, base_url=settings.base_url)
 
     web_docs: list[dict[str, Any]] = []
     raw_materials: list[dict[str, str]] = []

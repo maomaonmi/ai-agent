@@ -8,5 +8,6 @@
 
 ## Current feature plan
 
-- AI PPT 生成与编辑工作台：[ai-ppt-plan.md](ai-ppt-plan.md)
-- 当前实现应以该文档的接口、阶段和验收标准为准；Day 40 内容保留为历史计划。
+- 全能模式项目化多模态工作区：[omni-mode-plan.md](omni-mode-plan.md)
+- 产品与完整架构依据：[全能模式项目化多模态工作区计划书](../docs/ideas/全能模式项目化多模态工作区计划书.md)
+- AI PPT 计划保留为历史功能计划：[ai-ppt-plan.md](ai-ppt-plan.md)

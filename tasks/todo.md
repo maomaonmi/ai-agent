@@ -8,4 +8,5 @@
 
 ## Current feature tasks
 
-- [ ] AI PPT 生成与编辑工作台：[ai-ppt-todo.md](ai-ppt-todo.md)
+- [ ] 全能模式项目化多模态工作区：[omni-mode-todo.md](omni-mode-todo.md)
+- [ ] AI PPT 历史任务：[ai-ppt-todo.md](ai-ppt-todo.md)

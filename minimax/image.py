@@ -42,7 +42,7 @@ class MiniMaxImageError(RuntimeError):
 
 def _resolve_api_key() -> str:
     # Why: Key 解析与文本链路同源——settings 持久化优先，环境变量兜底，禁止明文回传。
-    # 专项生成（图像/视频）优先用 minimax_video_api_key，留空时回退到普通 api_key。
+    # 图像生成走套餐 Key（tokenplan），留空时回退到普通 api_key；视频 H3 走普通 Key 见 video 链路。
     from model_settings import ModelSettingsStore
 
     settings = ModelSettingsStore().load("minimax")

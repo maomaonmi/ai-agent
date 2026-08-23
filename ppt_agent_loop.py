@@ -23,8 +23,8 @@ class SearchBatchLimitExceeded(ValueError):
     code = "PPT_SEARCH_BATCH_LIMIT_EXCEEDED"
 
 
-SearchProvider = Literal["firecrawl", "qwen", "glm"]
-SearchProviderSelection = Literal["auto", "firecrawl", "qwen", "glm"]
+SearchProvider = Literal["firecrawl", "qwen", "glm", "minimax"]
+SearchProviderSelection = Literal["auto", "firecrawl", "qwen", "glm", "minimax"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -830,8 +830,17 @@ class AgentRunService:
                 selected_provider = current.state.get("searchProvider", "auto")
                 effective_provider = details.get("provider")
                 effective_limit = int(current.state.get("searchLimit", details.get("limit", 20)))
-                if phase.startswith("SEARCH") and selected_provider in {"firecrawl", "qwen", "glm"}:
-                    effective_provider = selected_provider
+                if phase.startswith("SEARCH"):
+                    if selected_provider in {"firecrawl", "qwen", "glm", "minimax"}:
+                        effective_provider = selected_provider
+                    elif selected_provider == "auto":
+                        # Why: auto 跟随 PPT 主模型走原生搜索——主模型用 MiniMax/千问/GLM 时
+                        #   自动用对应原生搜索，避免默认落到 firecrawl（MiniMax 用户会受挫）。
+                        #   deepseek 无原生搜索，保持阶段默认（firecrawl/qwen/glm）。
+                        effective_provider = {"qwen": "qwen", "glm": "glm", "minimax": "minimax"}.get(
+                            str(current.state.get("modelProvider") or "deepseek"),
+                            details.get("provider"),
+                        )
                 started_payload: dict[str, Any] = {"phase": phase, "label": label}
                 if phase.startswith("SEARCH"):
                     SearchBatch(provider=effective_provider, query=current.state.get("prompt", "PPT"), limit=effective_limit)
