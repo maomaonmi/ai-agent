@@ -75,6 +75,13 @@ function privateTemplateFor(upload: PptUploadTask): PptTemplate {
 }
 
 
+function isInteractiveTarget(target: EventTarget | null): boolean {
+  return typeof Element !== "undefined"
+    && target instanceof Element
+    && Boolean(target.closest("button, a, input, textarea, select"));
+}
+
+
 function orbitDistance(index: number, activeIndex: number, total: number): number {
   if (total <= 1) return 0;
   let distance = index - activeIndex;
@@ -114,7 +121,7 @@ function OrbitTemplateCard({
 
   return (
     <article
-      className="group absolute left-1/2 top-[54%] w-[min(74vw,680px)] -translate-x-1/2 -translate-y-1/2 transition-[transform,opacity,filter] duration-700 ease-out [backface-visibility:visible] motion-reduce:transition-none"
+      className="group absolute left-1/2 top-[54%] w-[min(64vw,560px)] -translate-x-1/2 -translate-y-1/2 transition-[transform,opacity,filter] duration-700 ease-out [backface-visibility:visible] motion-reduce:transition-none"
       style={{
         transform: `translate(-50%, -50%) translateY(-${lift}px) rotateY(${ringIndex * angle}deg) translateZ(${radius}px) scale(${scale})`,
         opacity,
@@ -127,6 +134,7 @@ function OrbitTemplateCard({
       <div className={`overflow-hidden rounded-[26px] border bg-white shadow-[0_28px_80px_rgba(15,23,42,0.2)] ${active ? "border-white ring-4 ring-white/80" : "border-white/60"}`}>
         <button
           type="button"
+          onPointerDown={(event) => event.stopPropagation()}
           onClick={onActivate}
           aria-label={`查看模板：${template.name}`}
           aria-current={active ? "true" : undefined}
@@ -137,8 +145,8 @@ function OrbitTemplateCard({
           <span className="sr-only">{template.isPrivate ? "私有模板" : "精选模板"}，{template.name}</span>
         </button>
         <div className="pointer-events-none absolute inset-x-4 bottom-4 flex translate-y-2 items-center gap-2 opacity-0 transition group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100">
-          <button type="button" onClick={onPreview} className="h-9 flex-1 rounded-full border border-white/60 bg-white/90 text-xs font-semibold text-slate-800 shadow-lg backdrop-blur transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">预览</button>
-          <button type="button" onClick={onUse} className="h-9 flex-1 rounded-full bg-violet-600 text-xs font-semibold text-white shadow-lg transition hover:bg-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">使用模板</button>
+          <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={onPreview} className="h-9 flex-1 rounded-full border border-white/60 bg-white/90 text-xs font-semibold text-slate-800 shadow-lg backdrop-blur transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">预览</button>
+          <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={onUse} className="h-9 flex-1 rounded-full bg-violet-600 text-xs font-semibold text-white shadow-lg transition hover:bg-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">使用模板</button>
         </div>
       </div>
     </article>
@@ -219,11 +227,19 @@ export default function PptTemplateMarket() {
   };
 
   const handleOrbitPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (isInteractiveTarget(event.target)) {
+      dragStartX.current = null;
+      return;
+    }
     dragStartX.current = event.clientX;
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const handleOrbitPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (isInteractiveTarget(event.target)) {
+      dragStartX.current = null;
+      return;
+    }
     if (dragStartX.current === null) return;
     const delta = event.clientX - dragStartX.current;
     dragStartX.current = null;
@@ -375,7 +391,7 @@ export default function PptTemplateMarket() {
 
           {visibleTemplates.length > 0 ? (
             <div
-              className="group/rail relative mt-6 h-[620px] overflow-hidden rounded-[30px] border border-white/70 bg-[#fbfcfe] shadow-[0_24px_70px_rgba(15,23,42,0.08)] [background-image:radial-gradient(#dce3ed_1.2px,transparent_1.2px),radial-gradient(#e8edf4_1px,transparent_1px),radial-gradient(circle_at_50%_38%,#ffffff_0%,#f7f9fc_56%,#edf1f7_100%)] [background-position:0_0,16px_18px,0_0] [background-size:28px_28px,44px_44px,100%_100%] [perspective:1800px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+              className="group/rail relative mt-6 h-[560px] overflow-hidden rounded-[30px] border border-white/70 bg-[#fbfcfe] shadow-[0_24px_70px_rgba(15,23,42,0.08)] [background-image:radial-gradient(#dce3ed_1.2px,transparent_1.2px),radial-gradient(#e8edf4_1px,transparent_1px),radial-gradient(circle_at_50%_38%,#ffffff_0%,#f7f9fc_56%,#edf1f7_100%)] [background-position:0_0,16px_18px,0_0] [background-size:28px_28px,44px_44px,100%_100%] [perspective:1800px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
               role="region"
               aria-label="环形模板浏览器"
               tabIndex={0}
@@ -388,10 +404,9 @@ export default function PptTemplateMarket() {
             >
               <div className="pointer-events-none absolute left-1/2 top-[49%] z-0 h-[260px] w-[min(86vw,1240px)] rounded-[50%] border border-slate-300/25 bg-white/20 shadow-[0_0_90px_rgba(148,163,184,0.16)]" style={{ transform: "translate(-50%, -50%) rotateX(64deg)" }} aria-hidden="true" />
               <div className="pointer-events-none absolute inset-x-[8%] bottom-[-40%] h-[70%] rounded-[50%] bg-slate-400/25 blur-3xl" aria-hidden="true" />
-              <div className="pointer-events-none absolute inset-x-[7%] bottom-0 h-28 bg-gradient-to-t from-[#fbfcfe] via-[#fbfcfe]/70 to-transparent" aria-hidden="true" />
               {(() => {
                 const orbitAngle = 360 / Math.max(visibleTemplates.length, 1);
-                const orbitRadius = visibleTemplates.length <= 4 ? 460 : 620;
+                const orbitRadius = visibleTemplates.length <= 4 ? 420 : 520;
                 const orbitRotation = -activeOrbitIndex * orbitAngle;
                 return (
                   <div
