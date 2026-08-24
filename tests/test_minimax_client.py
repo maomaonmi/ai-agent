@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from minimax.client import MiniMaxClient, MiniMaxAPIError, _map_http_error
+from minimax.constants import server_tools_base_url
 from minimax.caching import apply_cache_breakpoints, supports_active_cache
 from minimax.openai_compat import ThinkTagStreamer, strip_think_tags
 from model_settings import MODEL_CATALOG, capabilities_for_model
@@ -181,6 +182,16 @@ def test_client_requires_key():
         raise AssertionError("空 Key 应当被拒绝")
     except MiniMaxAPIError:
         pass
+
+
+def test_server_tools_url_uses_documented_anthropic_host():
+    assert server_tools_base_url("https://api.minimaxi.com/anthropic") == "https://api.minimax.io/anthropic"
+    assert server_tools_base_url("https://custom.example/anthropic") == "https://custom.example/anthropic"
+    client = MiniMaxClient("k", "https://api.minimax.io/anthropic")
+    assert client._candidate_base_urls() == [
+        "https://api.minimax.io/anthropic",
+        "https://api.minimaxi.com/anthropic",
+    ]
 
 
 # ---------------------------------------------------------------- 缓存断点

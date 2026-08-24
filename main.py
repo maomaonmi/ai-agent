@@ -444,7 +444,7 @@ def _build_video_providers() -> dict[str, Any]:
             base_url=os.getenv("ZHIPU_VIDEO_BASE_URL", "https://open.bigmodel.cn/api/paas/v4"),
         )
     minimax_settings = model_settings_store.load("minimax")
-    # Why: H3 视频走普通 Key（sk-api- 前缀）；套餐 Key（tokenplan，sk-cp- 前缀）不支持 H3，
+    # Why: MiniMax 视频走普通 API Key（sk-api- 前缀）；套餐 Key（tokenplan，sk-cp- 前缀）
     # 只能用于文本/搜索/PPT。因此视频生成只用 api_key，不落回套餐 Key。
     minimax_video_key = (minimax_settings.api_key or "").strip()
     if minimax_video_key:
@@ -452,7 +452,7 @@ def _build_video_providers() -> dict[str, Any]:
 
         providers["minimax"] = MiniMaxVideoProvider(
             minimax_video_key,
-            base_url=os.getenv("MINIMAX_VIDEO_BASE_URL", "https://api.minimaxi.com/v2"),
+            base_url=os.getenv("MINIMAX_VIDEO_BASE_URL", "https://api.minimaxi.com/v1"),
         )
     return providers
 
@@ -8351,6 +8351,8 @@ def generate_thesis_body_events(request: ThesisBodyRequest, settings: ModelSetti
             if chapter.id in completed:
                 continue
             generated_any = True
+            requested_words = chapter.target_words or 1_200
+            expanded_words = max(1_600, round(requested_words * 1.25))
             yield event("thesis_body_chapter_started", {
                 "type": "body_chapter_started", "chapter_id": chapter.id,
             })
@@ -8359,7 +8361,7 @@ def generate_thesis_body_events(request: ThesisBodyRequest, settings: ModelSetti
                 messages=[{"role": "user", "content": build_thesis_chapter_prompt(request, chapter)}],
                 stream=True,
                 temperature=0.45,
-                max_tokens=min(settings.max_tokens, max(1_500, min(8_000, chapter.target_words * 2 or 3_000))),
+                max_tokens=min(settings.max_tokens, max(3_000, min(12_000, expanded_words * 2))),
                 extra_body={"enable_thinking": False} if request.provider == "qwen" else None,
             )
             chapter_text = ""

@@ -130,7 +130,10 @@ def test_agent_loop_emits_placeholder_when_web_search_enabled(monkeypatch):
     assert start_node["mcp_tool_count"] == 0
     assert start_node["web_tool_count"] == 1
     assert "工具 1 个" in start_node["message"]
-    assert _NoopClient.calls[0]["tool_choice"] == {"type": "tool", "name": "web_search"}
+    # The first native request follows MiniMax's documented server-tool
+    # example: declare the tool and let the model choose it.  A bounded retry
+    # uses protocol-level `any` only when the first turn returns no source.
+    assert _NoopClient.calls[0]["tool_choice"] is None
 
 
 # ============================================================ 实时 web_docs 推送
@@ -213,6 +216,65 @@ def test_agent_loop_realtime_web_docs_for_each_tool_result(monkeypatch):
     assert first["total"] == 2
     assert first["docs"][0]["url"] == "https://a.com"
     assert first["docs"][1]["title"] == "上海气温"
+
+
+def test_agent_loop_retries_native_search_when_deep_turn_finishes_without_sources(monkeypatch):
+    """深思考首轮提前 end_turn 时，仍按原生 web tool 重试一次并透传来源。"""
+    from minimax import agent_loop as loop
+
+    class _Settings:
+        api_key = "test"
+        base_url = "https://example"
+        model_id = "MiniMax-M3"
+        max_tokens = 8_000
+        temperature = 0.5
+        thinking_budget = 4_096
+        thinking_enabled = True
+        tool_call_rounds = 3
+
+    class _Request:
+        message = "查一下最新资料"
+        mode = "omni"
+        session_id = None
+        attachments: list[Any] = []
+        runtime_settings = type("Runtime", (), {"response_length": "detailed", "deep_thinking": "on"})()
+
+    class _RetryClient:
+        calls: list[dict] = []
+
+        def __init__(self, *_a, **_kw):
+            pass
+
+        def stream_message(self, **kwargs):
+            self.calls.append(kwargs)
+            if len(self.calls) == 1:
+                yield {"type": "thinking_delta", "text": "先思考"}
+                yield {"type": "text_delta", "text": "没有先查"}
+                yield {"type": "message_delta", "stop_reason": "end_turn"}
+                return
+            yield {"type": "server_tool_use", "block": {"name": "web_search", "input": {"query": "最新资料"}}}
+            yield {"type": "web_search_tool_result", "block": {"content": [
+                {"type": "web_search_result", "title": "资料", "url": "https://example.com"},
+            ]}}
+            yield {"type": "text_delta", "text": "已查到"}
+            yield {"type": "message_delta", "stop_reason": "end_turn"}
+
+    monkeypatch.setattr(loop, "MiniMaxClient", _RetryClient)
+
+    async def _collect():
+        return [raw async for raw in loop.generate_minimax_agent_events(
+            request=_Request(), settings=_Settings(), wants_web=True, use_deep=True,
+            memory_engine=_DummyMemory(), openai_tool_specs=[], dispatch=_DummyDispatch(),
+            max_rounds=3,
+        )]
+
+    events = [_parse(raw) for raw in asyncio.run(_collect())]
+    assert len(_RetryClient.calls) == 2
+    assert _RetryClient.calls[0]["tool_choice"] is None
+    assert _RetryClient.calls[1]["tool_choice"] == "any"
+    assert _RetryClient.calls[1]["thinking"] is None
+    docs = [event for event in events if event.get("placeholder") is False]
+    assert docs and docs[0]["docs"][0]["url"] == "https://example.com"
 
 
 # ============================================================ helpers

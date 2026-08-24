@@ -51,6 +51,19 @@ def _h3_request(**overrides) -> VideoGenerationRequest:
     return VideoGenerationRequest(**payload)
 
 
+def _hailuo_request(**overrides) -> VideoGenerationRequest:
+    payload = {
+        "mode": "text_to_video",
+        "prompt": "霓虹雨夜的赛博都市街景",
+        "model": "Hailuo2.3",
+        "ratio": "16:9",
+        "duration": 6,
+        "resolution": "768P",
+    }
+    payload.update(overrides)
+    return VideoGenerationRequest(**payload)
+
+
 class CapabilityRegistryTests(unittest.TestCase):
     def test_h3_registered_with_full_modes(self):
         capability = video_capability("MiniMax-H3")
@@ -95,6 +108,7 @@ class CapabilityRegistryTests(unittest.TestCase):
 class StatusMappingTests(unittest.TestCase):
     def test_queued_and_preparing_map_to_pending(self):
         self.assertEqual(_map_provider_status("queued"), VideoTaskStatus.PENDING)
+        self.assertEqual(_map_provider_status("Queueing"), VideoTaskStatus.PENDING)
         self.assertEqual(_map_provider_status("preparing"), VideoTaskStatus.PENDING)
         self.assertEqual(_map_provider_status("processing"), VideoTaskStatus.RUNNING)
         self.assertEqual(_map_provider_status("succeed"), VideoTaskStatus.SUCCEEDED)
@@ -165,8 +179,45 @@ class SubmitTests(unittest.TestCase):
         with self.assertRaises(VideoProviderError):
             asyncio.run(provider.submit(_h3_request()))
 
+    def test_hailuo_uses_official_v1_flat_payload_and_model_id(self):
+        client = _capture_client([
+            httpx.Response(200, json={"task_id": "hailuo-1", "base_resp": {"status_code": 0}}),
+        ])
+        provider = MiniMaxVideoProvider(api_key="k", client=client)
+        submission = asyncio.run(provider.submit(_hailuo_request()))
+        request = client.captured[0]
+        self.assertEqual(request["url"], "https://api.minimaxi.com/v1/video_generation")
+        self.assertEqual(request["json"], {
+            "model": "MiniMax-Hailuo-2.3",
+            "prompt": "霓虹雨夜的赛博都市街景",
+            "duration": 6,
+            "resolution": "768P",
+        })
+        self.assertEqual(submission.provider_task_id, "hailuo-1")
+
 
 class RetrieveTests(unittest.TestCase):
+    def test_hailuo_v1_query_and_file_retrieve(self):
+        client = _capture_client([
+            httpx.Response(200, json={
+                "task_id": "hailuo-1",
+                "status": "Success",
+                "file_id": "file-1",
+                "base_resp": {"status_code": 0},
+            }),
+            httpx.Response(200, json={
+                "file": {"file_id": "file-1", "download_url": "https://cdn.example.com/out.mp4"},
+                "base_resp": {"status_code": 0},
+            }),
+        ])
+        provider = MiniMaxVideoProvider(api_key="k", client=client)
+        snapshot = asyncio.run(provider.retrieve("hailuo-1"))
+        self.assertEqual(client.captured[0]["url"], "https://api.minimaxi.com/v1/query/video_generation")
+        self.assertEqual(client.captured[0]["params"], {"task_id": "hailuo-1"})
+        self.assertEqual(client.captured[1]["params"], {"file_id": "file-1"})
+        self.assertEqual(snapshot.status, VideoTaskStatus.SUCCEEDED)
+        self.assertEqual(snapshot.video_url, "https://cdn.example.com/out.mp4")
+
     def test_query_url_and_success_snapshot(self):
         client = _capture_client([
             httpx.Response(200, json={

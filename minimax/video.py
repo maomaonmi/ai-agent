@@ -1,12 +1,10 @@
 """MiniMax-H3 视频生成 Provider（video_engine.VideoProvider 协议实现）。
 
-官方协议（spec.md 协议事实表）：
-- 创建：POST {VIDEO_API_BASE}/video_generation，多模态 content[] 结构
-  （type ∈ text/image_url/video_url，role ∈ first_frame/last_frame/reference_image/reference_video）；
-- 轮询：GET {VIDEO_API_BASE}/query/video_generation/{task_id}（官方推荐 10s 间隔）；
-- ratio 规则：t2v/r2v 必填非 adaptive（auto 落默认 16:9）；i2v/首尾帧恒 adaptive；
-- resolution：768P / 2K；duration 4–15 整数；
-- succeeded 后 task.content.url 即成片地址；业务错误在 base_resp.status_code != 0。
+MiniMax Hailuo 官方 v1 协议：
+- 创建：POST {VIDEO_API_BASE}/video_generation，使用扁平 prompt/model/duration/resolution；
+- 轮询：GET {VIDEO_API_BASE}/query/video_generation?task_id=...；
+- 成功后通过 file_id 调用 /files/retrieve 获取 download_url；
+- 业务错误在 base_resp.status_code != 0。
 
 Why 放本包：供应商协议细节（content[] 组装、base_resp 错误面）收敛在 minimax 包，
 video_engine.py 仅注册能力条目，main.py 薄实例化（单向依赖，无循环 import）。
@@ -33,6 +31,20 @@ from .constants import VIDEO_API_BASE, VIDEO_MODEL_ID, VIDEO_MODEL_ID_HAILUO
 
 _DEFAULT_BASE_URL = VIDEO_API_BASE
 
+# API 能力目录使用短 ID，MiniMax v1 接口使用官方模型名。
+_MODEL_ALIASES = {
+    "Hailuo2.3": VIDEO_MODEL_ID_HAILUO,
+    "Hailuo 2.3": VIDEO_MODEL_ID_HAILUO,
+    "MiniMax-Hailuo-2.3": VIDEO_MODEL_ID_HAILUO,
+}
+_OFFICIAL_V1_MODELS = {
+    "MiniMax-Hailuo-2.3",
+    "MiniMax-Hailuo-2.3-Fast",
+    "MiniMax-Hailuo-02",
+    "T2V-01-Director",
+    "T2V-01",
+}
+
 
 def _base_resp_error(payload: Any, *, stage: str) -> VideoProviderError | None:
     """MiniMax 业务错误统一出口：HTTP 200 但 base_resp.status_code != 0。"""
@@ -50,7 +62,12 @@ class MiniMaxVideoProvider:
     def __init__(self, api_key: str, *, client: httpx.AsyncClient | None = None, base_url: str = _DEFAULT_BASE_URL):
         self.api_key = api_key
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0))
-        self.base_url = base_url.rstrip("/")
+        normalized_base = base_url.rstrip("/")
+        # 旧配置常残留 /v2；官方视频接口已统一在 /v1，避免环境变量把修复覆盖掉。
+        if normalized_base == "https://api.minimaxi.com/v2":
+            normalized_base = "https://api.minimaxi.com/v1"
+        self.base_url = normalized_base
+        self._uses_official_v1 = self.base_url.endswith("/v1")
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
@@ -91,23 +108,33 @@ class MiniMaxVideoProvider:
         return content
 
     async def submit(self, request: VideoGenerationRequest) -> ProviderSubmission:
-        # Why: H3 与 Hailuo2.3 共用同一 API 端点，model 字段由前端传入；
-        # request.model 为空时默认 H3（全功能模型）。
-        model_id = request.model or VIDEO_MODEL_ID
-        payload: dict[str, Any] = {
-            "model": model_id,
-            "content": self._build_content(request),
-            "duration": request.duration,
-            "resolution": request.resolution,
-        }
-        # Why: Hailuo2.3 仅支持文生视频，不支持首尾帧/参考素材，
-        # 如果前端误传了这些参数，H3 的 content 构建会包含它们但 Hailuo 会拒收。
-        # 此处不额外过滤——前端 capability 已限制 Hailuo 仅 text_to_video 模式。
-        # Why ratio 规则：官方要求 i2v（含首尾帧）恒 adaptive；t2v/r2v 必须显式非 adaptive，
-        # 前端 "auto" 语义在此收敛为 16:9 默认档，保证请求永不携带非法 ratio。
-        if request.mode in {"image_to_video", "start_end_video"}:
-            payload["ratio"] = "adaptive"
+        model_id = _MODEL_ALIASES.get(request.model or "", request.model or VIDEO_MODEL_ID)
+        # MiniMax v1 的 Hailuo 请求是扁平结构；content[] 是另一套旧/实验协议，
+        # 发送给 Hailuo 会得到 invalid params，即使提示词本身完全正确。
+        if model_id in _OFFICIAL_V1_MODELS:
+            payload: dict[str, Any] = {
+                "model": model_id,
+                "prompt": request.prompt,
+                "duration": request.duration,
+                "resolution": request.resolution,
+            }
+            if request.first_frame_url:
+                payload["first_frame_image"] = request.first_frame_url
+            if request.last_frame_url:
+                payload["last_frame_image"] = request.last_frame_url
         else:
+            # 保留尚未迁移的 H3/实验协议分支，避免影响已有自定义适配器。
+            payload = {
+                "model": model_id,
+                "content": self._build_content(request),
+                "duration": request.duration,
+                "resolution": request.resolution,
+            }
+        # Hailuo capability 当前仅暴露 text_to_video；其他模型仍走旧适配分支。
+        # 旧协议 ratio 规则：i2v（含首尾帧）恒 adaptive，t2v/r2v 使用显式比例。
+        if model_id not in _OFFICIAL_V1_MODELS and request.mode in {"image_to_video", "start_end_video"}:
+            payload["ratio"] = "adaptive"
+        elif model_id not in _OFFICIAL_V1_MODELS:
             payload["ratio"] = request.ratio if request.ratio != "auto" else "16:9"
 
         response = await self.client.post(f"{self.base_url}/video_generation", headers=self._headers(), json=payload)
@@ -123,10 +150,17 @@ class MiniMaxVideoProvider:
         return ProviderSubmission(task_id, VideoTaskStatus.PENDING)
 
     async def retrieve(self, provider_task_id: str) -> ProviderTaskSnapshot:
-        response = await self.client.get(
-            f"{self.base_url}/query/video_generation/{provider_task_id}",
-            headers=self._headers(),
-        )
+        if self._uses_official_v1:
+            response = await self.client.get(
+                f"{self.base_url}/query/video_generation",
+                headers=self._headers(),
+                params={"task_id": provider_task_id},
+            )
+        else:
+            response = await self.client.get(
+                f"{self.base_url}/query/video_generation/{provider_task_id}",
+                headers=self._headers(),
+            )
         body = _json_or_none(response)
         if response.is_error:
             raise _error_from_response(response, body)
@@ -143,10 +177,23 @@ class MiniMaxVideoProvider:
             business_error = _base_resp_error(body, stage="任务查询")
             if business_error:
                 raise business_error
-        # Why: MiniMax 查询响应 content 在 body.task.content 内（非顶层），需兼容两种格式。
+        # v1 成功响应返回 file_id，旧协议可能直接返回 content.url；两者都兼容。
         task_obj = (body or {}).get("task") if isinstance(body, dict) else None
         content = (task_obj or {}).get("content") if isinstance(task_obj, dict) else (body or {}).get("content") if isinstance(body, dict) else None
         video_url = (content or {}).get("url") if isinstance(content, dict) else None
+        if self._uses_official_v1 and not video_url and status_raw.upper() in {"SUCCESS", "SUCCEEDED"}:
+            file_id = (body or {}).get("file_id") if isinstance(body, dict) else None
+            if file_id:
+                file_response = await self.client.get(
+                    f"{self.base_url}/files/retrieve",
+                    headers=self._headers(),
+                    params={"file_id": file_id},
+                )
+                file_body = _json_or_none(file_response)
+                if file_response.is_error:
+                    raise _error_from_response(file_response, file_body)
+                file_obj = (file_body or {}).get("file") if isinstance(file_body, dict) else None
+                video_url = (file_obj or {}).get("download_url") if isinstance(file_obj, dict) else None
         base_resp = (task_obj or {}).get("base_resp") if isinstance(task_obj, dict) else (body or {}).get("base_resp") if isinstance(body, dict) else None
         failed = _map_provider_status(status_raw) == VideoTaskStatus.FAILED
         return ProviderTaskSnapshot(

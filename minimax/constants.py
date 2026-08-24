@@ -1,14 +1,49 @@
 """MiniMax 接入包常量（协议端点 / 模型 ID / 官方限制）。"""
 
+from urllib.parse import urlsplit, urlunsplit
+
 # ---- 端点 ----
 # Why: Anthropic 兼容端点是主链路——M3 thinking 块 / Interleaved Thinking /
 # 服务端 web_search 的唯一路径；OpenAI 兼容端点仅供 LangGraph 多智能体与 Code 链路复用。
-ANTHROPIC_BASE_URL = "https://api.minimaxi.com/anthropic"
+# MiniMax 官方 Server Tools 文档发布的 Anthropic 地址。图像、视频和
+# OpenAI-compatible 链路仍使用下方的 regional ``api.minimaxi.com`` 地址。
+ANTHROPIC_BASE_URL = "https://api.minimax.io/anthropic"
 OPENAI_COMPAT_BASE_URL = "https://api.minimaxi.com/v1"
 
 # 专项生成端点（图像/视频，不在兼容协议内）
 IMAGE_API_URL = "https://api.minimaxi.com/v1/image_generation"
-VIDEO_API_BASE = "https://api.minimaxi.com/v2"
+# MiniMax 视频生成使用 v1 专项接口。v2/video_generation 会返回 2013
+#（模型不支持该接口），即使请求体本身合法也会失败。
+VIDEO_API_BASE = "https://api.minimaxi.com/v1"
+
+
+def server_tools_base_url(base_url: str) -> str:
+    """Normalize the Anthropic URL used by the native Server Tools call.
+
+    Existing settings may still contain the regional ``api.minimaxi.com``
+    host.  Only the Anthropic path is normalized; media and OpenAI-compatible
+    URLs are intentionally left untouched.
+    """
+    raw = (base_url or ANTHROPIC_BASE_URL).strip().rstrip("/")
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return raw
+    if parsed.hostname == "api.minimaxi.com" and parsed.path.rstrip("/") == "/anthropic":
+        return urlunsplit((parsed.scheme or "https", "api.minimax.io", "/anthropic", "", ""))
+    return raw
+
+
+def alternate_server_tools_base_url(base_url: str) -> str | None:
+    """Return the regional Anthropic endpoint as a network fallback."""
+    raw = (base_url or "").strip().rstrip("/")
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
+        return None
+    if parsed.hostname == "api.minimax.io" and parsed.path.rstrip("/") == "/anthropic":
+        return urlunsplit((parsed.scheme or "https", "api.minimaxi.com", "/anthropic", "", ""))
+    return None
 
 # ---- 文本模型 ID（与 model_settings.MODEL_CATALOG 保持一致）----
 MODEL_M3 = "MiniMax-M3"
@@ -19,8 +54,9 @@ MODEL_M2_5_HIGHSPEED = "MiniMax-M2.5-highspeed"
 
 # ---- 专项模型 ID ----
 IMAGE_MODEL_ID = "image-01"
-VIDEO_MODEL_ID = "Hailuo2.3"
-VIDEO_MODEL_ID_HAILUO = "Hailuo2.3"
+# 前端能力表保留短 ID，但发给 MiniMax 的 model 必须使用官方名称。
+VIDEO_MODEL_ID = "MiniMax-Hailuo-2.3"
+VIDEO_MODEL_ID_HAILUO = "MiniMax-Hailuo-2.3"
 VIDEO_MODEL_ID_H3 = "MiniMax-H3"
 
 # ---- 服务端工具（仅 Anthropic Messages API，Beta）----

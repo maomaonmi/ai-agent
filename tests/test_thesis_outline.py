@@ -223,6 +223,8 @@ class ThesisOutlineContractTests(unittest.TestCase):
         self.assertIn("[ref:r1]", prompt)
         self.assertIn("不得编造", prompt)
         self.assertIn("800", prompt)
+        self.assertIn("至少 1600", prompt)
+        self.assertIn("不要使用 Markdown 控制符", prompt)
 
     def test_body_endpoint_streams_tokens_by_chapter(self):
         def fake_body_events(_request, _settings):

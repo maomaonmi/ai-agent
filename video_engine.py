@@ -284,12 +284,14 @@ _VIDEO_CAPABILITIES: tuple[dict[str, Any], ...] = (
         "description": "文生视频（Max 套餐，3 条/日）",
         "modes": ["text_to_video"],
         "future_modes": [],
-        "ratios": ["16:9", "9:16", "1:1", "4:3", "3:4", "auto"],
-        "resolutions": ["768P"],
-        "duration_min": 4, "duration_max": 15, "durations": [],
+        # v1 文生视频请求没有 ratio 字段，避免 UI 暴露一个不会生效的选项。
+        "ratios": ["16:9"],
+        # MiniMax 官方约束：2.3 支持 768P 下 6/10 秒，1080P 下仅 6 秒。
+        "resolutions": ["768P", "1080P"],
+        "duration_min": 6, "duration_max": 10, "durations": [6, 10],
         "supports_audio": True, "supports_audio_input": False, "enabled": True,
         "max_reference_videos": 0, "max_references": 0,
-        "docs_url": "https://platform.minimaxi.com/document/Video%20Generation",
+        "docs_url": "https://platform.minimaxi.com/docs/api-reference/video-generation-t2v",
     },
 )
 
@@ -405,7 +407,7 @@ class VideoGenerationRequest(BaseModel):
             raise ValueError("尾帧 URL 仅用于首尾帧模式")
         if self.model == "wan2.7-i2v" and not self.prompt:
             raise ValueError("wan2.7-i2v 的 prompt 不能为空")
-        prompt_limit = 800 if self.model == "wan2.2-kf2v-flash" else 1500 if self.model.startswith("wan2.6-i2v") else 512 if self.model.startswith("vidu2-") else 7000 if self.model == "MiniMax-H3" else 5000
+        prompt_limit = 800 if self.model == "wan2.2-kf2v-flash" else 1500 if self.model.startswith("wan2.6-i2v") else 512 if self.model.startswith("vidu2-") else 7000 if self.model == "MiniMax-H3" else 2000 if self.model == "Hailuo2.3" else 5000
         if len(self.prompt) > prompt_limit:
             raise ValueError(f"{self.model} 的 prompt 不能超过 {prompt_limit} 个字符")
         if self.shot_type and not self.model.startswith("wan2.6-i2v"):
@@ -421,6 +423,8 @@ class VideoGenerationRequest(BaseModel):
             raise ValueError(f"{self.model} 的 duration 必须在 {capability['duration_min']}–{capability['duration_max']} 秒之间")
         if capability["durations"] and self.duration not in capability["durations"]:
             raise ValueError(f"{self.model} 的 duration 只能是 {capability['durations']}")
+        if self.model == "Hailuo2.3" and self.resolution == "1080P" and self.duration != 6:
+            raise ValueError("Hailuo 2.3 在 1080P 下只支持 6 秒；10 秒请改用 768P")
         if self.mode in {"reference_to_video", "multi_image_to_video"}:
             max_references = int(capability.get("max_references", 5))
             max_videos = int(capability.get("max_reference_videos", 3))
@@ -509,8 +513,9 @@ class VideoProvider(Protocol):
 
 def _map_provider_status(value: Any) -> VideoTaskStatus:
     normalized = str(value or "UNKNOWN").upper()
-    # Why: MiniMax H3 用 queued/preparing 表示排队中，归一为 PENDING 避免落 UNKNOWN 终态误判。
-    if normalized in {"PENDING", "QUEUED", "PREPARING"}:
+    # Why: MiniMax v1 用 Queueing/Preparing 表示排队中，归一为 PENDING 避免落 UNKNOWN 终态误判。
+    # MiniMax v1 使用 Queueing（不是 Queued）；两种拼写都保留兼容。
+    if normalized in {"PENDING", "QUEUED", "QUEUEING", "PREPARING"}:
         return VideoTaskStatus.PENDING
     if normalized in {"RUNNING", "PROCESSING"}:
         return VideoTaskStatus.RUNNING

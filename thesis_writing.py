@@ -75,6 +75,8 @@ class ThesisBodyRequest(BaseModel):
 
 
 def build_thesis_chapter_prompt(request: ThesisBodyRequest, chapter: ThesisBodyChapter) -> str:
+    requested_words = chapter.target_words or 1200
+    expanded_words = max(1600, round(requested_words * 1.25))
     sections = "\n".join(
         f"- {section.title}（约 {section.target_words or '按内容需要'} 字）：{section.writing_brief or '围绕标题展开'}"
         for section in chapter.sections
@@ -87,7 +89,7 @@ def build_thesis_chapter_prompt(request: ThesisBodyRequest, chapter: ThesisBodyC
 论文标题：{request.title}
 当前章节：{chapter.title}
 章节任务：{chapter.summary or '围绕章节标题完成论证'}
-目标篇幅：约 {chapter.target_words or 1200} 字
+目标篇幅：约 {requested_words} 字；为保证章节完整性，本次正文建议扩展至至少 {expanded_words} 字，正文不得明显短于该下限。
 
 子章节结构：
 {sections}
@@ -98,9 +100,11 @@ def build_thesis_chapter_prompt(request: ThesisBodyRequest, chapter: ThesisBodyC
 写作要求：
 - 严格按子章节顺序输出，保留子章节标题；不重复输出大章节标题。
 - 论证连贯、避免空话，使用正式学术中文。
+- 充分展开每个子章节，至少覆盖概念界定、作用机制、相关证据与本节小结，避免只写概括性短段落。
 - 只有在资料确实支持对应事实时，才在句末使用 [ref:资料ID]；不得编造资料ID、作者、数据或引用。
 - 没有足够资料支持的判断，应明确使用审慎措辞，不得伪装成已证实事实。
-- 直接输出正文，不要 Markdown 代码块，不要解释生成过程。"""
+- 直接输出正文，不要 Markdown 代码块，不要解释生成过程；不要使用 Markdown 控制符（不要 #、**、---），保留纯文本小标题即可。
+- 不要以“我将为您…”、“首先让我…”等过程性套话开头，直接从本章内容开始。"""
 
 
 def build_citation_verification_prompt(chapter: ThesisBodyChapter, content: str, used_reference_ids: set[str]) -> str:

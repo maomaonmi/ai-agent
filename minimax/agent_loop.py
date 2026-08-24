@@ -34,7 +34,7 @@ from .chat import (
     extract_web_docs,
 )
 from .client import MiniMaxAPIError, MiniMaxClient
-from .constants import WEB_SEARCH_TOOL
+from .constants import WEB_SEARCH_TOOL, server_tools_base_url
 from model_settings import capabilities_for_model
 from .caching import apply_cache_breakpoints
 
@@ -314,6 +314,7 @@ async def generate_minimax_agent_events(
     last_stop_reason: str | None = None
     saw_tool_use = False
     reasoning_budget_exhausted = False
+    search_retry_used = False
 
     def event(name: str, data: dict[str, Any]) -> str:
         return _sse(name, data)
@@ -392,32 +393,66 @@ async def generate_minimax_agent_events(
             messages.append({"role": "user", "content": request.message})
 
         _, tools_payload = apply_cache_breakpoints(model_id, system=None, tools=server_tools or None)
+        # The official MiniMax Server Tools example relies on the model's
+        # native decision (tools declared, no client-side tool_choice).  M3
+        # gateways have been observed to ignore a forced named server tool in
+        # a thinking request.  Tell the model explicitly that this turn is a
+        # web-enabled turn, then use a bounded `any` retry only if no result
+        # block arrives.
+        search_system_prompt = (
+            "联网搜索已开启。请先调用 web_search 获取真实来源，再根据检索结果回答用户；"
+            "不要在没有检索的情况下直接结束。"
+            if wants_web and not anthropic_tools
+            else None
+        )
         # Why: 智能体对话走套餐 Key（tokenplan），普通 Key 仅供视频 H3。
         loop_key = (
             getattr(settings, "minimax_video_api_key", "")
             or getattr(settings, "api_key", "")
             or ""
         ).strip()
-        client = MiniMaxClient(api_key=loop_key, base_url=settings.base_url)
+        client = MiniMaxClient(api_key=loop_key, base_url=server_tools_base_url(settings.base_url))
 
         for round_no in range(1, rounds_limit + 1):
             assembler = StreamAssembler()
             stream_cut_short = False
+            # Anthropic server tools are not ordinary client function tools:
+            # some MiniMax gateways ignore a named `tool` choice for
+            # `web_search_20250305`, especially when thinking is enabled.  Use
+            # the protocol-level `any` choice when the only available server
+            # tool is web_search; this still forces a search without relying on
+            # a server-tool name being accepted by the gateway.
+            web_choice_available = wants_web and any(
+                tool.get("type") == "web_search_20250305" for tool in server_tools
+            )
+            web_only_choice = web_choice_available and not anthropic_tools
+            search_retry = web_choice_available and search_retry_used
             round_thinking = staged_thinking_payload(
                 PRE_TOOL_THINKING_BUDGET if round_no == 1 else POST_TOOL_THINKING_BUDGET,
             )
+            if search_retry:
+                # If the first interleaved-thinking request ended without a
+                # server result, retry the native call in the same way as the
+                # proven standalone web mode: no thinking in the tool-selection
+                # turn, so the model cannot spend the entire turn reasoning and
+                # finish before emitting server_tool_use.
+                round_thinking = None
             stream: Iterator[dict] = client.stream_message(
                 model=model_id,
                 messages=messages,
                 max_tokens=staged_max_tokens(
                     PRE_TOOL_THINKING_BUDGET if round_no == 1 else POST_TOOL_THINKING_BUDGET,
                 ),
-                system=None,
+                system=search_system_prompt,
                 tools=tools_payload,
                 tool_choice=(
-                    {"type": "tool", "name": "web_search"}
-                    if round_no == 1 and any(tool.get("type") == "web_search_20250305" for tool in server_tools)
-                    else None
+                    "any"
+                    if web_only_choice and search_retry
+                    else (
+                        {"type": "tool", "name": "web_search"}
+                        if web_choice_available and not web_only_choice and (round_no == 1 or search_retry)
+                        else None
+                    )
                 ),
                 thinking=round_thinking,
                 temperature=temperature,
@@ -478,6 +513,41 @@ async def generate_minimax_agent_events(
             assistant_blocks = assembler.blocks()
             tool_use_blocks = [b for b in assistant_blocks if b.get("type") == "tool_use"]
             if reasoning_budget_exhausted or assembler.stop_reason != "tool_use" or not tool_use_blocks:
+                # A native web request that returns end_turn without a single
+                # source is not a successful search.  Give the same native
+                # endpoint one bounded retry before accepting an ungrounded
+                # answer.  This is deliberately not an external-search
+                # fallback: the response must still come from MiniMax's
+                # web_search_20250305 server tool.
+                if (
+                    web_choice_available
+                    and not web_docs
+                    and not saw_tool_use
+                    and not search_retry_used
+                    and round_no < rounds_limit
+                ):
+                    search_retry_used = True
+                    answer_parts.clear()
+                    yield event("node", {
+                        "node_name": "web_search",
+                        "status": "processing",
+                        "message": "首轮未返回来源，按原生联网模式重试搜索…",
+                        "provider": "minimax",
+                        "native_search": True,
+                        "retry": True,
+                        "timestamp_ms": int(time.time() * 1000),
+                    })
+                    continue
+                if web_choice_available and wants_web and not web_docs:
+                    yield event("node", {
+                        "node_name": "web_search",
+                        "status": "skipped",
+                        "message": "MiniMax 原生联网未返回来源；请切换到支持 web_search 的模型（如 M2.7）重试",
+                        "provider": "minimax",
+                        "native_search": False,
+                        "skipped_reason": "native_search_no_result",
+                        "timestamp_ms": int(time.time() * 1000),
+                    })
                 break  # end_turn：最终答案已流式输出完毕
 
             # Interleaved Thinking 纪律：assistant 完整块列表（thinking+text+tool_use）回传。
@@ -685,10 +755,15 @@ async def generate_minimax_agent_events(
         yield event("node", {
             "node_name": "chat",
             "status": "completed",
-            "message": f"生成完成：答案 {len(final_answer)} 字" + (f"，推理过程 {reasoning_len} 字" if thinking else ""),
+            "message": (
+                f"生成完成：答案 {len(final_answer)} 字"
+                + (f"，推理过程 {reasoning_len} 字" if thinking else "")
+                + (f"，搜索结果 {len(web_docs)} 个" if wants_web else "")
+            ),
             "provider": "minimax",
             "answer_len": len(final_answer),
             "reasoning_len": reasoning_len if thinking else 0,
+            "source_count": len(web_docs),
             "thinking": thinking,
             "timestamp_ms": int(time.time() * 1000),
         })

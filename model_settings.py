@@ -266,7 +266,7 @@ class ModelSettingsStore:
                 return ModelSettings(
                     provider="minimax",
                     api_format="anthropic_messages",
-                    base_url="https://api.minimaxi.com/anthropic",
+                    base_url="https://api.minimax.io/anthropic",
                     model_id="MiniMax-M3",
                     display_name="MiniMax M3",
                     input_context=1_000_000,

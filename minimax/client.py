@@ -18,7 +18,12 @@ from typing import Any, Iterator
 
 import httpx
 
-from .constants import ANTHROPIC_BASE_URL, ANTHROPIC_VERSION, DEFAULT_TIMEOUT
+from .constants import (
+    ANTHROPIC_BASE_URL,
+    ANTHROPIC_VERSION,
+    DEFAULT_TIMEOUT,
+    alternate_server_tools_base_url,
+)
 
 logger = logging.getLogger("minimax.client")
 
@@ -70,8 +75,16 @@ class MiniMaxClient:
             "Content-Type": "application/json",
         }
 
-    def _messages_url(self) -> str:
-        return f"{self.base_url}/v1/messages"
+    def _messages_url(self, base_url: str | None = None) -> str:
+        return f"{(base_url or self.base_url).rstrip('/')}/v1/messages"
+
+    def _candidate_base_urls(self) -> list[str]:
+        """Prefer the documented host, then try the regional host once."""
+        candidates = [self.base_url]
+        alternate = alternate_server_tools_base_url(self.base_url)
+        if alternate and alternate not in candidates:
+            candidates.append(alternate)
+        return candidates
 
     # ------------------------------------------------------------------ 非流式
     def create_message(
@@ -126,12 +139,23 @@ class MiniMaxClient:
             payload["temperature"] = temperature
         if extra_body:
             payload.update(extra_body)
-        try:
-            with httpx.Client(timeout=self.timeout) as client:
-                response = client.post(self._messages_url(), headers=self._headers(), json=payload)
-        except httpx.HTTPError as exc:
-            logger.exception("[minimax] 请求异常")
-            raise MiniMaxAPIError(f"MiniMax 连接失败：{exc}") from exc
+        response = None
+        for index, base_url in enumerate(self._candidate_base_urls()):
+            try:
+                with httpx.Client(timeout=self.timeout) as client:
+                    response = client.post(self._messages_url(base_url), headers=self._headers(), json=payload)
+                break
+            except httpx.ConnectError as exc:
+                if index + 1 < len(self._candidate_base_urls()):
+                    logger.warning("[minimax] %s TLS 连接失败，回退 regional Anthropic endpoint: %s", base_url, exc)
+                    continue
+                logger.exception("[minimax] 请求异常")
+                raise MiniMaxAPIError(f"MiniMax 连接失败：{exc}") from exc
+            except httpx.HTTPError as exc:
+                logger.exception("[minimax] 请求异常")
+                raise MiniMaxAPIError(f"MiniMax 连接失败：{exc}") from exc
+        if response is None:
+            raise MiniMaxAPIError("MiniMax 连接失败：没有可用的 Anthropic endpoint")
         if response.status_code != 200:
             raise _map_http_error(response.status_code, response.text)
         data = response.json()
@@ -215,19 +239,28 @@ class MiniMaxClient:
         if extra_body:
             payload.update(extra_body)
 
-        try:
-            with httpx.Client(timeout=self.timeout) as http:
-                with http.stream("POST", self._messages_url(), headers=self._headers(), json=payload) as response:
-                    if response.status_code != 200:
-                        body = (response.read() or b"").decode("utf-8", errors="replace")
-                        raise _map_http_error(response.status_code, body)
-                    # Why: 手动 UTF-8 解码——Windows 下默认编码可能是 GBK（MCP fetch 编码超时前科）。
-                    yield from self._iter_sse_events(response)
-        except MiniMaxAPIError:
-            raise
-        except httpx.HTTPError as exc:
-            logger.exception("[minimax] 流式请求异常")
-            raise MiniMaxAPIError(f"MiniMax 流式连接失败：{exc}") from exc
+        candidates = self._candidate_base_urls()
+        for index, base_url in enumerate(candidates):
+            try:
+                with httpx.Client(timeout=self.timeout) as http:
+                    with http.stream("POST", self._messages_url(base_url), headers=self._headers(), json=payload) as response:
+                        if response.status_code != 200:
+                            body = (response.read() or b"").decode("utf-8", errors="replace")
+                            raise _map_http_error(response.status_code, body)
+                        # Why: 手动 UTF-8 解码——Windows 下默认编码可能是 GBK（MCP fetch 编码超时前科）。
+                        yield from self._iter_sse_events(response)
+                return
+            except MiniMaxAPIError:
+                raise
+            except httpx.ConnectError as exc:
+                if index + 1 < len(candidates):
+                    logger.warning("[minimax] %s TLS 连接失败，回退 regional Anthropic endpoint: %s", base_url, exc)
+                    continue
+                logger.exception("[minimax] 流式请求异常")
+                raise MiniMaxAPIError(f"MiniMax 流式连接失败：{exc}") from exc
+            except httpx.HTTPError as exc:
+                logger.exception("[minimax] 流式请求异常")
+                raise MiniMaxAPIError(f"MiniMax 流式连接失败：{exc}") from exc
 
     # ------------------------------------------------------------------ SSE 解析
     @staticmethod
@@ -243,6 +276,8 @@ class MiniMaxClient:
         block_types: dict[int, str] = {}
         block_meta: dict[int, dict] = {}       # tool_use: {id, name}
         block_json_parts: dict[int, list[str]] = {}
+        block_payloads: dict[int, dict] = {}
+        result_block_emitted: set[int] = set()
         usage: dict = {}
 
         # 累积 buffer：iter_bytes 单次返回的字节块可能横跨多行 SSE。
@@ -281,6 +316,7 @@ class MiniMaxClient:
                     block = evt.get("content_block") or {}
                     btype = str(block.get("type", ""))
                     block_types[index] = btype
+                    block_payloads[index] = dict(block)
                     if btype == "tool_use":
                         block_meta[index] = {"id": block.get("id", ""), "name": block.get("name", "")}
                         block_json_parts[index] = []
@@ -298,6 +334,7 @@ class MiniMaxClient:
                             "type": "web_search_tool_result",
                             "block": {**dict(block), "type": "web_search_tool_result"},
                         }
+                        result_block_emitted.add(index)
 
                 # 少数网关会把搜索结果作为顶层事件发送，而不是
                 # content_block_start。也统一成同一份上层事件契约。
@@ -327,12 +364,27 @@ class MiniMaxClient:
                     elif dtype == "signature_delta":
                         # thinking 块签名：Interleaved Thinking 回传历史时必须携带（agent_loop 消费）。
                         yield {"type": "signature_delta", "index": index, "text": str(delta.get("signature", ""))}
+                    elif dtype in {
+                        "web_search_tool_result",
+                        "web_search_result",
+                        "server_tool_result",
+                    }:
+                        # Some gateways stream the server result as a delta
+                        # rather than a complete content_block_start.  Keep
+                        # the raw result payload so the upper layer cannot
+                        # silently lose all source URLs.
+                        block = delta.get("content_block") or delta.get("block") or delta
+                        yield {
+                            "type": "web_search_tool_result",
+                            "block": {**dict(block), "type": "web_search_tool_result"},
+                        }
 
                 elif evt_type == "content_block_stop":
                     index = int(evt.get("index", 0))
                     btype = block_types.pop(index, "")
                     meta = block_meta.pop(index, None)
                     parts = block_json_parts.pop(index, None)
+                    payload = block_payloads.pop(index, None) or {}
                     if btype == "tool_use" and meta is not None:
                         raw_json = "".join(parts or []).strip()
                         try:
@@ -341,6 +393,16 @@ class MiniMaxClient:
                             logger.warning("[minimax] tool_use 参数 JSON 解析失败：%s", raw_json[:120])
                             tool_input = {"_raw": raw_json}
                         yield {"type": "tool_use", "block": {"id": meta["id"], "name": meta["name"], "input": tool_input}}
+                    elif btype in {
+                        "web_search_tool_result",
+                        "web_search_result",
+                        "server_tool_result",
+                    } and index not in result_block_emitted and payload:
+                        yield {
+                            "type": "web_search_tool_result",
+                            "block": {**payload, "type": "web_search_tool_result"},
+                        }
+                    result_block_emitted.discard(index)
 
                 elif evt_type == "message_delta":
                     delta = evt.get("delta") or {}

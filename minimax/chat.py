@@ -24,7 +24,7 @@ from model_settings import MODEL_CATALOG, ModelSettings
 
 from .caching import apply_cache_breakpoints
 from .client import MiniMaxAPIError, MiniMaxClient
-from .constants import WEB_SEARCH_TOOL
+from .constants import WEB_SEARCH_TOOL, server_tools_base_url
 from model_settings import capabilities_for_model
 
 logger = logging.getLogger("minimax.chat")
@@ -332,7 +332,10 @@ def generate_minimax_chat_events(
 
         # Why: 文本对话走套餐 Key（tokenplan），普通 Key 仅供视频 H3。
         chat_key = (settings.minimax_video_api_key or settings.api_key or "").strip()
-        client = MiniMaxClient(api_key=chat_key, base_url=settings.base_url)
+        client = MiniMaxClient(
+            api_key=chat_key,
+            base_url=server_tools_base_url(settings.base_url) if wants_web else settings.base_url,
+        )
         stream = client.stream_message(
             model=model_id,
             messages=messages,
@@ -425,10 +428,12 @@ def generate_minimax_chat_events(
             "message": (
                 f"生成完成：答案 {len(final_answer)} 字"
                 + (f"，推理过程 {reasoning_len} 字" if thinking else "")
+                + (f"，搜索结果 {len(web_docs)} 个" if wants_web else "")
             ),
             "provider": "minimax",
             "answer_len": len(final_answer),
             "reasoning_len": reasoning_len if thinking else 0,
+            "source_count": len(web_docs),
             "thinking": thinking,
             "timestamp_ms": int(time.time() * 1000),
         })
