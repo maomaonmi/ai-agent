@@ -44,9 +44,11 @@ def test_sidebar_workspace_is_unique_and_uploads_do_not_stall() -> None:
     assert "upload.status === \"READY\"" in market
     assert "完整预览" in market
     assert "privateTemplates" in market
+    assert "isInteractiveTarget" in market
+    assert "bottom-0 h-28 bg-gradient-to-t" not in market
     assert "translateZ(${radius}px)" in market
     assert 'transformStyle: "preserve-3d"' in market
     assert "rotateY(${orbitRotation}deg)" in market
     assert "aspect-[16/10]" in market
-    assert "visibleTemplates.length <= 4 ? 460 : 620" in market
+    assert "visibleTemplates.length <= 4 ? 420 : 520" in market
     assert "rotateX(64deg)" in market
