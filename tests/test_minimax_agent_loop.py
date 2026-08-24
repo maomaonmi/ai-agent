@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import pytest
 
 from minimax import agent_loop as mm_agent
-from minimax.agent_loop import StreamAssembler, openai_tools_to_anthropic, sanitize_tool_name
+from minimax.agent_loop import StreamAssembler, extract_tool_web_docs, openai_tools_to_anthropic, sanitize_tool_name
 from model_settings import ModelSettings
 
 
@@ -68,6 +68,15 @@ def test_stream_assembler_rebuilds_full_blocks():
     assert blocks[2]["type"] == "tool_use" and blocks[2]["input"] == {"url": "https://x.io"}
     assert asm.stop_reason == "tool_use"
     assert asm.usage["output_tokens"] == 9
+
+
+def test_extract_tool_web_docs_reads_mcp_json_and_plain_urls():
+    report = '{"results":[{"title":"来源 A","url":"https://a.example/x","snippet":"摘要"}]}'
+    docs = extract_tool_web_docs(report, "mcp__search__web")
+    assert docs[0]["title"] == "来源 A"
+    assert docs[0]["url"] == "https://a.example/x"
+    plain = extract_tool_web_docs("URL: https://b.example/y", "mcp__search__web")
+    assert plain[0]["url"] == "https://b.example/y"
 
 
 # --------------------------------------------------------------------- 端到端循环
@@ -270,9 +279,9 @@ def test_agent_loop_synthesizes_answer_after_round_cap(monkeypatch):
         {"type": "tool_use", "block": {"id": "tu_cap", "name": "t", "input": {}}},
         {"type": "message_delta", "stop_reason": "tool_use", "usage": {"output_tokens": 1}},
     ]
-    # The fourth tool round is the configured interactive safety cap.  The
-    # fifth call is the tool-free final synthesis turn added by the loop.
-    ScriptedClient.scripts = [tool_round for _ in range(4)] + [[
+    # The third tool round is the configured interactive safety cap.  The
+    # fourth call is the tool-free final synthesis turn added by the loop.
+    ScriptedClient.scripts = [tool_round for _ in range(3)] + [[
         {"type": "text_delta", "text": "最终正文"},
         {"type": "message_delta", "stop_reason": "end_turn", "usage": {"output_tokens": 2}},
     ]]
@@ -289,7 +298,7 @@ def test_agent_loop_synthesizes_answer_after_round_cap(monkeypatch):
         )]
 
     chunks = asyncio.run(run())
-    assert len(ScriptedClient.calls) == 5
+    assert len(ScriptedClient.calls) == 4
     assert ScriptedClient.calls[-1]["tools"] is None
     done = next(p for n, p in _parse(chunks) if n == "done")
     assert done["answer"] == "最终正文"
@@ -343,6 +352,33 @@ def test_deep_tool_loop_uses_short_staged_thinking_and_final_synthesis(monkeypat
     assert any(name == "reasoning_delta" for name, _ in events)
     done = next(payload for name, payload in events if name == "done")
     assert "完整正文" in done["answer"]
+
+
+def test_deep_reasoning_has_aggregate_stream_cap(monkeypatch):
+    monkeypatch.setattr(mm_agent, "MiniMaxClient", ScriptedClient)
+    ScriptedClient.scripts = [[
+        {"type": "thinking_delta", "text": "x" * 20_000},
+        {"type": "message_delta", "stop_reason": "end_turn", "usage": {"output_tokens": 20_000}},
+    ], [
+        {"type": "thinking_delta", "text": "规划"},
+        {"type": "message_delta", "stop_reason": "end_turn", "usage": {"output_tokens": 1}},
+    ], [
+        {"type": "text_delta", "text": "完整正文"},
+        {"type": "message_delta", "stop_reason": "end_turn", "usage": {"output_tokens": 2}},
+    ]]
+
+    async def run():
+        return [c async for c in mm_agent.generate_minimax_agent_events(
+            FakeRequest(), _settings(),
+            wants_web=False, use_deep=True, memory_engine=FakeMemory(),
+            openai_tool_specs=[], dispatch=lambda n, a: asyncio.sleep(0),
+        )]
+
+    events = _parse(asyncio.run(run()))
+    reasoning = "".join(payload["reasoning_delta"] for name, payload in events if name == "reasoning_delta")
+    assert len(reasoning) <= mm_agent.MAX_TOTAL_REASONING_CHARS
+    done = next(payload for name, payload in events if name == "done")
+    assert done["answer"] == "完整正文"
 
 
 def test_agent_loop_web_search_tool_appended(monkeypatch):

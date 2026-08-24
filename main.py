@@ -1789,6 +1789,22 @@ def resolve_runtime_mode(
     return mode, wants_web, use_deep_thinking
 
 
+def should_use_minimax_native_loop(
+    provider: str,
+    mcp_mode: str,
+    wants_web: bool,
+    use_deep_thinking: bool,
+) -> bool:
+    """决定 MiniMax 是否必须走受控原生 Agent Loop。
+
+    联网和深度思考即使没有启用 MCP，也需要这条链路来强制搜索、限制分阶段
+    思考预算并转发来源事件；不能因为 MCP=off 就退回单轮直连。
+    """
+    return provider == "minimax" and (
+        mcp_mode != "off" or wants_web or use_deep_thinking
+    )
+
+
 class HookToggleRequest(BaseModel):
     enabled: bool
 
@@ -8462,7 +8478,15 @@ async def chat_stream(request: ChatRequest):
             mcp_system_prompt = omni_system_prompt
             # Why: MiniMax M3 走 Anthropic 原生 tool_use + Interleaved Thinking 循环
             # （主模型自主决策调工具），跳过"决策模型预检轮 + 结果注入 system"模式。
-            use_native_tool_loop = active_settings.provider == "minimax" and runtime.mcp_mode != "off"
+            # MiniMax 原生联网/深思考也必须走同一条受控 Agent Loop。
+            # 旧逻辑只看 mcp_mode：关闭 MCP 或工具冷启动失败时会退回
+            # minimax.chat 的单轮直连，导致 thinking 上限和搜索事件契约全部失效。
+            use_native_tool_loop = should_use_minimax_native_loop(
+                active_settings.provider,
+                runtime.mcp_mode,
+                wants_web,
+                _use_deep,
+            )
             print(f"[DEBUG] direct_stream_with_mcp: mcp_mode={runtime.mcp_mode}, provider={active_settings.provider}, mode={request.mode}, wants_web={wants_web}, deep={_use_deep}")
             if runtime.mcp_mode != "off" and not use_native_tool_loop:
                 # 双保险：等待MCP进程就绪，防止lifespan时序问题
@@ -8496,16 +8520,17 @@ async def chat_stream(request: ChatRequest):
                 if use_native_tool_loop:
                     allowed_tools = session_mcp_allowed(runtime)
                     ready_specs = []
-                    for _ in range(5):
-                        ready_specs = mcp_pool.all_tool_specs(allowed_tools)
-                        if ready_specs:
-                            break
-                        await asyncio.sleep(1)
+                    if runtime.mcp_mode != "off":
+                        for _ in range(5):
+                            ready_specs = mcp_pool.all_tool_specs(allowed_tools)
+                            if ready_specs:
+                                break
+                            await asyncio.sleep(1)
 
                     async def _mcp_dispatch(tool_name: str, tool_args: dict) -> str:
                         return await mcp_pool.dispatch(tool_name, tool_args, allowed_tools)
 
-                    if ready_specs:
+                    if ready_specs or wants_web or _use_deep:
                         native_request = request.model_copy(update={"message": f"{omni_system_prompt}\n\n用户请求：{request.message}"}) if omni_system_prompt else request
                         async for chunk in generate_minimax_agent_events(
                             native_request,
@@ -8518,8 +8543,9 @@ async def chat_stream(request: ChatRequest):
                         ):
                             yield chunk
                         return
-                    # 无就绪工具：降级为单轮直连（下方 stream_gen 路径）
-                    logger.info("[minimax] 无就绪 MCP 工具，降级单轮直连。")
+                    # 没有 MCP 工具时仍保留原生 web_search / 深思考 Agent Loop；
+                    # 只有普通 MiniMax 对话才允许走单轮直连。
+                    logger.info("[minimax] 无 MCP 工具，继续使用原生联网/深思考 Agent Loop。")
                 if active_settings.provider == "minimax":
                     stream_gen = generate_minimax_chat_events(
                         request,

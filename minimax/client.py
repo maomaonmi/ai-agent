@@ -287,9 +287,30 @@ class MiniMaxClient:
                     elif btype == "server_tool_use":
                         # 服务端工具调用块：content_block_start 即携带完整 input
                         yield {"type": "server_tool_use", "block": dict(block)}
-                    elif btype == "web_search_tool_result":
-                        # 服务端搜索结果块：同样在 start 帧携带完整 content
-                        yield {"type": "web_search_tool_result", "block": dict(block)}
+                    elif btype in {
+                        "web_search_tool_result",
+                        "web_search_result",
+                        "server_tool_result",
+                    }:
+                        # 不同 MiniMax 网关版本对结果块的 type 命名略有差异；
+                        # 上层统一消费 web_search_tool_result，避免来源被静默丢弃。
+                        yield {
+                            "type": "web_search_tool_result",
+                            "block": {**dict(block), "type": "web_search_tool_result"},
+                        }
+
+                # 少数网关会把搜索结果作为顶层事件发送，而不是
+                # content_block_start。也统一成同一份上层事件契约。
+                elif evt_type in {
+                    "web_search_tool_result",
+                    "web_search_result",
+                    "server_tool_result",
+                }:
+                    block = evt.get("content_block") or evt.get("block") or evt
+                    yield {
+                        "type": "web_search_tool_result",
+                        "block": {**dict(block), "type": "web_search_tool_result"},
+                    }
 
                 elif evt_type == "content_block_delta":
                     index = int(evt.get("index", 0))

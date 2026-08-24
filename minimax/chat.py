@@ -339,6 +339,11 @@ def generate_minimax_chat_events(
             max_tokens=max_tokens,
             system=system,
             tools=tools,
+            tool_choice=(
+                {"type": "tool", "name": "web_search"}
+                if wants_web and tools and any(tool.get("type") == "web_search_20250305" for tool in tools)
+                else None
+            ),
             thinking=thinking_payload,
             temperature=temperature,
         )

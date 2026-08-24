@@ -48,16 +48,21 @@ logger = logging.getLogger("minimax.agent_loop")
 DEFAULT_MAX_ROUNDS = 12
 # Four short rounds cover the usual search → observe → refine path while
 # preventing a deep request from spending minutes in repeated self-calls.
-MAX_INTERACTIVE_ROUNDS = 4
+MAX_INTERACTIVE_ROUNDS = 3
 PRE_TOOL_THINKING_BUDGET = 1_024
 POST_TOOL_THINKING_BUDGET = 1_536
 FINAL_THINKING_BUDGET = 1_024
+# A provider can ignore the advisory thinking budget.  This aggregate cap is
+# enforced while consuming the stream so the UI and the request cannot grow
+# into another 10k+ word hidden chain of thought.
+MAX_TOTAL_REASONING_CHARS = 6_000
 # 工具结果回传截断（与 main.run_mcp_tool_preround 的 8000 字符一致）。
 TOOL_RESULT_MAX_CHARS = 8_000
 
 # Anthropic 工具名约束：^[a-zA-Z0-9_-]{1,64}$
 _TOOL_NAME_RE = re.compile(r"[a-zA-Z0-9_-]{1,64}")
 _UNSAFE_CHAR_RE = re.compile(r"[^a-zA-Z0-9_-]")
+_URL_RE = re.compile(r"https?://[^\s<>\"'`\]\)}]+", re.IGNORECASE)
 
 
 def sanitize_tool_name(name: str) -> str:
@@ -94,6 +99,65 @@ def openai_tools_to_anthropic(specs: list[dict[str, Any]]) -> tuple[list[dict[st
             "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
         })
     return tools, name_map
+
+
+def extract_tool_web_docs(report: Any, tool_name: str = "") -> list[dict[str, Any]]:
+    """Extract source cards from MCP search output (JSON or plain text).
+
+    MCP tools return a textual report, unlike the native MiniMax web-search
+    block.  Keeping URL extraction here makes both paths use the same frontend
+    ``web_docs`` contract.
+    """
+    docs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def visit(value: Any, inherited_title: str = "") -> None:
+        if isinstance(value, str):
+            text = value.strip()
+            if text.startswith(("{", "[")):
+                try:
+                    visit(json.loads(text), inherited_title)
+                    return
+                except (TypeError, ValueError):
+                    pass
+            for raw_url in _URL_RE.findall(value):
+                url = raw_url.rstrip(".,;:!?，。；：！？")
+                if url in seen:
+                    continue
+                seen.add(url)
+                docs.append({
+                    "id": f"web-{hashlib.md5(url.encode('utf-8')).hexdigest()[:12]}",
+                    "title": inherited_title or tool_name or url,
+                    "url": url,
+                    "content": value[:500],
+                    "score": 1.0,
+                    "native_search": True,
+                })
+            return
+        if isinstance(value, list):
+            for item in value:
+                visit(item, inherited_title)
+            return
+        if not isinstance(value, dict):
+            return
+        url = str(value.get("url") or value.get("link") or value.get("href") or "").strip()
+        title = str(value.get("title") or value.get("name") or inherited_title or tool_name or url).strip()
+        if url and url not in seen:
+            seen.add(url)
+            docs.append({
+                "id": f"web-{hashlib.md5(url.encode('utf-8')).hexdigest()[:12]}",
+                "title": title,
+                "url": url,
+                "content": str(value.get("snippet") or value.get("description") or value.get("content") or "")[:500],
+                "score": 1.0,
+                "native_search": True,
+            })
+        for key, child in value.items():
+            if key not in {"url", "link", "href", "title", "name"}:
+                visit(child, title)
+
+    visit(report)
+    return docs
 
 
 class StreamAssembler:
@@ -238,7 +302,7 @@ async def generate_minimax_agent_events(
         """
         if not thinking:
             return max_tokens
-        return min(max_tokens, budget_cap + 2_048)
+        return min(max_tokens, budget_cap + 512)
 
     anthropic_tools, name_map = openai_tools_to_anthropic(openai_tool_specs)
     server_tools: list[dict[str, Any]] = list(anthropic_tools)
@@ -249,6 +313,7 @@ async def generate_minimax_agent_events(
     web_docs: list[dict[str, Any]] = []
     last_stop_reason: str | None = None
     saw_tool_use = False
+    reasoning_budget_exhausted = False
 
     def event(name: str, data: dict[str, Any]) -> str:
         return _sse(name, data)
@@ -270,13 +335,25 @@ async def generate_minimax_agent_events(
         })
 
     try:
+        mcp_tool_count = len(anthropic_tools)
+        web_tool_count = sum(
+            1 for tool in server_tools
+            if tool.get("type") == "web_search_20250305"
+        )
         yield event("node", {
             "node_name": f"MiniMax Agent · {model_id}",
             "status": "processing",
-            "message": f"原生工具循环启动（工具 {len(anthropic_tools)} 个，use_deep={thinking}, wants_web={wants_web}）",
+            "message": (
+                f"原生工具循环启动（工具 {len(server_tools)} 个，"
+                f"MCP {mcp_tool_count} 个，联网 {web_tool_count} 个，"
+                f"use_deep={thinking}, wants_web={wants_web}）"
+            ),
             "provider": "minimax",
             "wants_web": wants_web,
             "use_deep": thinking,
+            "tool_count": len(server_tools),
+            "mcp_tool_count": mcp_tool_count,
+            "web_tool_count": web_tool_count,
             "timestamp_ms": int(time.time() * 1000),
         })
         if wants_web:
@@ -325,6 +402,7 @@ async def generate_minimax_agent_events(
 
         for round_no in range(1, rounds_limit + 1):
             assembler = StreamAssembler()
+            stream_cut_short = False
             round_thinking = staged_thinking_payload(
                 PRE_TOOL_THINKING_BUDGET if round_no == 1 else POST_TOOL_THINKING_BUDGET,
             )
@@ -336,6 +414,11 @@ async def generate_minimax_agent_events(
                 ),
                 system=None,
                 tools=tools_payload,
+                tool_choice=(
+                    {"type": "tool", "name": "web_search"}
+                    if round_no == 1 and any(tool.get("type") == "web_search_20250305" for tool in server_tools)
+                    else None
+                ),
                 thinking=round_thinking,
                 temperature=temperature,
             )
@@ -345,8 +428,19 @@ async def generate_minimax_agent_events(
                 if evt_type == "thinking_delta":
                     piece = str(evt.get("text") or "")
                     if piece:
+                        if thinking:
+                            remaining = MAX_TOTAL_REASONING_CHARS - sum(len(part) for part in reasoning_parts)
+                            if remaining <= 0:
+                                reasoning_budget_exhausted = True
+                                stream_cut_short = True
+                                break
+                            piece = piece[:remaining]
                         reasoning_parts.append(piece)
                         yield event("reasoning_delta", {"reasoning_delta": piece})
+                        if thinking and sum(len(part) for part in reasoning_parts) >= MAX_TOTAL_REASONING_CHARS:
+                            reasoning_budget_exhausted = True
+                            stream_cut_short = True
+                            break
                 elif evt_type == "text_delta":
                     piece = str(evt.get("text") or "")
                     if piece:
@@ -375,13 +469,15 @@ async def generate_minimax_agent_events(
                             "kept_count": len(web_docs),
                             "timestamp_ms": int(time.time() * 1000),
                         })
+            if stream_cut_short and hasattr(stream, "close"):
+                stream.close()
             if assembler.usage:
                 total_usage.update(assembler.usage)
             last_stop_reason = assembler.stop_reason
 
             assistant_blocks = assembler.blocks()
             tool_use_blocks = [b for b in assistant_blocks if b.get("type") == "tool_use"]
-            if assembler.stop_reason != "tool_use" or not tool_use_blocks:
+            if reasoning_budget_exhausted or assembler.stop_reason != "tool_use" or not tool_use_blocks:
                 break  # end_turn：最终答案已流式输出完毕
 
             # Interleaved Thinking 纪律：assistant 完整块列表（thinking+text+tool_use）回传。
@@ -397,6 +493,31 @@ async def generate_minimax_agent_events(
                     report = await dispatch(original_name, args)
                     preview = str(report).replace("\n", " ")[:200]
                     yield event("mcp", {"mcp_tool_result": original_name, "ok": True, "preview": preview, "round": round_no})
+                    # MCP search tools return plain text/JSON rather than the
+                    # native web_search_tool_result block.  Surface their URLs
+                    # immediately so sources do not disappear from the chain.
+                    extracted_docs = extract_tool_web_docs(report, original_name)
+                    known_urls = {str(doc.get("url") or "") for doc in web_docs}
+                    fresh_docs = [doc for doc in extracted_docs if doc.get("url") not in known_urls]
+                    if fresh_docs:
+                        web_docs.extend(fresh_docs)
+                        yield event("web_docs", {
+                            "docs": fresh_docs,
+                            "count": len(fresh_docs),
+                            "total": len(web_docs),
+                            "placeholder": False,
+                            "native_search": True,
+                        })
+                        yield event("node", {
+                            "node_name": "web_search",
+                            "status": "completed",
+                            "message": f"已从工具结果提取 {len(fresh_docs)} 条来源（累计 {len(web_docs)} 条）",
+                            "provider": "minimax",
+                            "native_search": True,
+                            "hit_count": len(fresh_docs),
+                            "kept_count": len(web_docs),
+                            "timestamp_ms": int(time.time() * 1000),
+                        })
                 except Exception as exc:
                     logger.exception("[minimax] agent loop 工具执行失败 tool=%s", original_name)
                     report = f"[工具调用失败] {exc}"
@@ -431,7 +552,12 @@ async def generate_minimax_agent_events(
         # give it one tool-free turn to turn the gathered results into the
         # requested document/answer.  This is also the safety net for a
         # round-limit exit, so the frontend never receives "答案 0 字".
-        if not final_answer.strip() or last_stop_reason == "tool_use" or (thinking and saw_tool_use):
+        if (
+            not final_answer.strip()
+            or last_stop_reason == "tool_use"
+            or (thinking and saw_tool_use)
+            or reasoning_budget_exhausted
+        ):
             yield event("node", {
                 "node_name": "final_answer",
                 "status": "processing",
@@ -480,6 +606,7 @@ async def generate_minimax_agent_events(
                         )
                         planning_assembler = StreamAssembler()
                         planning_text_parts: list[str] = []
+                        planning_cut_short = False
                         for evt in planning_stream:
                             evt_type = evt.get("type", "")
                             planning_assembler.feed(evt)
@@ -490,8 +617,18 @@ async def generate_minimax_agent_events(
                             elif evt_type == "thinking_delta":
                                 piece = str(evt.get("text") or "")
                                 if piece:
+                                    remaining = MAX_TOTAL_REASONING_CHARS - sum(len(part) for part in reasoning_parts)
+                                    if remaining <= 0:
+                                        planning_cut_short = True
+                                        break
+                                    piece = piece[:remaining]
                                     reasoning_parts.append(piece)
                                     yield event("reasoning_delta", {"reasoning_delta": piece})
+                                    if sum(len(part) for part in reasoning_parts) >= MAX_TOTAL_REASONING_CHARS:
+                                        planning_cut_short = True
+                                        break
+                        if planning_cut_short and hasattr(planning_stream, "close"):
+                            planning_stream.close()
                         if planning_assembler.usage:
                             total_usage.update(planning_assembler.usage)
                         planning_hint = "".join(planning_text_parts).strip()

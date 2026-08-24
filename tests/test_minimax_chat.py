@@ -261,6 +261,7 @@ def test_web_mode_placeholder_and_real_docs(monkeypatch):
     # 请求参数：tools 含 web_search server tool
     call = FakeClient.calls[0]
     assert call["tools"][0]["type"] == "web_search_20250305"
+    assert call["tool_choice"] == {"type": "tool", "name": "web_search"}
 
 
 def test_deep_mode_thinking_payload_sent(monkeypatch):

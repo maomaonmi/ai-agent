@@ -73,7 +73,7 @@ def test_agent_loop_skips_web_search_for_unsupported_model(monkeypatch):
     assert skipped[0]["skipped_reason"] == "model_not_support_server_web_search"
 
 
-def test_agent_loop_emits_placeholder_when_web_search_enabled():
+def test_agent_loop_emits_placeholder_when_web_search_enabled(monkeypatch):
     """wants_web=True 且支持时：先发占位 web_docs 事件（前端联网面板必现）。"""
     from minimax import agent_loop as loop
 
@@ -96,10 +96,14 @@ def test_agent_loop_emits_placeholder_when_web_search_enabled():
         attachments: list[Any] = []
 
     class _NoopClient:
+        calls: list[dict] = []
         def __init__(self, *_a, **_kw):
             pass
         def stream_message(self, **_kwargs):
+            self.calls.append(_kwargs)
             return iter([])
+
+    monkeypatch.setattr(loop, "MiniMaxClient", _NoopClient)
 
     async def _collect():
         gen = loop.generate_minimax_agent_events(
@@ -121,6 +125,12 @@ def test_agent_loop_emits_placeholder_when_web_search_enabled():
 
     placeholders = [e for e in events if e.get("placeholder") is True]
     assert placeholders, f"wants_web=True 应发占位 web_docs 事件: events={events}"
+    start_node = next(e for e in events if e.get("node_name", "").startswith("MiniMax Agent"))
+    assert start_node["tool_count"] == 1
+    assert start_node["mcp_tool_count"] == 0
+    assert start_node["web_tool_count"] == 1
+    assert "工具 1 个" in start_node["message"]
+    assert _NoopClient.calls[0]["tool_choice"] == {"type": "tool", "name": "web_search"}
 
 
 # ============================================================ 实时 web_docs 推送

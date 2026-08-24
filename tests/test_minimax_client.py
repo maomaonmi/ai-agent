@@ -106,6 +106,25 @@ def test_stream_parses_all_block_types():
     assert ms["usage"]["input_tokens"] == 100
 
 
+def test_stream_normalizes_gateway_search_result_aliases():
+    """兼容网关把搜索结果命名为 web_search_result/server_tool_result 或顶层事件。"""
+    sse = "\n".join([
+        _sse("content_block_start", {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "web_search_result", "content": [{"url": "https://a.io"}]},
+        }),
+        _sse("server_tool_result", {
+            "type": "server_tool_result", "content": [{"url": "https://b.io"}],
+        }),
+        "",
+    ])
+    events = list(MiniMaxClient._iter_sse_events(_FakeSSEResponse(sse)))
+    results = [event for event in events if event["type"] == "web_search_tool_result"]
+    assert len(results) == 2
+    assert results[0]["block"]["type"] == "web_search_tool_result"
+    assert results[1]["block"]["content"][0]["url"] == "https://b.io"
+
+
 def test_stream_error_event_raises():
     sse = _sse("error", {"type": "error", "error": {"type": "overloaded_error", "message": " overloaded"}})
     try:
