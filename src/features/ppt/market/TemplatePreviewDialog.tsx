@@ -1,10 +1,9 @@
 "use client";
 
-import Image from "next/image";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, Maximize2, Minus, Play, Plus, X } from "lucide-react";
 
-import type { PptTemplate } from "../api";
+import { pptApi, resolvePptAssetUrl, type PptTemplate, type PptTemplatePage } from "../api";
 
 
 interface TemplatePreviewDialogProps {
@@ -27,14 +26,47 @@ export default function TemplatePreviewDialog({
 }: TemplatePreviewDialogProps) {
   const [page, setPage] = useState(0);
   const [zoom, setZoom] = useState(1);
+  const [remotePages, setRemotePages] = useState<PptTemplatePage[] | null>(null);
+  const [pagesLoading, setPagesLoading] = useState(false);
+  const [pagesError, setPagesError] = useState<string | null>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    setPagesLoading(true);
+    setPagesError(null);
+    setRemotePages(null);
+    void pptApi.getTemplatePages(template.id, controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) setRemotePages(result.length > 0 ? result : template.isPrivate ? [] : null);
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+        if (template.isPrivate) setPagesError(error instanceof Error ? error.message : "无法加载 PPT 页面");
+        setRemotePages(template.isPrivate ? [] : null);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setPagesLoading(false);
+      });
+    return () => controller.abort();
+  }, [open, template.id, template.isPrivate]);
+
   const pages = useMemo(
-    () => Array.from({ length: Math.min(Math.max(template.pageCount || 8, 8), 18) }, (_, index) => ({
-      title: slideTitles[index % slideTitles.length],
-      cover,
-    })),
-    [cover, template.pageCount],
+    () => remotePages && remotePages.length > 0
+      ? remotePages.map((item) => ({
+        title: item.title?.trim() || `第 ${item.pageNumber} 页`,
+        thumbnail: resolvePptAssetUrl(item.thumbnailUrl) || cover,
+        preview: resolvePptAssetUrl(item.previewUrl) || resolvePptAssetUrl(item.thumbnailUrl) || cover,
+      }))
+      : template.isPrivate
+        ? []
+        : Array.from({ length: Math.min(Math.max(template.pageCount || 8, 8), 18) }, (_, index) => ({
+          title: slideTitles[index % slideTitles.length],
+          thumbnail: cover,
+          preview: cover,
+        })),
+    [cover, remotePages, template.isPrivate, template.pageCount],
   );
 
   useEffect(() => {
@@ -99,7 +131,7 @@ export default function TemplatePreviewDialog({
         <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-5">
           <div className="min-w-0">
             <h2 id="ppt-preview-title" className="truncate text-base font-semibold text-slate-950">{template.name}</h2>
-            <p className="mt-0.5 text-xs text-slate-500">完整预览 · {pages.length} 页 · 动画将在工作台中呈现</p>
+            <p className="mt-0.5 text-xs text-slate-500">{pagesLoading ? "正在加载真实页面…" : pagesError ? "页面加载失败" : `完整预览 · ${pages.length} 页 · 动画将在工作台中呈现`}</p>
           </div>
           <div className="flex items-center gap-2">
             <button type="button" onClick={() => onUse(template)} className="hidden h-10 items-center gap-2 rounded-full bg-violet-600 px-4 text-sm font-semibold text-white hover:bg-violet-500 sm:inline-flex">
@@ -122,7 +154,7 @@ export default function TemplatePreviewDialog({
                   className={`w-full rounded-xl border p-1.5 text-left transition ${page === index ? "border-violet-500 bg-violet-50" : "border-transparent hover:border-slate-300"}`}
                 >
                   <div className="relative aspect-[16/9] overflow-hidden rounded-lg bg-slate-900">
-                    <Image src={item.cover} alt="" fill sizes="180px" className="object-cover" />
+                    <img src={item.thumbnail} alt="" className="absolute inset-0 h-full w-full object-cover" />
                     <span className="absolute inset-x-2 bottom-2 truncate text-[9px] font-semibold text-white drop-shadow">{item.title}</span>
                   </div>
                   <span className="mt-1.5 block text-[11px] font-medium text-slate-500">{index + 1}. {item.title}</span>
@@ -132,19 +164,28 @@ export default function TemplatePreviewDialog({
           </aside>
           <main className="relative flex min-w-0 flex-1 flex-col bg-[#eceef2]">
             <div ref={stageRef} className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-5 sm:p-10">
-              <div
+              {pagesLoading ? (
+                <div className="rounded-2xl border border-slate-200 bg-white px-6 py-5 text-sm text-slate-500 shadow-sm">正在从服务器读取每一页预览…</div>
+              ) : pages.length === 0 ? (
+                <div className="max-w-sm rounded-2xl border border-rose-200 bg-white px-6 py-5 text-center text-sm text-rose-600 shadow-sm">
+                  <p className="font-semibold">暂时没有可用的页面预览</p>
+                  <p className="mt-2 text-xs text-slate-500">{pagesError ?? "该 PPT 尚未完成解析，请稍后刷新重试。"}</p>
+                </div>
+              ) : <div
                 className="relative aspect-[16/9] w-full max-w-[1120px] shrink-0 overflow-hidden rounded-[4px] bg-slate-950 shadow-[0_24px_70px_rgba(15,23,42,0.22)] transition-transform"
                 style={{ transform: `scale(${zoom})` }}
               >
-                <Image src={pages[page].cover} alt={`第 ${page + 1} 页预览`} fill sizes="1120px" className="object-cover" priority />
-                <div className={`absolute inset-0 flex p-[7%] ${page % 3 === 1 ? "items-end justify-end text-right" : page % 3 === 2 ? "items-center justify-center text-center" : "items-center"}`}>
-                  <div className={`max-w-[62%] ${cover.includes("editorial") ? "text-slate-950" : "text-white"}`}>
-                    <p className="mb-3 text-[clamp(10px,1.1vw,16px)] font-semibold uppercase tracking-[0.22em] opacity-70">{template.scene}</p>
-                    <h3 className="text-[clamp(24px,4.2vw,62px)] font-semibold leading-[1.06] tracking-[-0.04em]">{page === 0 ? template.name : pages[page].title}</h3>
-                    <p className="mt-5 max-w-xl text-[clamp(11px,1.25vw,18px)] leading-relaxed opacity-75">由 AI 规划内容、素材与版式，让观点清晰抵达每一位听众。</p>
+                <img src={pages[page].preview} alt={`第 ${page + 1} 页预览`} className="absolute inset-0 h-full w-full object-contain" />
+                {(!remotePages || remotePages.length === 0) && (
+                  <div className={`absolute inset-0 flex p-[7%] ${page % 3 === 1 ? "items-end justify-end text-right" : page % 3 === 2 ? "items-center justify-center text-center" : "items-center"}`}>
+                    <div className={`max-w-[62%] ${cover.includes("editorial") ? "text-slate-950" : "text-white"}`}>
+                      <p className="mb-3 text-[clamp(10px,1.1vw,16px)] font-semibold uppercase tracking-[0.22em] opacity-70">{template.scene}</p>
+                      <h3 className="text-[clamp(24px,4.2vw,62px)] font-semibold leading-[1.06] tracking-[-0.04em]">{page === 0 ? template.name : pages[page].title}</h3>
+                      <p className="mt-5 max-w-xl text-[clamp(11px,1.25vw,18px)] leading-relaxed opacity-75">由 AI 规划内容、素材与版式，让观点清晰抵达每一位听众。</p>
+                    </div>
                   </div>
-                </div>
-              </div>
+                )}
+              </div>}
             </div>
             <footer className="flex h-14 shrink-0 items-center justify-between border-t border-slate-200 bg-white px-4 sm:px-6">
               <div className="flex items-center gap-2">

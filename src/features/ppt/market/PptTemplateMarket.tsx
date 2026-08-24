@@ -19,7 +19,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 
-import type { PptTemplate } from "../api";
+import { pptApi, resolvePptAssetUrl, type PptTemplate } from "../api";
 import { usePptMarketStore, type PptUploadTask } from "../store";
 import TemplatePreviewDialog from "./TemplatePreviewDialog";
 
@@ -49,6 +49,8 @@ const categories = [
 
 
 function coverFor(template: PptTemplate, index = 0): string {
+  const uploadedCover = resolvePptAssetUrl(template.coverUrl);
+  if (uploadedCover) return uploadedCover;
   if (template.id.includes("editorial") || template.scene === "CREATIVE" || template.scene === "EDUCATION") return covers[1];
   if (template.id.includes("data") || template.scene === "TECHNOLOGY" || template.scene === "RESEARCH") return covers[2];
   return covers[Math.max(0, index) % covers.length];
@@ -56,22 +58,8 @@ function coverFor(template: PptTemplate, index = 0): string {
 
 
 function privateTemplateFor(upload: PptUploadTask): PptTemplate {
-  const templateId = upload.templateId ?? `private-${upload.id}`;
-  const name = upload.fileName.replace(/\.(pptx|potx)$/i, "").trim() || "我的私有模板";
-  return {
-    id: templateId,
-    name,
-    description: upload.description ?? "已提取主题、配色与版式 · 私有模板",
-    scene: upload.scene ?? "CUSTOM",
-    source: "PRIVATE",
-    isPrivate: true,
-    status: "READY",
-    pageCount: upload.pageCount ?? 12,
-    coverUrl: upload.coverUrl ?? null,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    manifest: { uploadId: upload.id, sourceFileName: upload.fileName, private: true },
-  };
+  if (!upload.template) throw new Error("私有模板尚未完成服务器解析");
+  return upload.template;
 }
 
 
@@ -140,7 +128,7 @@ function OrbitTemplateCard({
           aria-current={active ? "true" : undefined}
           className="group relative block aspect-[16/10] w-full overflow-hidden bg-slate-950 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-violet-400"
         >
-          <Image src={cover} alt={`${template.name} 模板封面`} fill sizes="(max-width: 768px) 60vw, 420px" className="object-cover transition duration-500 group-hover:scale-[1.04]" />
+          <img src={cover} alt={`${template.name} 模板封面`} className="absolute inset-0 h-full w-full object-cover transition duration-500 group-hover:scale-[1.04]" />
           <span className="absolute inset-0 bg-gradient-to-t from-slate-950/40 via-transparent to-white/5 opacity-70 transition group-hover:opacity-100" />
           <span className="sr-only">{template.isPrivate ? "私有模板" : "精选模板"}，{template.name}</span>
         </button>
@@ -160,6 +148,7 @@ export default function PptTemplateMarket() {
   const dragStartX = useRef<number | null>(null);
   const [selected, setSelected] = useState<PptTemplate | null>(null);
   const [activeOrbitIndex, setActiveOrbitIndex] = useState(0);
+  const pollingUploads = useRef(new Set<string>());
   const {
     templates,
     loading,
@@ -178,17 +167,62 @@ export default function PptTemplateMarket() {
   }, [loadFirstPage]);
 
   useEffect(() => {
-    const pending = uploads.filter((upload) => upload.status === "QUEUED" || upload.status === "UPLOADING" || upload.status === "PROCESSING");
-    if (pending.length === 0) return;
-    const timers = pending.map((upload) => window.setTimeout(() => {
-      upsertUpload({ ...upload, status: "READY", progress: 100, templateId: upload.templateId ?? `private-${upload.id}` });
-    }, 520));
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
+    const pending = uploads.filter((upload) => (
+      upload.templateId
+      && (upload.status === "QUEUED" || upload.status === "UPLOADING" || upload.status === "PROCESSING")
+    ));
+    for (const upload of pending) {
+      if (!upload.templateId || pollingUploads.current.has(upload.id)) continue;
+      pollingUploads.current.add(upload.id);
+      void (async () => {
+        try {
+          while (true) {
+            const template = await pptApi.getTemplate(upload.templateId!);
+            const processing = template.manifest?.processing;
+            const progress = processing && typeof processing === "object" && "progress" in processing
+              ? Math.max(5, Math.min(99, Number((processing as { progress?: unknown }).progress) || 5))
+              : template.status === "READY" ? 100 : 50;
+            const current = usePptMarketStore.getState().uploads.find((item) => item.id === upload.id) ?? upload;
+            const nextStatus: PptUploadTask["status"] = template.status === "READY"
+              ? "READY"
+              : template.status === "FAILED"
+                ? "FAILED"
+                : "PROCESSING";
+            upsertUpload({
+              ...current,
+              status: nextStatus,
+              progress: nextStatus === "READY" || nextStatus === "FAILED" ? 100 : progress,
+              templateId: template.id,
+              template,
+              pageCount: template.pageCount,
+              scene: template.scene,
+              description: template.description ?? undefined,
+              coverUrl: template.coverUrl,
+              errorCode: template.status === "FAILED" && template.manifest && typeof template.manifest.errorCode === "string"
+                ? template.manifest.errorCode
+                : undefined,
+            });
+            if (nextStatus === "READY" || nextStatus === "FAILED") break;
+            await new Promise((resolve) => window.setTimeout(resolve, 900));
+          }
+        } catch (error) {
+          const current = usePptMarketStore.getState().uploads.find((item) => item.id === upload.id) ?? upload;
+          upsertUpload({
+            ...current,
+            status: "FAILED",
+            progress: 100,
+            errorCode: error instanceof Error ? error.message : "PPT_TEMPLATE_STATUS_FAILED",
+          });
+        } finally {
+          pollingUploads.current.delete(upload.id);
+        }
+      })();
+    }
   }, [uploads, upsertUpload]);
 
   const privateTemplates = useMemo(
     () => uploads
-      .filter((upload) => upload.status === "READY")
+      .filter((upload) => upload.status === "READY" && Boolean(upload.template))
       .map(privateTemplateFor),
     [uploads],
   );
@@ -265,7 +299,7 @@ export default function PptTemplateMarket() {
     const id = typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
       : `upload-${Date.now()}`;
-    if (!extension || !["pptx", "potx"].includes(extension)) {
+    if (!extension || !["ppt", "pptx", "pot", "potx"].includes(extension)) {
       upsertUpload({ id, fileName: file.name, status: "FAILED", progress: 0, errorCode: "PPT_FILE_TYPE_UNSUPPORTED" });
       return;
     }
@@ -273,18 +307,36 @@ export default function PptTemplateMarket() {
       upsertUpload({ id, fileName: file.name, status: "FAILED", progress: 0, errorCode: "PPT_FILE_TOO_LARGE" });
       return;
     }
-    const queued = {
+    const queued: PptUploadTask = {
       id,
       fileName: file.name,
-      status: "PROCESSING" as const,
-      progress: 35,
-      templateId: `private-${id}`,
-      pageCount: 12,
-      scene: "CUSTOM",
-      description: "正在提取主题、配色与版式…",
+      status: "UPLOADING",
+      progress: 5,
     };
     upsertUpload(queued);
-    window.setTimeout(() => upsertUpload({ ...queued, status: "READY", progress: 100 }), 520);
+    void pptApi.createTemplate(file)
+      .then((template) => {
+        const current = usePptMarketStore.getState().uploads.find((item) => item.id === id) ?? queued;
+        upsertUpload({
+          ...current,
+          status: template.status === "READY" ? "READY" : template.status === "FAILED" ? "FAILED" : "PROCESSING",
+          progress: template.status === "READY" ? 100 : 8,
+          templateId: template.id,
+          template,
+          pageCount: template.pageCount,
+          scene: template.scene,
+          description: template.description ?? undefined,
+          coverUrl: template.coverUrl,
+        });
+      })
+      .catch((error) => {
+        upsertUpload({
+          ...queued,
+          status: "FAILED",
+          progress: 100,
+          errorCode: error instanceof Error ? error.message : "PPT_TEMPLATE_UPLOAD_FAILED",
+        });
+      });
   };
 
   const handleUseTemplate = (template: PptTemplate) => {
@@ -312,7 +364,7 @@ export default function PptTemplateMarket() {
             <button type="button" onClick={() => fileInputRef.current?.click()} className="inline-flex h-10 items-center gap-2 rounded-full border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-800 transition hover:border-slate-400 hover:bg-slate-50">
               <UploadCloud size={16} /> 上传模板
             </button>
-            <input ref={fileInputRef} type="file" accept=".pptx,.potx,application/vnd.openxmlformats-officedocument.presentationml.presentation" className="sr-only" onChange={handleUpload} />
+            <input ref={fileInputRef} type="file" accept=".ppt,.pptx,.pot,.potx,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation" className="sr-only" onChange={handleUpload} />
           </div>
         </div>
       </header>
@@ -350,11 +402,11 @@ export default function PptTemplateMarket() {
                   {upload.status === "FAILED" ? <FileUp size={18} className="text-rose-500" /> : upload.status === "READY" ? <CheckCircle2 size={18} className="text-emerald-600" /> : <LoaderCircle size={18} className="animate-spin text-violet-600" />}
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-slate-800">{upload.fileName}</p>
-                    <p className="mt-0.5 text-xs text-slate-500">{upload.status === "FAILED" ? upload.errorCode : upload.status === "READY" ? "主题、配色与版式已提取 · 可立即使用" : "正在本地解析主题与版式…"}</p>
+                    <p className="mt-0.5 text-xs text-slate-500">{upload.status === "FAILED" ? upload.errorCode : upload.status === "READY" ? `主题、配色与版式已提取 · 可立即使用 · ${upload.pageCount ?? upload.template?.pageCount ?? 0} 页可完整预览` : `正在解析原始 PPT 页面… ${upload.progress}%`}</p>
                   </div>
-                  {upload.status === "READY" && (
+                  {upload.status === "READY" && upload.template && (
                     <div className="ml-auto flex shrink-0 items-center gap-2">
-                      <button type="button" onClick={() => setSelected(privateTemplateFor(upload))} className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-700 hover:border-violet-300 hover:text-violet-700">完整预览</button>
+                      <button type="button" onClick={() => setSelected(upload.template!)} className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-700 hover:border-violet-300 hover:text-violet-700">完整预览</button>
                       <button type="button" onClick={() => router.push(`/ppt/workspace/new?templateId=${encodeURIComponent(upload.templateId ?? `private-${upload.id}`)}`)} className="rounded-full bg-violet-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-violet-500">立即使用</button>
                     </div>
                   )}

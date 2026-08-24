@@ -30,6 +30,7 @@ export interface PptTemplate {
 
 export interface PptTemplatePage {
   pageNumber: number;
+  title?: string;
   status: string;
   thumbnailUrl: string | null;
   previewUrl: string | null;
@@ -124,7 +125,7 @@ export interface CreatePptRunInput {
   presentationId: string;
   prompt: string;
   maxIterations?: number;
-  modelProvider?: "deepseek" | "qwen" | "glm";
+  modelProvider?: "deepseek" | "qwen" | "glm" | "minimax";
   searchProvider?: "auto" | "firecrawl" | "qwen" | "glm";
   searchLimit?: number;
   resume?: boolean;
@@ -175,6 +176,7 @@ function queryString(params: PptTemplateListParams): string {
 
 export interface PptApi {
   listTemplates(params: PptTemplateListParams, signal?: AbortSignal): Promise<PptTemplateListResponse>;
+  createTemplate(file: File, signal?: AbortSignal): Promise<PptTemplate>;
   getTemplate(templateId: string, signal?: AbortSignal): Promise<PptTemplate>;
   getTemplatePages(templateId: string, signal?: AbortSignal): Promise<PptTemplatePage[]>;
   updateTemplate(templateId: string, patch: { name?: string; description?: string; scene?: string }): Promise<PptTemplate>;
@@ -261,12 +263,13 @@ async function consumeSse(
 
 export function createPptApi(baseUrl = DEFAULT_API_BASE_URL): PptApi {
   const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
+    const headers = new Headers(init?.headers);
+    if (init?.body && !(init.body instanceof FormData) && !headers.has("content-type")) {
+      headers.set("content-type", "application/json");
+    }
     const response = await fetch(`${baseUrl.replace(/\/$/, "")}${path}`, {
       ...init,
-      headers: {
-        ...(init?.body ? { "content-type": "application/json" } : {}),
-        ...init?.headers,
-      },
+      headers,
     });
     const payload = await jsonOrEmpty(response);
     if (!response.ok) {
@@ -286,6 +289,11 @@ export function createPptApi(baseUrl = DEFAULT_API_BASE_URL): PptApi {
       `/api/ppt/templates?${queryString(params)}`,
       { signal },
     ),
+    createTemplate: (file, signal) => {
+      const body = new FormData();
+      body.append("file", file, file.name);
+      return request<PptTemplate>("/api/ppt/templates", { method: "POST", body, signal });
+    },
     getTemplate: (templateId, signal) => request<PptTemplate>(
       `/api/ppt/templates/${encodeURIComponent(templateId)}`,
       { signal },
