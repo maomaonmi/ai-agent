@@ -40,6 +40,10 @@ def test_sidebar_workspace_is_unique_and_uploads_do_not_stall() -> None:
     assert "环形模板浏览器" in market
     assert "orbitDistance" in market
     assert "onWheel={handleOrbitWheel}" in market
+    assert "privateTemplateFor" in market
+    assert "upload.status === \"READY\"" in market
+    assert "完整预览" in market
+    assert "privateTemplates" in market
     assert "translateZ(${radius}px)" in market
     assert 'transformStyle: "preserve-3d"' in market
     assert "rotateY(${orbitRotation}deg)" in market
