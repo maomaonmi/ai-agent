@@ -50,5 +50,5 @@ def test_sidebar_workspace_is_unique_and_uploads_do_not_stall() -> None:
     assert 'transformStyle: "preserve-3d"' in market
     assert "rotateY(${orbitRotation}deg)" in market
     assert "aspect-[16/10]" in market
-    assert "visibleTemplates.length <= 4 ? 420 : 520" in market
+    assert "visibleTemplates.length <= 4 ? 700 : 820" in market
     assert "rotateX(64deg)" in market
