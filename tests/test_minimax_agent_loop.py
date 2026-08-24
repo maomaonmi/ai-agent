@@ -263,6 +263,80 @@ def test_agent_loop_end_turn_first_round(monkeypatch):
     assert done["answer"] == "直接回答"
 
 
+def test_agent_loop_synthesizes_answer_after_round_cap(monkeypatch):
+    """工具循环耗尽轮次时，必须再发起一次无工具收束请求，不能返回空答案。"""
+    monkeypatch.setattr(mm_agent, "MiniMaxClient", ScriptedClient)
+    tool_round = [
+        {"type": "tool_use", "block": {"id": "tu_cap", "name": "t", "input": {}}},
+        {"type": "message_delta", "stop_reason": "tool_use", "usage": {"output_tokens": 1}},
+    ]
+    # The sixth tool round is the configured interactive safety cap.  The
+    # seventh call is the tool-free final synthesis turn added by the loop.
+    ScriptedClient.scripts = [tool_round for _ in range(6)] + [[
+        {"type": "text_delta", "text": "最终正文"},
+        {"type": "message_delta", "stop_reason": "end_turn", "usage": {"output_tokens": 2}},
+    ]]
+
+    async def dispatch(name, args):
+        return "工具结果"
+
+    async def run():
+        return [c async for c in mm_agent.generate_minimax_agent_events(
+            FakeRequest(), _settings(),
+            wants_web=False, use_deep=False, memory_engine=FakeMemory(),
+            openai_tool_specs=[{"type": "function", "function": {"name": "t", "description": "", "parameters": {}}}],
+            dispatch=dispatch,
+        )]
+
+    chunks = asyncio.run(run())
+    assert len(ScriptedClient.calls) == 7
+    assert ScriptedClient.calls[-1]["tools"] is None
+    done = next(p for n, p in _parse(chunks) if n == "done")
+    assert done["answer"] == "最终正文"
+
+
+def test_deep_tool_loop_uses_short_staged_thinking_and_final_synthesis(monkeypatch):
+    """深度模式在工具结果后走短思考，再用无工具请求写最终正文。"""
+    monkeypatch.setattr(mm_agent, "MiniMaxClient", ScriptedClient)
+    ScriptedClient.scripts = [[
+        {"type": "thinking_delta", "text": "先判断是否需要检索"},
+        {"type": "tool_use", "block": {"id": "tu_stage", "name": "t", "input": {}}},
+        {"type": "message_delta", "stop_reason": "tool_use", "usage": {"output_tokens": 1}},
+    ], [
+        {"type": "thinking_delta", "text": "已拿到结果，准备组织答案"},
+        {"type": "text_delta", "text": "简短前言"},
+        {"type": "message_delta", "stop_reason": "end_turn", "usage": {"output_tokens": 2}},
+    ], [
+        {"type": "thinking_delta", "text": "规划正文结构"},
+        {"type": "text_delta", "text": "完整正文"},
+        {"type": "message_delta", "stop_reason": "end_turn", "usage": {"output_tokens": 3}},
+    ]]
+
+    async def dispatch(name, args):
+        return "检索结果"
+
+    async def run():
+        return [c async for c in mm_agent.generate_minimax_agent_events(
+            FakeRequest(), _settings(),
+            wants_web=True, use_deep=True, memory_engine=FakeMemory(),
+            openai_tool_specs=[{"type": "function", "function": {"name": "t", "description": "", "parameters": {}}}],
+            dispatch=dispatch,
+        )]
+
+    chunks = asyncio.run(run())
+    events = _parse(chunks)
+    assert len(ScriptedClient.calls) == 3
+    # Each tool-loop request is deliberately short; final synthesis keeps a
+    # short thinking phase but disables tools so it cannot loop again.
+    assert ScriptedClient.calls[0]["thinking"]["budget_tokens"] <= 1024
+    assert ScriptedClient.calls[1]["thinking"]["budget_tokens"] <= 1536
+    assert ScriptedClient.calls[2]["tools"] is None
+    assert ScriptedClient.calls[2]["thinking"]["budget_tokens"] <= 1024
+    assert any(name == "reasoning_delta" for name, _ in events)
+    done = next(payload for name, payload in events if name == "done")
+    assert "完整正文" in done["answer"]
+
+
 def test_agent_loop_web_search_tool_appended(monkeypatch):
     monkeypatch.setattr(mm_agent, "MiniMaxClient", ScriptedClient)
     ScriptedClient.scripts = [[

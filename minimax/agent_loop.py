@@ -41,7 +41,15 @@ from .caching import apply_cache_breakpoints
 logger = logging.getLogger("minimax.agent_loop")
 
 # 默认工具循环上限：防模型无限自我调用（与 settings.tool_call_rounds 对齐由调用方注入）。
+# Do not let the per-model setting turn an interactive request into an
+# unbounded agent run.  A very high value (the current default is 200) can
+# spend the entire response budget on repeated thinking/tool calls and leave
+# the user with an empty final answer.
 DEFAULT_MAX_ROUNDS = 12
+MAX_INTERACTIVE_ROUNDS = 6
+PRE_TOOL_THINKING_BUDGET = 1_024
+POST_TOOL_THINKING_BUDGET = 1_536
+FINAL_THINKING_BUDGET = 1_024
 # 工具结果回传截断（与 main.run_mcp_tool_preround 的 8000 字符一致）。
 TOOL_RESULT_MAX_CHARS = 8_000
 
@@ -201,8 +209,23 @@ async def generate_minimax_agent_events(
     response_limit = _RESPONSE_LIMITS.get(response_length, settings.max_tokens)
     max_tokens = min(settings.max_tokens, response_limit, _output_ceiling(model_id))
     temperature = min(settings.temperature, 1.0)
-    thinking_payload = build_thinking_payload(thinking, settings, max_tokens)
-    rounds_limit = max_rounds or settings.tool_call_rounds or DEFAULT_MAX_ROUNDS
+    rounds_limit = min(
+        max_rounds or settings.tool_call_rounds or DEFAULT_MAX_ROUNDS,
+        MAX_INTERACTIVE_ROUNDS,
+    )
+
+    def staged_thinking_payload(budget_cap: int) -> dict[str, Any] | None:
+        """Build a short thinking budget for one interleaved phase."""
+        payload = build_thinking_payload(thinking, settings, max_tokens)
+        if not payload:
+            return None
+        bounded = dict(payload)
+        configured = int(bounded.get("budget_tokens") or budget_cap)
+        bounded["budget_tokens"] = max(
+            1_024,
+            min(configured, budget_cap, max(1_024, max_tokens // 2)),
+        )
+        return bounded
 
     anthropic_tools, name_map = openai_tools_to_anthropic(openai_tool_specs)
     server_tools: list[dict[str, Any]] = list(anthropic_tools)
@@ -211,6 +234,8 @@ async def generate_minimax_agent_events(
     reasoning_parts: list[str] = []
     total_usage: dict[str, Any] = {}
     web_docs: list[dict[str, Any]] = []
+    last_stop_reason: str | None = None
+    saw_tool_use = False
 
     def event(name: str, data: dict[str, Any]) -> str:
         return _sse(name, data)
@@ -278,18 +303,25 @@ async def generate_minimax_agent_events(
 
         _, tools_payload = apply_cache_breakpoints(model_id, system=None, tools=server_tools or None)
         # Why: 智能体对话走套餐 Key（tokenplan），普通 Key 仅供视频 H3。
-        loop_key = (settings.minimax_video_api_key or settings.api_key or "").strip()
+        loop_key = (
+            getattr(settings, "minimax_video_api_key", "")
+            or getattr(settings, "api_key", "")
+            or ""
+        ).strip()
         client = MiniMaxClient(api_key=loop_key, base_url=settings.base_url)
 
         for round_no in range(1, rounds_limit + 1):
             assembler = StreamAssembler()
+            round_thinking = staged_thinking_payload(
+                PRE_TOOL_THINKING_BUDGET if round_no == 1 else POST_TOOL_THINKING_BUDGET,
+            )
             stream: Iterator[dict] = client.stream_message(
                 model=model_id,
                 messages=messages,
                 max_tokens=max_tokens,
                 system=None,
                 tools=tools_payload,
-                thinking=thinking_payload,
+                thinking=round_thinking,
                 temperature=temperature,
             )
             for evt in stream:
@@ -330,6 +362,7 @@ async def generate_minimax_agent_events(
                         })
             if assembler.usage:
                 total_usage.update(assembler.usage)
+            last_stop_reason = assembler.stop_reason
 
             assistant_blocks = assembler.blocks()
             tool_use_blocks = [b for b in assistant_blocks if b.get("type") == "tool_use"]
@@ -337,6 +370,7 @@ async def generate_minimax_agent_events(
                 break  # end_turn：最终答案已流式输出完毕
 
             # Interleaved Thinking 纪律：assistant 完整块列表（thinking+text+tool_use）回传。
+            saw_tool_use = True
             messages.append({"role": "assistant", "content": assistant_blocks})
 
             result_blocks: list[dict[str, Any]] = []
@@ -358,6 +392,13 @@ async def generate_minimax_agent_events(
                     "content": str(report)[:TOOL_RESULT_MAX_CHARS],
                 })
             # tool_result 以 user 角色块回传（Anthropic 协议），与 assistant tool_use 一一对应。
+            result_blocks.append({
+                "type": "text",
+                "text": (
+                    "请基于刚返回的工具结果做一轮简短分析；如果信息已经足够，"
+                    "就准备最终正文，只有缺少关键事实时才继续调用工具。"
+                ),
+            })
             messages.append({"role": "user", "content": result_blocks})
             yield event("node", {
                 "node_name": "tool_round",
@@ -369,6 +410,76 @@ async def generate_minimax_agent_events(
             })
 
         final_answer = "".join(answer_parts)
+
+        # A model may finish the last allowed tool round with stop_reason
+        # ``tool_use`` (or only thinking) and never emit a text block.  Always
+        # give it one tool-free turn to turn the gathered results into the
+        # requested document/answer.  This is also the safety net for a
+        # round-limit exit, so the frontend never receives "答案 0 字".
+        if not final_answer.strip() or last_stop_reason == "tool_use" or (thinking and saw_tool_use):
+            yield event("node", {
+                "node_name": "final_answer",
+                "status": "processing",
+                "message": "工具结果已收集，正在整理最终正文",
+                "provider": "minimax",
+                "timestamp_ms": int(time.time() * 1000),
+            })
+            final_instruction = (
+                "工具检索阶段已完成。请先用一段简短思考规划最终结构，"
+                "然后直接输出用户要求的完整正文或文档内容；不要继续调用工具，也不要解释工具过程。"
+            )
+            final_messages = [*messages]
+            # Keep the Anthropic message sequence valid when the last entry is
+            # already the user tool_result message: append the instruction to
+            # that message instead of creating two adjacent user messages.
+            if final_messages and final_messages[-1].get("role") == "user":
+                last_content = final_messages[-1].get("content")
+                if isinstance(last_content, list):
+                    final_messages[-1] = {
+                        **final_messages[-1],
+                        "content": [*last_content, {"type": "text", "text": final_instruction}],
+                    }
+                else:
+                    final_messages[-1] = {
+                        **final_messages[-1],
+                        "content": f"{last_content or ''}\n\n{final_instruction}",
+                    }
+            else:
+                final_messages.append({"role": "user", "content": final_instruction})
+            try:
+                final_stream: Iterator[dict] = client.stream_message(
+                    model=model_id,
+                    messages=final_messages,
+                    max_tokens=max_tokens,
+                    system=None,
+                    tools=None,
+                    thinking=staged_thinking_payload(FINAL_THINKING_BUDGET),
+                    temperature=temperature,
+                )
+                final_assembler = StreamAssembler()
+                for evt in final_stream:
+                    evt_type = evt.get("type", "")
+                    final_assembler.feed(evt)
+                    if evt_type == "text_delta":
+                        piece = str(evt.get("text") or "")
+                        if piece:
+                            answer_parts.append(piece)
+                            yield event("token", {"token": piece})
+                    elif evt_type == "thinking_delta":
+                        # Finalization uses a short thinking phase so the
+                        # frontend can show the final structure being planned.
+                        piece = str(evt.get("text") or "")
+                        if piece:
+                            reasoning_parts.append(piece)
+                            yield event("reasoning_delta", {"reasoning_delta": piece})
+                if final_assembler.usage:
+                    total_usage.update(final_assembler.usage)
+                final_answer = "".join(answer_parts)
+            except MiniMaxAPIError:
+                logger.exception("[minimax] final answer synthesis failed")
+
+        if not final_answer.strip():
+            final_answer = "工具检索已完成，但模型未返回最终正文，请重试。"
         reasoning_len = sum(len(p) for p in reasoning_parts)
         frontend_usage = convert_usage(total_usage or None)
 

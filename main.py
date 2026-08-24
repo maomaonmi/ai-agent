@@ -1643,6 +1643,12 @@ def _extract_search_info_from_chunk(chunk) -> Dict | None:
     if not search_info:
         # 兜底：直接尝试 getattr（某些 SDK 版本可能挂在顶层）
         search_info = getattr(chunk, "search_info", None)
+    if not search_info and isinstance(extra, dict):
+        for key in ("search_results", "citations", "sources", "results"):
+            values = extra.get(key)
+            if isinstance(values, list):
+                search_info = {"search_results": values}
+                break
     if not search_info:
         return None
     # 提取 search_results 列表
@@ -1659,19 +1665,33 @@ def _merge_search_results(citations: List[Dict], search_info: Dict) -> None:
     WebDoc 格式（id/title/url/content/native_search/score）。
     按 index 去重，避免同一来源重复出现。
     """
-    seen_ids = {c.get("id") for c in citations}
-    for item in search_info.get("search_results", []):
-        idx = item.get("index")
-        if idx is None or idx in seen_ids:
+    seen_ids = {str(c.get("id")) for c in citations if c.get("id") is not None}
+    seen_urls = {str(c.get("url") or "").strip() for c in citations if c.get("url")}
+    for position, item in enumerate(search_info.get("search_results", []), start=1):
+        if not isinstance(item, dict):
             continue
-        seen_ids.add(idx)
+        idx = item.get("index") or item.get("id") or position
+        url = str(item.get("url") or item.get("link") or item.get("href") or "").strip()
+        # Some GLM/Qwen compatible gateways omit index but still return a URL.
+        # Deduplicate by URL first so every real source survives the merge.
+        if url and url in seen_urls:
+            continue
+        if not url and str(idx) in seen_ids:
+            continue
+        seen_ids.add(str(idx))
+        if url:
+            seen_urls.add(url)
+        try:
+            score = float(item.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
         citations.append({
             "id": idx,
-            "title": item.get("title", ""),
-            "url": item.get("url", ""),
-            "content": item.get("snippet", item.get("content", "")),
+            "title": item.get("title") or item.get("name") or url,
+            "url": url,
+            "content": item.get("snippet") or item.get("description") or item.get("content", ""),
             "native_search": True,
-            "score": 0.0,
+            "score": score,
         })
 
 
@@ -7352,7 +7372,16 @@ async def get_mcp_server_tools(server_id: str):
 
 @app.get("/api/sessions")
 async def list_sessions():
-    sessions = [session.to_dict() for session in session_store.list()]
+    # ``__global__`` is the legacy memory-only session identifier used by
+    # model/tool telemetry. It is not a real conversation and cannot be used
+    # as an Omni artifact owner because artifact IDs intentionally require a
+    # normal resource identifier. Keep its history for migration, but never
+    # expose it as a selectable chat session.
+    sessions = [
+        session.to_dict()
+        for session in session_store.list()
+        if session.session_id != "__global__"
+    ]
     return {"sessions": sessions, "count": len(sessions)}
 
 
@@ -7474,6 +7503,8 @@ async def remove_conversation_from_project(project_id: str, session_id: str):
 
 @app.get("/api/conversations/{conversation_id}/artifacts")
 async def list_conversation_artifacts(conversation_id: str):
+    if conversation_id == "__global__":
+        return {"artifacts": [], "count": 0}
     try:
         session_store.get(conversation_id)
     except SessionNotFoundError:
@@ -7492,6 +7523,13 @@ async def get_conversation_omni_context(conversation_id: str, query: str = ""):
     Version payloads are deliberately excluded. A concrete version is only
     exposed after the user explicitly references it.
     """
+    if conversation_id == "__global__":
+        return {
+            "projectId": None,
+            "projectSummary": None,
+            "candidateArtifactSummaries": [],
+            "projects": {},
+        }
     try:
         project_id = project_store.get_conversation_project_id(conversation_id)
     except SessionNotFoundError:
@@ -7533,6 +7571,8 @@ async def get_conversation_omni_context(conversation_id: str, query: str = ""):
 
 @app.post("/api/conversations/{conversation_id}/artifact-references", status_code=201)
 async def reference_conversation_artifact(conversation_id: str, request: ArtifactReferenceRequest):
+    if conversation_id == "__global__":
+        raise HTTPException(status_code=409, detail="全局记忆会话不支持作品引用，请先创建普通会话。")
     try:
         session_store.get(conversation_id)
         artifact = artifact_store.get(request.artifact_id)
@@ -7561,6 +7601,8 @@ async def reference_conversation_artifact(conversation_id: str, request: Artifac
 
 @app.post("/api/conversations/{conversation_id}/artifacts", status_code=201)
 async def create_conversation_artifact(conversation_id: str, request: ArtifactCreateRequest):
+    if conversation_id == "__global__":
+        raise HTTPException(status_code=409, detail="全局记忆会话不保存作品，请先创建普通会话。")
     try:
         artifact, version, link = artifact_store.create_with_version(
             conversation_id=conversation_id,
@@ -7584,6 +7626,8 @@ async def create_conversation_artifact(conversation_id: str, request: ArtifactCr
 
 @app.get("/api/conversations/{conversation_id}/artifact-links")
 async def list_conversation_artifact_links(conversation_id: str):
+    if conversation_id == "__global__":
+        return {"links": [], "count": 0}
     try:
         session_store.get(conversation_id)
     except SessionNotFoundError:
@@ -7600,6 +7644,7 @@ async def list_message_artifact_links(message_id: str):
     links = [
         _message_artifact_link_payload(link)
         for link in artifact_store.get_message_links(message_id)
+        if link.conversation_id != "__global__"
     ]
     return {"links": links, "count": len(links)}
 
@@ -7626,6 +7671,8 @@ async def list_artifact_versions(artifact_id: str):
 
 @app.post("/api/artifacts/{artifact_id}/versions", status_code=201)
 async def create_artifact_version(artifact_id: str, request: ArtifactVersionCreateRequest):
+    if request.conversation_id == "__global__":
+        raise HTTPException(status_code=409, detail="全局记忆会话不保存作品版本，请先创建普通会话。")
     try:
         version, link = artifact_store.add_version(
             artifact_id=artifact_id,

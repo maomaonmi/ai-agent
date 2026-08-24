@@ -321,6 +321,10 @@ def generate_minimax_chat_events(
                 # 前端可做"阅读了 X 个网页"实时计数（GLM/千问同款契约）。
                 new_docs = extract_web_docs(evt.get("block") or {})
                 if new_docs:
+                    known_urls = {str(doc.get("url") or "") for doc in web_docs}
+                    new_docs = [doc for doc in new_docs if str(doc.get("url") or "") not in known_urls]
+                    if not new_docs:
+                        continue
                     web_docs.extend(new_docs)
                     yield event("web_docs", {
                         "docs": new_docs,
