@@ -148,7 +148,8 @@ export default function PptTemplateMarket() {
   const dragStartX = useRef<number | null>(null);
   const [selected, setSelected] = useState<PptTemplate | null>(null);
   const [activeOrbitIndex, setActiveOrbitIndex] = useState(0);
-  const pollingUploads = useRef(new Set<string>());
+  const syncingUploads = useRef(new Set<string>());
+  const syncedUploads = useRef(new Set<string>());
   const {
     templates,
     loading,
@@ -167,13 +168,10 @@ export default function PptTemplateMarket() {
   }, [loadFirstPage]);
 
   useEffect(() => {
-    const pending = uploads.filter((upload) => (
-      upload.templateId
-      && (upload.status === "QUEUED" || upload.status === "UPLOADING" || upload.status === "PROCESSING")
-    ));
-    for (const upload of pending) {
-      if (!upload.templateId || pollingUploads.current.has(upload.id)) continue;
-      pollingUploads.current.add(upload.id);
+    const candidates = uploads.filter((upload) => upload.templateId && !syncedUploads.current.has(upload.id));
+    for (const upload of candidates) {
+      if (!upload.templateId || syncingUploads.current.has(upload.id)) continue;
+      syncingUploads.current.add(upload.id);
       void (async () => {
         try {
           while (true) {
@@ -183,11 +181,20 @@ export default function PptTemplateMarket() {
               ? Math.max(5, Math.min(99, Number((processing as { progress?: unknown }).progress) || 5))
               : template.status === "READY" ? 100 : 50;
             const current = usePptMarketStore.getState().uploads.find((item) => item.id === upload.id) ?? upload;
-            const nextStatus: PptUploadTask["status"] = template.status === "READY"
-              ? "READY"
-              : template.status === "FAILED"
-                ? "FAILED"
-                : "PROCESSING";
+            const noRenderedPages = template.status === "READY" && template.pageCount < 1;
+            const nextStatus: PptUploadTask["status"] = noRenderedPages
+              ? "FAILED"
+              : template.status === "READY"
+                ? "READY"
+                : template.status === "FAILED"
+                  ? "FAILED"
+                  : "PROCESSING";
+            const manifestErrorCode = template.manifest && typeof template.manifest.errorCode === "string"
+              ? template.manifest.errorCode
+              : undefined;
+            const manifestErrorMessage = template.manifest && typeof template.manifest.errorMessage === "string"
+              ? template.manifest.errorMessage
+              : undefined;
             upsertUpload({
               ...current,
               status: nextStatus,
@@ -198,11 +205,15 @@ export default function PptTemplateMarket() {
               scene: template.scene,
               description: template.description ?? undefined,
               coverUrl: template.coverUrl,
-              errorCode: template.status === "FAILED" && template.manifest && typeof template.manifest.errorCode === "string"
-                ? template.manifest.errorCode
-                : undefined,
+              errorCode: noRenderedPages ? "PPT_TEMPLATE_NO_PAGES" : template.errorCode ?? manifestErrorCode,
+              errorMessage: noRenderedPages
+                ? "服务器返回 READY，但没有任何可预览页面"
+                : template.errorMessage ?? manifestErrorMessage,
             });
-            if (nextStatus === "READY" || nextStatus === "FAILED") break;
+            if (nextStatus === "READY" || nextStatus === "FAILED") {
+              syncedUploads.current.add(upload.id);
+              break;
+            }
             await new Promise((resolve) => window.setTimeout(resolve, 900));
           }
         } catch (error) {
@@ -212,9 +223,11 @@ export default function PptTemplateMarket() {
             status: "FAILED",
             progress: 100,
             errorCode: error instanceof Error ? error.message : "PPT_TEMPLATE_STATUS_FAILED",
+            errorMessage: error instanceof Error ? error.message : "无法读取服务器解析状态",
           });
+          syncedUploads.current.add(upload.id);
         } finally {
-          pollingUploads.current.delete(upload.id);
+          syncingUploads.current.delete(upload.id);
         }
       })();
     }
@@ -402,7 +415,7 @@ export default function PptTemplateMarket() {
                   {upload.status === "FAILED" ? <FileUp size={18} className="text-rose-500" /> : upload.status === "READY" ? <CheckCircle2 size={18} className="text-emerald-600" /> : <LoaderCircle size={18} className="animate-spin text-violet-600" />}
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-slate-800">{upload.fileName}</p>
-                    <p className="mt-0.5 text-xs text-slate-500">{upload.status === "FAILED" ? upload.errorCode : upload.status === "READY" ? `主题、配色与版式已提取 · 可立即使用 · ${upload.pageCount ?? upload.template?.pageCount ?? 0} 页可完整预览` : `正在解析原始 PPT 页面… ${upload.progress}%`}</p>
+                    <p className="mt-0.5 text-xs text-slate-500">{upload.status === "FAILED" ? `解析失败 · ${upload.errorMessage ?? upload.errorCode ?? "未知错误"}` : upload.status === "READY" ? `主题、配色与版式已提取 · 可立即使用 · ${upload.pageCount ?? upload.template?.pageCount ?? 0} 页可完整预览` : `正在解析原始 PPT 页面… ${upload.progress}%`}</p>
                   </div>
                   {upload.status === "READY" && upload.template && (
                     <div className="ml-auto flex shrink-0 items-center gap-2">

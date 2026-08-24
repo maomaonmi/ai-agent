@@ -26,6 +26,8 @@ export interface PptTemplate {
   createdAt: string;
   updatedAt: string;
   manifest?: Record<string, unknown>;
+  errorCode?: string;
+  errorMessage?: string;
 }
 
 export interface PptTemplatePage {

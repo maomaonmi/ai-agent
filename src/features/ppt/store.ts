@@ -28,6 +28,7 @@ export interface PptUploadTask {
   description?: string;
   coverUrl?: string | null;
   errorCode?: string;
+  errorMessage?: string;
 }
 
 export interface PptMarketState {
