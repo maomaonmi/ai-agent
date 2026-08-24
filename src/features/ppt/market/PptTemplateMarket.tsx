@@ -121,7 +121,7 @@ function OrbitTemplateCard({
 
   return (
     <article
-      className="group absolute left-1/2 top-[54%] w-[min(64vw,560px)] -translate-x-1/2 -translate-y-1/2 transition-[transform,opacity,filter] duration-700 ease-out [backface-visibility:visible] motion-reduce:transition-none"
+      className="group absolute left-1/2 top-[54%] w-[min(58vw,400px)] -translate-x-1/2 -translate-y-1/2 transition-[transform,opacity,filter] duration-700 ease-out [backface-visibility:visible] motion-reduce:transition-none"
       style={{
         transform: `translate(-50%, -50%) translateY(-${lift}px) rotateY(${ringIndex * angle}deg) translateZ(${radius}px) scale(${scale})`,
         opacity,
@@ -391,7 +391,7 @@ export default function PptTemplateMarket() {
 
           {visibleTemplates.length > 0 ? (
             <div
-              className="group/rail relative mt-6 h-[560px] overflow-hidden rounded-[30px] border border-white/70 bg-[#fbfcfe] shadow-[0_24px_70px_rgba(15,23,42,0.08)] [background-image:radial-gradient(#dce3ed_1.2px,transparent_1.2px),radial-gradient(#e8edf4_1px,transparent_1px),radial-gradient(circle_at_50%_38%,#ffffff_0%,#f7f9fc_56%,#edf1f7_100%)] [background-position:0_0,16px_18px,0_0] [background-size:28px_28px,44px_44px,100%_100%] [perspective:1800px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+              className="group/rail relative mt-6 h-[720px] overflow-hidden rounded-[30px] border border-white/70 bg-[#fbfcfe] shadow-[0_24px_70px_rgba(15,23,42,0.08)] [background-image:radial-gradient(#dce3ed_1.2px,transparent_1.2px),radial-gradient(#e8edf4_1px,transparent_1px),radial-gradient(circle_at_50%_38%,#ffffff_0%,#f7f9fc_56%,#edf1f7_100%)] [background-position:0_0,16px_18px,0_0] [background-size:28px_28px,44px_44px,100%_100%] [perspective:2600px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
               role="region"
               aria-label="环形模板浏览器"
               tabIndex={0}
@@ -406,7 +406,7 @@ export default function PptTemplateMarket() {
               <div className="pointer-events-none absolute inset-x-[8%] bottom-[-40%] h-[70%] rounded-[50%] bg-slate-400/25 blur-3xl" aria-hidden="true" />
               {(() => {
                 const orbitAngle = 360 / Math.max(visibleTemplates.length, 1);
-                const orbitRadius = visibleTemplates.length <= 4 ? 420 : 520;
+                const orbitRadius = visibleTemplates.length <= 4 ? 700 : 820;
                 const orbitRotation = -activeOrbitIndex * orbitAngle;
                 return (
                   <div
