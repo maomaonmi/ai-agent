@@ -59,6 +59,7 @@ def test_upload_persists_source_and_real_page_records(monkeypatch, tmp_path: Pat
     assert pages.status_code == 200
     assert pages.json()["pages"][0]["thumbnailUrl"].startswith("/api/ppt/assets/")
     assert pages.json()["pages"][0]["previewUrl"].startswith("/api/ppt/assets/")
+    assert pages.json()["pages"][0]["title"] == "真实页面 1"
     assert repository.get_template(template_id, owner_scope="owner-a") is not None
 
 
