@@ -434,6 +434,45 @@ class PptRepository:
             return None
         return self.get_template(template_id, owner_scope=owner_scope)
 
+    def update_template_processing(
+        self,
+        template_id: str,
+        *,
+        owner_scope: str,
+        status: str,
+        manifest_patch: dict[str, Any] | None = None,
+    ) -> TemplateRecord | None:
+        """Atomically advance a private template parser and merge its manifest.
+
+        Parsing runs in a background task, so status and progress must be durable
+        before the browser polls again.  The patch is merged server-side rather
+        than replacing the manifest, which keeps source metadata and page counts.
+        """
+        with self._connection(immediate=True) as connection:
+            row = connection.execute(
+                """
+                SELECT manifest_json FROM ppt_templates
+                WHERE id = ? AND owner_scope = ? AND source = 'PRIVATE' AND deleted_at IS NULL
+                """,
+                (template_id, owner_scope),
+            ).fetchone()
+            if row is None:
+                return None
+            manifest = _json_load(row["manifest_json"], {})
+            if not isinstance(manifest, dict):
+                manifest = {}
+            if manifest_patch:
+                manifest.update(manifest_patch)
+            connection.execute(
+                """
+                UPDATE ppt_templates
+                SET status = ?, manifest_json = ?, updated_at = ?
+                WHERE id = ? AND owner_scope = ? AND source = 'PRIVATE' AND deleted_at IS NULL
+                """,
+                (status, _json_dump(manifest), _now(), template_id, owner_scope),
+            )
+        return self.get_template(template_id, owner_scope=owner_scope)
+
     def upsert_template_page(
         self,
         *,

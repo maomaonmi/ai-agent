@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import asyncio
 import inspect
+import uuid
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Query, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, File, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -17,6 +18,12 @@ from ppt_models import parse_presentation_document
 from ppt_operations import OperationRejected, RevisionConflict, apply_operations, parse_operations
 from ppt_agent_loop import AgentRunService, PresentationForRunNotFound, RunNotFound
 from ppt_repository import PptRepository, RepositoryConflict
+from ppt_template_pipeline import (
+    ALLOWED_EXTENSIONS,
+    MAX_SOURCE_BYTES,
+    PptTemplatePipeline,
+    TemplatePipelineError,
+)
 from ppt_service import (
     PresentationDocumentInvalid,
     PresentationNotFound,
@@ -124,6 +131,144 @@ def create_ppt_router(
     resolved_asset_root.mkdir(parents=True, exist_ok=True)
     run_service = AgentRunService(repository, asset_root=resolved_asset_root)
     router = APIRouter(prefix="/api/ppt", tags=["ppt"])
+
+    def _owner_dir(owner_scope: str) -> str:
+        return hashlib.sha256(owner_scope.encode("utf-8")).hexdigest()[:24]
+
+    def _asset_relative_path(path: Path) -> str:
+        return path.resolve().relative_to(resolved_asset_root).as_posix()
+
+    def _register_file_asset(
+        *,
+        asset_id: str,
+        owner_scope: str,
+        kind: str,
+        path: Path,
+        mime_type: str,
+        source_url: str | None = None,
+        attribution: dict[str, Any] | None = None,
+    ) -> None:
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
+        repository.create_asset(
+            asset_id=asset_id,
+            owner_scope=owner_scope,
+            kind=kind,
+            storage_path=_asset_relative_path(path),
+            mime_type=mime_type,
+            size_bytes=size,
+            sha256=digest.hexdigest(),
+            source_url=source_url,
+            attribution=attribution,
+        )
+
+    async def _process_uploaded_template(
+        *,
+        template_id: str,
+        owner_scope: str,
+        source_path: Path,
+        source_file_name: str,
+    ) -> None:
+        template_dir = resolved_asset_root / "owners" / _owner_dir(owner_scope) / "templates" / template_id
+        render_dir = template_dir / "rendered"
+        try:
+            repository.update_template_processing(
+                template_id,
+                owner_scope=owner_scope,
+                status="PARSING",
+                manifest_patch={"processing": {"stage": "PARSING", "progress": 15}},
+            )
+            # LibreOffice and PDF rasterization are blocking native work. Keep
+            # the API event loop responsive while the browser polls progress.
+            result = await asyncio.to_thread(PptTemplatePipeline().render, source_path, render_dir)
+            repository.update_template_processing(
+                template_id,
+                owner_scope=owner_scope,
+                status="RENDERING",
+                manifest_patch={
+                    "processing": {"stage": "RENDERING", "progress": 45},
+                    "pageCount": result.page_count,
+                    "width": result.width,
+                    "height": result.height,
+                    "pageTitles": [page.title for page in result.pages],
+                },
+            )
+            cover_asset_id: str | None = None
+            for index, page in enumerate(result.pages):
+                thumbnail_asset_id = f"asset-{uuid.uuid4().hex}"
+                preview_asset_id = f"asset-{uuid.uuid4().hex}"
+                _register_file_asset(
+                    asset_id=thumbnail_asset_id,
+                    owner_scope=owner_scope,
+                    kind="PPT_TEMPLATE_THUMBNAIL",
+                    path=page.thumbnail_path,
+                    mime_type="image/webp",
+                )
+                _register_file_asset(
+                    asset_id=preview_asset_id,
+                    owner_scope=owner_scope,
+                    kind="PPT_TEMPLATE_PREVIEW",
+                    path=page.preview_path,
+                    mime_type="image/webp",
+                )
+                repository.upsert_template_page(
+                    template_id=template_id,
+                    page_number=page.page_number,
+                    thumbnail_asset_id=thumbnail_asset_id,
+                    preview_asset_id=preview_asset_id,
+                    status="READY",
+                )
+                if index == 0:
+                    cover_asset_id = thumbnail_asset_id
+                progress = 45 + round(((index + 1) / max(result.page_count, 1)) * 50)
+                repository.update_template_processing(
+                    template_id,
+                    owner_scope=owner_scope,
+                    status="RENDERING",
+                    manifest_patch={"processing": {"stage": "RENDERING", "progress": min(progress, 95)}},
+                )
+            repository.update_template_processing(
+                template_id,
+                owner_scope=owner_scope,
+                status="READY",
+                manifest_patch={
+                    "pageCount": result.page_count,
+                    "width": result.width,
+                    "height": result.height,
+                    "pageTitles": [page.title for page in result.pages],
+                    "coverAssetId": cover_asset_id,
+                    "sourceFileName": source_file_name,
+                    "processing": {"stage": "READY", "progress": 100},
+                },
+            )
+        except TemplatePipelineError as exc:
+            repository.update_template_processing(
+                template_id,
+                owner_scope=owner_scope,
+                status="FAILED",
+                manifest_patch={
+                    "sourceFileName": source_file_name,
+                    "processing": {"stage": "FAILED", "progress": 100},
+                    "errorCode": exc.code,
+                    "errorMessage": str(exc),
+                },
+            )
+        except Exception as exc:  # keep failures durable and never leave polling forever
+            repository.update_template_processing(
+                template_id,
+                owner_scope=owner_scope,
+                status="FAILED",
+                manifest_patch={
+                    "sourceFileName": source_file_name,
+                    "processing": {"stage": "FAILED", "progress": 100},
+                    "errorCode": "PPT_TEMPLATE_PROCESSING_FAILED",
+                    "errorMessage": str(exc)[:500],
+                },
+            )
 
     @router.get("/assets/{asset_id}/content", response_model=None)
     async def get_ppt_asset_content(asset_id: str, request: Request) -> FileResponse | JSONResponse:
@@ -371,6 +516,74 @@ def create_ppt_router(
                 "hasMore": result.has_more,
             },
         }
+
+    @router.post("/templates", status_code=status.HTTP_202_ACCEPTED, response_model=None)
+    async def upload_template(
+        request: Request,
+        background_tasks: BackgroundTasks,
+        file: UploadFile = File(...),
+    ) -> dict[str, Any] | JSONResponse:
+        """Accept a private PPT and enqueue real page extraction/rendering."""
+        owner_scope = await _resolve_owner(owner_resolver, request)
+        source_file_name = Path(file.filename or "uploaded.pptx").name
+        suffix = Path(source_file_name).suffix.lower()
+        if suffix not in ALLOWED_EXTENSIONS:
+            return _error("PPT_TEMPLATE_UNSUPPORTED_FORMAT", "仅支持 PPT、PPTX、POT、POTX 文件", status_code=415)
+        template_id = f"template-private-{uuid.uuid4().hex}"
+        owner_root = resolved_asset_root / "owners" / _owner_dir(owner_scope)
+        source_path = owner_root / "templates" / template_id / f"source{suffix}"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        size = 0
+        try:
+            with source_path.open("wb") as target:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > MAX_SOURCE_BYTES:
+                        target.close()
+                        source_path.unlink(missing_ok=True)
+                        return _error("PPT_TEMPLATE_TOO_LARGE", "PPT 文件不能超过 100 MB", status_code=413)
+                    target.write(chunk)
+        except OSError:
+            source_path.unlink(missing_ok=True)
+            return _error("PPT_TEMPLATE_UPLOAD_FAILED", "无法保存上传的 PPT 文件", status_code=500)
+        finally:
+            await file.close()
+        source_asset_id = f"asset-{uuid.uuid4().hex}"
+        try:
+            _register_file_asset(
+                asset_id=source_asset_id,
+                owner_scope=owner_scope,
+                kind="PPT_TEMPLATE_SOURCE",
+                path=source_path,
+                mime_type=file.content_type or "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+            record = repository.create_template(
+                template_id=template_id,
+                owner_scope=owner_scope,
+                name=source_file_name.rsplit(".", 1)[0][:160] or "私有 PPT 模板",
+                description="正在解析原始 PPT 页面",
+                scene="CUSTOM",
+                source="PRIVATE",
+                status="PARSING",
+                manifest={
+                    "pageCount": 0,
+                    "sourceFileName": source_file_name,
+                    "sourceAssetId": source_asset_id,
+                    "processing": {"stage": "UPLOADED", "progress": 5},
+                },
+                source_asset_id=source_asset_id,
+            )
+        except Exception:
+            source_path.unlink(missing_ok=True)
+            return _error("PPT_TEMPLATE_UPLOAD_FAILED", "无法登记上传的 PPT 文件", status_code=500)
+        background_tasks.add_task(
+            _process_uploaded_template,
+            template_id=template_id,
+            owner_scope=owner_scope,
+            source_path=source_path,
+            source_file_name=source_file_name,
+        )
+        return service.template_payload(record, include_manifest=True)
 
     @router.get("/templates/{template_id}", response_model=None)
     async def get_template(template_id: str, request: Request) -> dict[str, Any] | JSONResponse:

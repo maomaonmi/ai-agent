@@ -270,9 +270,11 @@ class PptService:
         self.repository.delete_template(template_id, owner_scope=owner_scope)
 
     def list_template_pages(self, template_id: str, *, owner_scope: str) -> list[dict[str, Any]]:
-        if self.repository.get_template(template_id, owner_scope=owner_scope) is None:
+        template = self.repository.get_template(template_id, owner_scope=owner_scope)
+        if template is None:
             raise TemplateNotFound(template_id)
         pages = self.repository.list_template_pages(template_id, owner_scope=owner_scope)
+        titles = template.manifest.get("pageTitles", [])
         return [
             {
                 "pageNumber": page.page_number,
@@ -288,6 +290,13 @@ class PptService:
                     else None
                 ),
                 **({"errorCode": page.error_code} if page.error_code else {}),
+                **(
+                    {"title": titles[page.page_number - 1]}
+                    if isinstance(titles, list)
+                    and 0 <= page.page_number - 1 < len(titles)
+                    and isinstance(titles[page.page_number - 1], str)
+                    else {}
+                ),
             }
             for page in pages
         ]
