@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 
 import type { PptTemplate } from "../api";
-import { usePptMarketStore } from "../store";
+import { usePptMarketStore, type PptUploadTask } from "../store";
 import TemplatePreviewDialog from "./TemplatePreviewDialog";
 
 
@@ -51,7 +51,27 @@ const categories = [
 function coverFor(template: PptTemplate, index = 0): string {
   if (template.id.includes("editorial") || template.scene === "CREATIVE" || template.scene === "EDUCATION") return covers[1];
   if (template.id.includes("data") || template.scene === "TECHNOLOGY" || template.scene === "RESEARCH") return covers[2];
-  return covers[index % covers.length];
+  return covers[Math.max(0, index) % covers.length];
+}
+
+
+function privateTemplateFor(upload: PptUploadTask): PptTemplate {
+  const templateId = upload.templateId ?? `private-${upload.id}`;
+  const name = upload.fileName.replace(/\.(pptx|potx)$/i, "").trim() || "我的私有模板";
+  return {
+    id: templateId,
+    name,
+    description: upload.description ?? "已提取主题、配色与版式 · 私有模板",
+    scene: upload.scene ?? "CUSTOM",
+    source: "PRIVATE",
+    isPrivate: true,
+    status: "READY",
+    pageCount: upload.pageCount ?? 12,
+    coverUrl: upload.coverUrl ?? null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    manifest: { uploadId: upload.id, sourceFileName: upload.fileName, private: true },
+  };
 }
 
 
@@ -158,7 +178,18 @@ export default function PptTemplateMarket() {
     return () => timers.forEach((timer) => window.clearTimeout(timer));
   }, [uploads, upsertUpload]);
 
-  const sourceTemplates = templates.length > 0 ? templates : demoTemplates;
+  const privateTemplates = useMemo(
+    () => uploads
+      .filter((upload) => upload.status === "READY")
+      .map(privateTemplateFor),
+    [uploads],
+  );
+  const sourceTemplates = useMemo(() => {
+    const byId = new Map<string, PptTemplate>();
+    for (const template of privateTemplates) byId.set(template.id, template);
+    for (const template of (templates.length > 0 ? templates : demoTemplates)) byId.set(template.id, template);
+    return [...byId.values()];
+  }, [privateTemplates, templates]);
   const visibleTemplates = useMemo(() => {
     const query = filters.query.trim().toLowerCase();
     return sourceTemplates.filter((template) => (
@@ -226,7 +257,16 @@ export default function PptTemplateMarket() {
       upsertUpload({ id, fileName: file.name, status: "FAILED", progress: 0, errorCode: "PPT_FILE_TOO_LARGE" });
       return;
     }
-    const queued = { id, fileName: file.name, status: "PROCESSING" as const, progress: 35, templateId: `private-${id}` };
+    const queued = {
+      id,
+      fileName: file.name,
+      status: "PROCESSING" as const,
+      progress: 35,
+      templateId: `private-${id}`,
+      pageCount: 12,
+      scene: "CUSTOM",
+      description: "正在提取主题、配色与版式…",
+    };
     upsertUpload(queued);
     window.setTimeout(() => upsertUpload({ ...queued, status: "READY", progress: 100 }), 520);
   };
@@ -296,7 +336,12 @@ export default function PptTemplateMarket() {
                     <p className="truncate text-sm font-medium text-slate-800">{upload.fileName}</p>
                     <p className="mt-0.5 text-xs text-slate-500">{upload.status === "FAILED" ? upload.errorCode : upload.status === "READY" ? "主题、配色与版式已提取 · 可立即使用" : "正在本地解析主题与版式…"}</p>
                   </div>
-                  {upload.status === "READY" && <button type="button" onClick={() => router.push(`/ppt/workspace/new?templateId=${encodeURIComponent(upload.templateId ?? `private-${upload.id}`)}`)} className="ml-auto shrink-0 rounded-full bg-violet-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-violet-500">立即使用</button>}
+                  {upload.status === "READY" && (
+                    <div className="ml-auto flex shrink-0 items-center gap-2">
+                      <button type="button" onClick={() => setSelected(privateTemplateFor(upload))} className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-[11px] font-semibold text-slate-700 hover:border-violet-300 hover:text-violet-700">完整预览</button>
+                      <button type="button" onClick={() => router.push(`/ppt/workspace/new?templateId=${encodeURIComponent(upload.templateId ?? `private-${upload.id}`)}`)} className="rounded-full bg-violet-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-violet-500">立即使用</button>
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

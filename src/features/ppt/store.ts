@@ -22,6 +22,10 @@ export interface PptUploadTask {
   status: "QUEUED" | "UPLOADING" | "PROCESSING" | "READY" | "FAILED";
   progress: number;
   templateId?: string;
+  pageCount?: number;
+  scene?: string;
+  description?: string;
+  coverUrl?: string | null;
   errorCode?: string;
 }
 
