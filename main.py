@@ -1637,25 +1637,37 @@ def _extract_search_info_from_chunk(chunk) -> Dict | None:
     """
     if not chunk:
         return None
-    # 尝试 model_extra（Pydantic v2 标准路径）
-    extra = getattr(chunk, "model_extra", None) or {}
-    search_info = extra.get("search_info") if isinstance(extra, dict) else None
-    if not search_info:
-        # 兜底：直接尝试 getattr（某些 SDK 版本可能挂在顶层）
-        search_info = getattr(chunk, "search_info", None)
-    if not search_info and isinstance(extra, dict):
-        for key in ("search_results", "citations", "sources", "results"):
-            values = extra.get(key)
-            if isinstance(values, list):
-                search_info = {"search_results": values}
-                break
-    if not search_info:
+    def result_list(value: Any) -> list[dict] | None:
+        if isinstance(value, dict):
+            direct = value.get("search_results")
+            if isinstance(direct, list):
+                return [item for item in direct if isinstance(item, dict)]
+            for key in ("citations", "sources", "results", "search_result", "items", "annotations"):
+                values = value.get(key)
+                if isinstance(values, list):
+                    return [item for item in values if isinstance(item, dict)]
+            for key in ("search_info", "data", "output", "result"):
+                nested = result_list(value.get(key))
+                if nested:
+                    return nested
+        elif isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
         return None
-    # 提取 search_results 列表
-    results = search_info.get("search_results") if isinstance(search_info, dict) else None
-    if not results or not isinstance(results, list):
-        return None
-    return {"search_results": results}
+
+    candidates: list[Any] = [getattr(chunk, "model_extra", None), getattr(chunk, "search_info", None)]
+    choices = getattr(chunk, "choices", None) or []
+    if choices:
+        delta = getattr(choices[0], "delta", None)
+        candidates.extend([
+            getattr(delta, "model_extra", None),
+            getattr(delta, "annotations", None),
+            getattr(delta, "search_info", None),
+        ])
+    for candidate in candidates:
+        results = result_list(candidate)
+        if results:
+            return {"search_results": results}
+    return None
 
 
 def _merge_search_results(citations: List[Dict], search_info: Dict) -> None:
@@ -1670,6 +1682,12 @@ def _merge_search_results(citations: List[Dict], search_info: Dict) -> None:
     for position, item in enumerate(search_info.get("search_results", []), start=1):
         if not isinstance(item, dict):
             continue
+        # OpenAI-compatible gateways sometimes wrap citations as
+        # {type: "url_citation", url_citation: {...}}.
+        for wrapper_key in ("url_citation", "citation", "source"):
+            if isinstance(item.get(wrapper_key), dict):
+                item = {**item, **item[wrapper_key]}
+                break
         idx = item.get("index") or item.get("id") or position
         url = str(item.get("url") or item.get("link") or item.get("href") or "").strip()
         # Some GLM/Qwen compatible gateways omit index but still return a URL.
@@ -8615,6 +8633,15 @@ def generate_direct_chat_events(request: ChatRequest, settings: ModelSettings, m
     reasoning_parts: list[str] = []
     citations_extracted: list[dict] = []  # [(id, title, url)]
     latest_usage: Dict[str, Any] | None = None
+
+    def merge_and_emit_sources(search_info: Dict | None):
+        """Persist each newly observed provider citation as soon as it arrives."""
+        if not search_info:
+            return None
+        before = {str(item.get("url") or "").strip() for item in citations_extracted if item.get("url")}
+        _merge_search_results(citations_extracted, search_info)
+        fresh = [item for item in citations_extracted if item.get("url") and str(item.get("url")).strip() not in before]
+        return fresh or None
     try:
         yield event("node", {
             "node_name": f"{provider_label} · {model_id}",
@@ -8709,8 +8736,15 @@ def generate_direct_chat_events(request: ChatRequest, settings: ModelSettings, m
             if not chunk.choices:
                 # Why: 千问搜索来源可能在无 choices 的 chunk 中携带 search_info
                 _search_info = _extract_search_info_from_chunk(chunk)
-                if _search_info:
-                    _merge_search_results(citations_extracted, _search_info)
+                fresh_sources = merge_and_emit_sources(_search_info)
+                if fresh_sources:
+                    yield event("web_docs", {
+                        "docs": fresh_sources,
+                        "count": len(fresh_sources),
+                        "total": len(citations_extracted),
+                        "placeholder": False,
+                        "native_search": True,
+                    })
                 continue
             delta = chunk.choices[0].delta
             reasoning = reasoning_from_delta(delta)
@@ -8723,8 +8757,15 @@ def generate_direct_chat_events(request: ChatRequest, settings: ModelSettings, m
                 yield event("token", {"token": content})
             # 千问 OpenAI 兼容协议：search_info 在 chunk.model_extra 中
             _search_info = _extract_search_info_from_chunk(chunk)
-            if _search_info:
-                _merge_search_results(citations_extracted, _search_info)
+            fresh_sources = merge_and_emit_sources(_search_info)
+            if fresh_sources:
+                yield event("web_docs", {
+                    "docs": fresh_sources,
+                    "count": len(fresh_sources),
+                    "total": len(citations_extracted),
+                    "placeholder": False,
+                    "native_search": True,
+                })
         final_answer_str = "".join(answer_parts)
         final_reason_len = sum(len(r) for r in reasoning_parts)
         # Why: 直连路径先推了 "{provider_label} · {model_id}" 节点的 processing 事件，

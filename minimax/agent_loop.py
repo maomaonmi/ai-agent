@@ -46,7 +46,9 @@ logger = logging.getLogger("minimax.agent_loop")
 # spend the entire response budget on repeated thinking/tool calls and leave
 # the user with an empty final answer.
 DEFAULT_MAX_ROUNDS = 12
-MAX_INTERACTIVE_ROUNDS = 6
+# Four short rounds cover the usual search → observe → refine path while
+# preventing a deep request from spending minutes in repeated self-calls.
+MAX_INTERACTIVE_ROUNDS = 4
 PRE_TOOL_THINKING_BUDGET = 1_024
 POST_TOOL_THINKING_BUDGET = 1_536
 FINAL_THINKING_BUDGET = 1_024
@@ -227,6 +229,17 @@ async def generate_minimax_agent_events(
         )
         return bounded
 
+    def staged_max_tokens(budget_cap: int) -> int:
+        """Hard-cap a deep tool round, not just its advisory thinking budget.
+
+        MiniMax may treat ``thinking.budget_tokens`` as a hint.  Keeping the
+        request's total output budget small is the reliable guardrail against
+        a single interleaved round consuming tens of thousands of tokens.
+        """
+        if not thinking:
+            return max_tokens
+        return min(max_tokens, budget_cap + 2_048)
+
     anthropic_tools, name_map = openai_tools_to_anthropic(openai_tool_specs)
     server_tools: list[dict[str, Any]] = list(anthropic_tools)
 
@@ -318,7 +331,9 @@ async def generate_minimax_agent_events(
             stream: Iterator[dict] = client.stream_message(
                 model=model_id,
                 messages=messages,
-                max_tokens=max_tokens,
+                max_tokens=staged_max_tokens(
+                    PRE_TOOL_THINKING_BUDGET if round_no == 1 else POST_TOOL_THINKING_BUDGET,
+                ),
                 system=None,
                 tools=tools_payload,
                 thinking=round_thinking,
@@ -424,59 +439,99 @@ async def generate_minimax_agent_events(
                 "provider": "minimax",
                 "timestamp_ms": int(time.time() * 1000),
             })
-            final_instruction = (
-                "工具检索阶段已完成。请先用一段简短思考规划最终结构，"
-                "然后直接输出用户要求的完整正文或文档内容；不要继续调用工具，也不要解释工具过程。"
-            )
-            final_messages = [*messages]
-            # Keep the Anthropic message sequence valid when the last entry is
-            # already the user tool_result message: append the instruction to
-            # that message instead of creating two adjacent user messages.
-            if final_messages and final_messages[-1].get("role") == "user":
-                last_content = final_messages[-1].get("content")
-                if isinstance(last_content, list):
-                    final_messages[-1] = {
-                        **final_messages[-1],
-                        "content": [*last_content, {"type": "text", "text": final_instruction}],
-                    }
+            def with_user_instruction(source: list[dict[str, Any]], instruction: str) -> list[dict[str, Any]]:
+                """Append an instruction without creating adjacent user turns."""
+                result = [*source]
+                if result and result[-1].get("role") == "user":
+                    last_content = result[-1].get("content")
+                    if isinstance(last_content, list):
+                        result[-1] = {
+                            **result[-1],
+                            "content": [*last_content, {"type": "text", "text": instruction}],
+                        }
+                    else:
+                        result[-1] = {
+                            **result[-1],
+                            "content": f"{last_content or ''}\n\n{instruction}",
+                        }
                 else:
-                    final_messages[-1] = {
-                        **final_messages[-1],
-                        "content": f"{last_content or ''}\n\n{final_instruction}",
-                    }
-            else:
-                final_messages.append({"role": "user", "content": final_instruction})
+                    result.append({"role": "user", "content": instruction})
+                return result
+
             try:
-                final_stream: Iterator[dict] = client.stream_message(
+                planning_hint = ""
+                if thinking:
+                    # Stage 1: a deliberately small, tool-free planning
+                    # request.  Its reasoning deltas are visible immediately,
+                    # while incidental text is held back from the final answer.
+                    planning_messages = with_user_instruction(
+                        messages,
+                        "工具检索阶段已完成。请只做简短结构规划，不要调用工具，不要输出最终正文。",
+                    )
+                    try:
+                        planning_stream: Iterator[dict] = client.stream_message(
+                            model=model_id,
+                            messages=planning_messages,
+                            max_tokens=1_536,
+                            system=None,
+                            tools=None,
+                            thinking=staged_thinking_payload(FINAL_THINKING_BUDGET),
+                            temperature=temperature,
+                        )
+                        planning_assembler = StreamAssembler()
+                        planning_text_parts: list[str] = []
+                        for evt in planning_stream:
+                            evt_type = evt.get("type", "")
+                            planning_assembler.feed(evt)
+                            if evt_type == "text_delta":
+                                piece = str(evt.get("text") or "")
+                                if piece:
+                                    planning_text_parts.append(piece)
+                            elif evt_type == "thinking_delta":
+                                piece = str(evt.get("text") or "")
+                                if piece:
+                                    reasoning_parts.append(piece)
+                                    yield event("reasoning_delta", {"reasoning_delta": piece})
+                        if planning_assembler.usage:
+                            total_usage.update(planning_assembler.usage)
+                        planning_hint = "".join(planning_text_parts).strip()
+                    except MiniMaxAPIError:
+                        # Planning is an optimization; a provider failure must
+                        # not prevent the separate writing request from running.
+                        logger.exception("[minimax] final answer planning failed; continue writing")
+                writing_instruction = (
+                    "工具检索阶段已完成。请直接输出用户要求的完整正文或文档内容；"
+                    "不要继续调用工具，也不要解释工具过程。"
+                )
+                if planning_hint:
+                    writing_instruction += f"\n\n结构规划参考：\n{planning_hint[:4_000]}"
+                writing_messages = with_user_instruction(messages, writing_instruction)
+
+                # Stage 2: writing has thinking disabled, so the full response
+                # budget is available for the actual document body.
+                writing_stream: Iterator[dict] = client.stream_message(
                     model=model_id,
-                    messages=final_messages,
+                    messages=writing_messages,
                     max_tokens=max_tokens,
                     system=None,
                     tools=None,
-                    thinking=staged_thinking_payload(FINAL_THINKING_BUDGET),
+                    thinking=None,
                     temperature=temperature,
                 )
-                final_assembler = StreamAssembler()
-                for evt in final_stream:
+                writing_assembler = StreamAssembler()
+                for evt in writing_stream:
                     evt_type = evt.get("type", "")
-                    final_assembler.feed(evt)
+                    writing_assembler.feed(evt)
                     if evt_type == "text_delta":
                         piece = str(evt.get("text") or "")
                         if piece:
                             answer_parts.append(piece)
                             yield event("token", {"token": piece})
-                    elif evt_type == "thinking_delta":
-                        # Finalization uses a short thinking phase so the
-                        # frontend can show the final structure being planned.
-                        piece = str(evt.get("text") or "")
-                        if piece:
-                            reasoning_parts.append(piece)
-                            yield event("reasoning_delta", {"reasoning_delta": piece})
-                if final_assembler.usage:
-                    total_usage.update(final_assembler.usage)
+                if writing_assembler.usage:
+                    total_usage.update(writing_assembler.usage)
                 final_answer = "".join(answer_parts)
             except MiniMaxAPIError:
-                logger.exception("[minimax] final answer synthesis failed")
+                logger.exception("[minimax] final answer writing failed")
 
         if not final_answer.strip():
             final_answer = "工具检索已完成，但模型未返回最终正文，请重试。"

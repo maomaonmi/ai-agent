@@ -177,6 +177,22 @@ def test_extract_web_docs_filters_result_items():
     assert docs[0]["native_search"] is True
 
 
+def test_extract_web_docs_accepts_gateway_result_shapes_and_deduplicates():
+    block = {
+        "results": [
+            {"title": "A", "link": "https://a.io", "snippet": "摘要 A"},
+            {"name": "B", "href": "https://b.io", "description": "摘要 B"},
+        ],
+        "content": [
+            {"type": "search_result", "title": "A again", "url": "https://a.io", "text": "重复"},
+        ],
+    }
+    docs = mm_chat.extract_web_docs(block)
+    assert [doc["url"] for doc in docs] == ["https://a.io", "https://b.io"]
+    assert docs[0]["content"] == "摘要 A"
+    assert docs[1]["title"] == "B"
+
+
 # --------------------------------------------------------------------- 事件契约
 
 def test_standard_stream_event_contract(monkeypatch):

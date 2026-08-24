@@ -270,9 +270,9 @@ def test_agent_loop_synthesizes_answer_after_round_cap(monkeypatch):
         {"type": "tool_use", "block": {"id": "tu_cap", "name": "t", "input": {}}},
         {"type": "message_delta", "stop_reason": "tool_use", "usage": {"output_tokens": 1}},
     ]
-    # The sixth tool round is the configured interactive safety cap.  The
-    # seventh call is the tool-free final synthesis turn added by the loop.
-    ScriptedClient.scripts = [tool_round for _ in range(6)] + [[
+    # The fourth tool round is the configured interactive safety cap.  The
+    # fifth call is the tool-free final synthesis turn added by the loop.
+    ScriptedClient.scripts = [tool_round for _ in range(4)] + [[
         {"type": "text_delta", "text": "最终正文"},
         {"type": "message_delta", "stop_reason": "end_turn", "usage": {"output_tokens": 2}},
     ]]
@@ -289,7 +289,7 @@ def test_agent_loop_synthesizes_answer_after_round_cap(monkeypatch):
         )]
 
     chunks = asyncio.run(run())
-    assert len(ScriptedClient.calls) == 7
+    assert len(ScriptedClient.calls) == 5
     assert ScriptedClient.calls[-1]["tools"] is None
     done = next(p for n, p in _parse(chunks) if n == "done")
     assert done["answer"] == "最终正文"
@@ -308,6 +308,9 @@ def test_deep_tool_loop_uses_short_staged_thinking_and_final_synthesis(monkeypat
         {"type": "message_delta", "stop_reason": "end_turn", "usage": {"output_tokens": 2}},
     ], [
         {"type": "thinking_delta", "text": "规划正文结构"},
+        {"type": "text_delta", "text": "只输出规划"},
+        {"type": "message_delta", "stop_reason": "end_turn", "usage": {"output_tokens": 2}},
+    ], [
         {"type": "text_delta", "text": "完整正文"},
         {"type": "message_delta", "stop_reason": "end_turn", "usage": {"output_tokens": 3}},
     ]]
@@ -325,13 +328,18 @@ def test_deep_tool_loop_uses_short_staged_thinking_and_final_synthesis(monkeypat
 
     chunks = asyncio.run(run())
     events = _parse(chunks)
-    assert len(ScriptedClient.calls) == 3
+    assert len(ScriptedClient.calls) == 4
     # Each tool-loop request is deliberately short; final synthesis keeps a
-    # short thinking phase but disables tools so it cannot loop again.
+    # short planning phase, then writes with thinking/tools disabled.
     assert ScriptedClient.calls[0]["thinking"]["budget_tokens"] <= 1024
+    assert ScriptedClient.calls[0]["max_tokens"] <= 3_072
     assert ScriptedClient.calls[1]["thinking"]["budget_tokens"] <= 1536
+    assert ScriptedClient.calls[1]["max_tokens"] <= 3_584
     assert ScriptedClient.calls[2]["tools"] is None
     assert ScriptedClient.calls[2]["thinking"]["budget_tokens"] <= 1024
+    assert ScriptedClient.calls[2]["max_tokens"] <= 1_536
+    assert ScriptedClient.calls[3]["tools"] is None
+    assert ScriptedClient.calls[3]["thinking"] is None
     assert any(name == "reasoning_delta" for name, _ in events)
     done = next(payload for name, payload in events if name == "done")
     assert "完整正文" in done["answer"]

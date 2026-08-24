@@ -673,7 +673,11 @@ def build_settings_search_adapters(*, request_json: JsonRequest | None = None) -
     # (api_key) 和套餐 Key (minimax_video_api_key)：用户可能只配置了二选一，
     # 若只用普通 api_key 判断会导致 adapter 未注册、搜索直接落入 demo-fallback。
     minimax_settings = models.load("minimax")
-    minimax_mm_key = (minimax_settings.minimax_video_api_key or minimax_settings.api_key or "").strip()
+    minimax_mm_key = (
+        getattr(minimax_settings, "minimax_video_api_key", "")
+        or getattr(minimax_settings, "api_key", "")
+        or ""
+    ).strip()
     if minimax_mm_key:
         adapters["minimax"] = MiniMaxSearchAdapter(
             api_key=minimax_mm_key,
@@ -1356,7 +1360,11 @@ def build_settings_ai_image_adapter(*, request_json: JsonRequest | None = None) 
     minimax_settings = store.load("minimax")
     # Why: image-01 走套餐 Key（minimax_video_api_key），与普通文本 api_key 不同。
     # 留空时回退到普通 api_key，兼容只配了普通 Key 的用户。
-    image_key = (minimax_settings.minimax_video_api_key or minimax_settings.api_key or "").strip()
+    image_key = (
+        getattr(minimax_settings, "minimax_video_api_key", "")
+        or getattr(minimax_settings, "api_key", "")
+        or ""
+    ).strip()
     if image_key:
         return MiniMaxAiImageAdapter(api_key=image_key)
     return None

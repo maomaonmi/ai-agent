@@ -145,21 +145,70 @@ def extract_web_docs(block: dict[str, Any]) -> list[dict[str, Any]]:
     位做全局稳定 id，前端 spread 追加可安全去重。
     """
     docs: list[dict[str, Any]] = []
-    for item in block.get("content") or []:
-        if not isinstance(item, dict) or item.get("type") != "web_search_result":
-            continue
-        url = str(item.get("url") or "")
-        if not url:
-            continue
-        url_hash = hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
-        docs.append({
-            "id": f"web-{url_hash}",
-            "title": str(item.get("title") or url),
-            "url": url,
-            "content": str(item.get("page_age") or ""),
-            "score": 1.0,
-            "native_search": True,
-        })
+    seen_urls: set[str] = set()
+
+    def parse_json(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if not text or text[0] not in "[{":
+            return value
+        try:
+            return json.loads(text)
+        except (TypeError, ValueError):
+            return value
+
+    def visit(value: Any, *, result_container: bool = False) -> None:
+        value = parse_json(value)
+        if isinstance(value, list):
+            for child in value:
+                visit(child, result_container=result_container)
+            return
+        if not isinstance(value, dict):
+            return
+
+        item_type = str(value.get("type") or "").lower()
+        is_result = item_type in {"web_search_result", "search_result", "result"}
+        is_result_wrapper = item_type in {"web_search_tool_result", "search_results", "results"}
+        url = str(value.get("url") or value.get("link") or value.get("href") or "").strip()
+        # `content` is the native Anthropic shape; results/search_results/items
+        # are used by other MiniMax gateway versions.  In a known result
+        # container, URL-bearing dictionaries are valid even without `type`.
+        if url and (is_result or result_container):
+            if url not in seen_urls:
+                seen_urls.add(url)
+                title = str(value.get("title") or value.get("name") or url).strip()
+                snippet = (
+                    value.get("snippet")
+                    or value.get("description")
+                    or value.get("content")
+                    or value.get("text")
+                    or value.get("page_age")
+                    or ""
+                )
+                raw_score = value.get("score")
+                try:
+                    score = float(raw_score) if raw_score is not None else 1.0
+                except (TypeError, ValueError):
+                    score = 1.0
+                docs.append({
+                    "id": f"web-{hashlib.md5(url.encode('utf-8')).hexdigest()[:12]}",
+                    "title": title,
+                    "url": url,
+                    "content": str(snippet),
+                    "score": score,
+                    "native_search": True,
+                })
+
+        for key in ("results", "search_results", "items"):
+            if key in value:
+                visit(value.get(key), result_container=True)
+        # Some responses wrap the native result list one level deeper under
+        # `content`; do not treat arbitrary metadata fields as sources.
+        if "content" in value and not is_result:
+            visit(value.get("content"), result_container=result_container or is_result_wrapper)
+
+    visit(block)
     return docs
 
 
