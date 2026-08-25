@@ -57,6 +57,28 @@ test("PPT API types list responses and stable errors", async () => {
 });
 
 
+test("private template deletion uses the durable DELETE endpoint", async () => {
+  const originalFetch = globalThis.fetch;
+  const api = createPptApi("http://ppt.test");
+  const calls: Array<{ url: string; method?: string }> = [];
+  try {
+    globalThis.fetch = async (input, init) => {
+      calls.push({ url: String(input), method: init?.method });
+      return new Response(null, { status: 204 });
+    };
+
+    await api.deleteTemplate("template-private-1");
+
+    assert.deepEqual(calls, [{
+      url: "http://ppt.test/api/ppt/templates/template-private-1",
+      method: "DELETE",
+    }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
 test("presentation API creates, loads, and commits operations with camel-case contract", async () => {
   const originalFetch = globalThis.fetch;
   const api = createPptApi("http://ppt.test");
@@ -255,4 +277,19 @@ test("upload task state can be restored after remount", () => {
   remounted.getState().restoreUploads(snapshot);
 
   assert.equal(remounted.getState().uploads[0].progress, 62);
+});
+
+
+test("deleting a template removes its market card and persisted upload task", () => {
+  const api = { listTemplates: async () => ({ templates: [], pagination: { page: 1, pageSize: 24, hasMore: false } }) };
+  const store = createStore<PptMarketState>(createPptMarketState(api));
+  store.setState({
+    templates: [template("template-private-1")],
+    uploads: [{ id: "upload-1", fileName: "private.pptx", status: "READY", progress: 100, templateId: "template-private-1" }],
+  });
+
+  store.getState().removeTemplate("template-private-1");
+
+  assert.deepEqual(store.getState().templates, []);
+  assert.deepEqual(store.getState().uploads, []);
 });

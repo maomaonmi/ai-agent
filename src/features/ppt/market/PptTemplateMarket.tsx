@@ -14,12 +14,13 @@ import {
   GraduationCap,
   LayoutGrid,
   LoaderCircle,
+  Trash2,
   Search,
   Sparkles,
   UploadCloud,
 } from "lucide-react";
 
-import { pptApi, resolvePptAssetUrl, type PptTemplate } from "../api";
+import { PptApiError, pptApi, resolvePptAssetUrl, type PptTemplate } from "../api";
 import { usePptMarketStore, type PptUploadTask } from "../store";
 import TemplatePreviewDialog from "./TemplatePreviewDialog";
 
@@ -90,6 +91,7 @@ function OrbitTemplateCard({
   onActivate,
   onPreview,
   onUse,
+  onDelete,
 }: {
   template: PptTemplate;
   cover: string;
@@ -100,6 +102,7 @@ function OrbitTemplateCard({
   onActivate: () => void;
   onPreview: () => void;
   onUse: () => void;
+  onDelete?: () => void;
 }) {
   const active = distance === 0;
   const magnitude = Math.abs(distance);
@@ -135,6 +138,7 @@ function OrbitTemplateCard({
         <div className="pointer-events-none absolute inset-x-4 bottom-4 flex translate-y-2 items-center gap-2 opacity-0 transition group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:translate-y-0 group-focus-within:opacity-100">
           <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={onPreview} className="h-9 flex-1 rounded-full border border-white/60 bg-white/90 text-xs font-semibold text-slate-800 shadow-lg backdrop-blur transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">预览</button>
           <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={onUse} className="h-9 flex-1 rounded-full bg-violet-600 text-xs font-semibold text-white shadow-lg transition hover:bg-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">使用模板</button>
+          {onDelete && <button type="button" onPointerDown={(event) => event.stopPropagation()} onClick={onDelete} title="删除模板" aria-label={`删除模板：${template.name}`} className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-rose-200 bg-white/90 text-rose-600 shadow-lg backdrop-blur transition hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400"><Trash2 size={14} /></button>}
         </div>
       </div>
     </article>
@@ -150,6 +154,8 @@ export default function PptTemplateMarket() {
   const [activeOrbitIndex, setActiveOrbitIndex] = useState(0);
   const syncingUploads = useRef(new Set<string>());
   const syncedUploads = useRef(new Set<string>());
+  const privateTemplateCache = useRef<PptTemplate[] | null>(null);
+  const privateTemplateCacheRequest = useRef<Promise<PptTemplate[]> | null>(null);
   const {
     templates,
     loading,
@@ -160,7 +166,10 @@ export default function PptTemplateMarket() {
     loadFirstPage,
     loadMore,
     upsertUpload,
+    removeTemplate,
   } = usePptMarketStore();
+  const [deletingTemplateId, setDeletingTemplateId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     void usePptMarketStore.persist.rehydrate();
@@ -168,14 +177,71 @@ export default function PptTemplateMarket() {
   }, [loadFirstPage]);
 
   useEffect(() => {
-    const candidates = uploads.filter((upload) => upload.templateId && !syncedUploads.current.has(upload.id));
+    const candidates = uploads.filter((upload) => (
+      !syncedUploads.current.has(upload.id)
+      && (Boolean(upload.templateId) || upload.status === "READY")
+    ));
+    const loadPrivateTemplates = async () => {
+      if (privateTemplateCache.current) return privateTemplateCache.current;
+      if (!privateTemplateCacheRequest.current) {
+        privateTemplateCacheRequest.current = pptApi.listTemplates({
+          page: 1,
+          pageSize: 50,
+          source: "PRIVATE",
+        }).then((response) => {
+          privateTemplateCache.current = response.templates;
+          return response.templates;
+        }).finally(() => {
+          privateTemplateCacheRequest.current = null;
+        });
+      }
+      return privateTemplateCacheRequest.current;
+    };
+    const matchByFileName = (templates: PptTemplate[], fileName: string) => {
+      const baseName = fileName.replace(/\.[^.]+$/, "").trim().toLowerCase();
+      if (!baseName) return undefined;
+      return templates.find((template) => {
+        const templateName = template.name.trim().toLowerCase();
+        return templateName === baseName || templateName.startsWith(baseName) || baseName.startsWith(templateName);
+      });
+    };
     for (const upload of candidates) {
-      if (!upload.templateId || syncingUploads.current.has(upload.id)) continue;
+      if (syncingUploads.current.has(upload.id)) continue;
       syncingUploads.current.add(upload.id);
       void (async () => {
         try {
+          if (!upload.templateId) {
+            upsertUpload({
+              ...upload,
+              status: "STALE",
+              progress: 100,
+              errorCode: "PPT_TEMPLATE_NOT_FOUND",
+              errorMessage: "历史记录缺少服务端模板编号，请重新上传原文件",
+            });
+            syncedUploads.current.add(upload.id);
+            return;
+          }
           while (true) {
-            const template = await pptApi.getTemplate(upload.templateId!);
+            let template: PptTemplate;
+            try {
+              template = await pptApi.getTemplate(upload.templateId!);
+            } catch (error) {
+              if (!(error instanceof PptApiError) || error.status !== 404) throw error;
+              const match = matchByFileName(await loadPrivateTemplates(), upload.fileName);
+              if (!match) {
+                const current = usePptMarketStore.getState().uploads.find((item) => item.id === upload.id) ?? upload;
+                upsertUpload({
+                  ...current,
+                  status: "STALE",
+                  progress: 100,
+                  errorCode: "PPT_TEMPLATE_NOT_FOUND",
+                  errorMessage: "历史模板记录已失效，请重新上传原文件",
+                });
+                syncedUploads.current.add(upload.id);
+                break;
+              }
+              template = match;
+            }
             const processing = template.manifest?.processing;
             const progress = processing && typeof processing === "object" && "progress" in processing
               ? Math.max(5, Math.min(99, Number((processing as { progress?: unknown }).progress) || 5))
@@ -295,7 +361,6 @@ export default function PptTemplateMarket() {
 
   const handleOrbitWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
     if (Math.abs(event.deltaX) < 8 && Math.abs(event.deltaY) < 8) return;
-    event.preventDefault();
     moveOrbit(event.deltaX + event.deltaY > 0 ? 1 : -1);
   };
 
@@ -326,6 +391,7 @@ export default function PptTemplateMarket() {
       status: "UPLOADING",
       progress: 5,
     };
+    privateTemplateCache.current = null;
     upsertUpload(queued);
     void pptApi.createTemplate(file)
       .then((template) => {
@@ -354,6 +420,24 @@ export default function PptTemplateMarket() {
 
   const handleUseTemplate = (template: PptTemplate) => {
     router.push(`/ppt/workspace/new?templateId=${encodeURIComponent(template.id)}`);
+  };
+
+  const handleDeleteTemplate = async (templateId: string, name: string) => {
+    if (!window.confirm(`确定删除“${name}”吗？删除后将无法继续预览或使用该私有模板。`)) return;
+    setDeleteError(null);
+    setDeletingTemplateId(templateId);
+    try {
+      await pptApi.deleteTemplate(templateId);
+      uploads
+        .filter((upload) => upload.templateId === templateId)
+        .forEach((upload) => syncedUploads.current.add(upload.id));
+      if (selected?.id === templateId) setSelected(null);
+      removeTemplate(templateId);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "删除模板失败，请稍后重试");
+    } finally {
+      setDeletingTemplateId(null);
+    }
   };
 
   return (
@@ -407,15 +491,17 @@ export default function PptTemplateMarket() {
           </div>
         </section>
 
+        {deleteError && <p role="alert" className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">{deleteError}</p>}
+
         {uploads.length > 0 && (
           <section className="mt-6 rounded-[22px] border border-slate-200 bg-white p-4" aria-label="模板上传任务">
             <div className="flex flex-wrap items-center gap-3">
               {[...new Map(uploads.map((upload) => [upload.fileName, upload])).values()].slice(0, 3).map((upload) => (
                 <div key={upload.id} className="flex min-w-0 flex-1 items-center gap-3 rounded-2xl bg-slate-50 px-4 py-3">
-                  {upload.status === "FAILED" ? <FileUp size={18} className="text-rose-500" /> : upload.status === "READY" ? <CheckCircle2 size={18} className="text-emerald-600" /> : <LoaderCircle size={18} className="animate-spin text-violet-600" />}
+                  {upload.status === "FAILED" ? <FileUp size={18} className="text-rose-500" /> : upload.status === "STALE" ? <FileUp size={18} className="text-amber-500" /> : upload.status === "READY" ? <CheckCircle2 size={18} className="text-emerald-600" /> : <LoaderCircle size={18} className="animate-spin text-violet-600" />}
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-slate-800">{upload.fileName}</p>
-                    <p className="mt-0.5 text-xs text-slate-500">{upload.status === "FAILED" ? `解析失败 · ${upload.errorMessage ?? upload.errorCode ?? "未知错误"}` : upload.status === "READY" ? `主题、配色与版式已提取 · 可立即使用 · ${upload.pageCount ?? upload.template?.pageCount ?? 0} 页可完整预览` : `正在解析原始 PPT 页面… ${upload.progress}%`}</p>
+                    <p className="mt-0.5 text-xs text-slate-500">{upload.status === "FAILED" ? `解析失败 · ${upload.errorMessage ?? upload.errorCode ?? "未知错误"}` : upload.status === "STALE" ? `历史记录失效 · ${upload.errorMessage ?? "请重新上传原文件"}` : upload.status === "READY" ? `主题、配色与版式已提取 · 可立即使用 · ${upload.pageCount ?? upload.template?.pageCount ?? 0} 页可完整预览` : `正在解析原始 PPT 页面… ${upload.progress}%`}</p>
                   </div>
                   {upload.status === "READY" && upload.template && (
                     <div className="ml-auto flex shrink-0 items-center gap-2">
@@ -423,6 +509,7 @@ export default function PptTemplateMarket() {
                       <button type="button" onClick={() => router.push(`/ppt/workspace/new?templateId=${encodeURIComponent(upload.templateId ?? `private-${upload.id}`)}`)} className="rounded-full bg-violet-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-violet-500">立即使用</button>
                     </div>
                   )}
+                  {upload.templateId && <button type="button" disabled={deletingTemplateId === upload.templateId} onClick={() => void handleDeleteTemplate(upload.templateId!, upload.fileName)} title="删除模板" aria-label={`删除上传模板：${upload.fileName}`} className="ml-auto inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-rose-500 transition hover:bg-rose-50 disabled:cursor-wait disabled:opacity-40"><Trash2 size={15} /></button>}
                 </div>
               ))}
             </div>
@@ -456,7 +543,7 @@ export default function PptTemplateMarket() {
 
           {visibleTemplates.length > 0 ? (
             <div
-              className="group/rail relative mt-6 h-[720px] overflow-hidden rounded-[30px] border border-white/70 bg-[#fbfcfe] shadow-[0_24px_70px_rgba(15,23,42,0.08)] [background-image:radial-gradient(#dce3ed_1.2px,transparent_1.2px),radial-gradient(#e8edf4_1px,transparent_1px),radial-gradient(circle_at_50%_38%,#ffffff_0%,#f7f9fc_56%,#edf1f7_100%)] [background-position:0_0,16px_18px,0_0] [background-size:28px_28px,44px_44px,100%_100%] [perspective:2600px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+              className="group/rail relative mt-6 h-[720px] overscroll-contain overflow-hidden rounded-[30px] border border-white/70 bg-[#fbfcfe] shadow-[0_24px_70px_rgba(15,23,42,0.08)] [background-image:radial-gradient(#dce3ed_1.2px,transparent_1.2px),radial-gradient(#e8edf4_1px,transparent_1px),radial-gradient(circle_at_50%_38%,#ffffff_0%,#f7f9fc_56%,#edf1f7_100%)] [background-position:0_0,16px_18px,0_0] [background-size:28px_28px,44px_44px,100%_100%] [perspective:2600px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
               role="region"
               aria-label="环形模板浏览器"
               tabIndex={0}
@@ -492,6 +579,7 @@ export default function PptTemplateMarket() {
                           onActivate={() => setActiveOrbitIndex(index)}
                           onPreview={() => setSelected(template)}
                           onUse={() => handleUseTemplate(template)}
+                          onDelete={template.isPrivate && deletingTemplateId !== template.id ? () => void handleDeleteTemplate(template.id, template.name) : undefined}
                         />
                       );
                     })}

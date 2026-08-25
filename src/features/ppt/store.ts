@@ -19,7 +19,7 @@ export interface PptTemplateFilters {
 export interface PptUploadTask {
   id: string;
   fileName: string;
-  status: "QUEUED" | "UPLOADING" | "PROCESSING" | "READY" | "FAILED";
+  status: "QUEUED" | "UPLOADING" | "PROCESSING" | "READY" | "FAILED" | "STALE";
   progress: number;
   templateId?: string;
   template?: PptTemplate;
@@ -45,6 +45,7 @@ export interface PptMarketState {
   loadMore: () => Promise<void>;
   upsertUpload: (upload: PptUploadTask) => void;
   removeUpload: (uploadId: string) => void;
+  removeTemplate: (templateId: string) => void;
   restoreUploads: (uploads: PptUploadTask[]) => void;
   reset: () => void;
 }
@@ -138,6 +139,10 @@ export function createPptMarketState(api: PptListApi): StateCreator<PptMarketSta
     })),
     removeUpload: (uploadId) => set((state) => ({
       uploads: state.uploads.filter((item) => item.id !== uploadId),
+    })),
+    removeTemplate: (templateId) => set((state) => ({
+      templates: state.templates.filter((item) => item.id !== templateId),
+      uploads: state.uploads.filter((item) => item.templateId !== templateId),
     })),
     restoreUploads: (uploads) => set({ uploads: uploads.slice(0, 20) }),
     reset: () => {
