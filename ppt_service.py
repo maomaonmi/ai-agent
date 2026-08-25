@@ -185,6 +185,13 @@ class PptService:
     @staticmethod
     def template_payload(record: TemplateRecord, *, include_manifest: bool = False) -> dict[str, Any]:
         manifest = record.manifest
+        page_count = int(manifest.get("pageCount", 0))
+        status = record.status
+        # A private template cannot be READY without at least one rendered
+        # page.  This also repairs old mock records that were persisted as
+        # READY with only a synthetic cover.
+        if record.source == "PRIVATE" and status == "READY" and page_count < 1:
+            status = "FAILED"
         payload: dict[str, Any] = {
             "id": record.id,
             "name": record.name,
@@ -192,8 +199,8 @@ class PptService:
             "scene": record.scene,
             "source": record.source,
             "isPrivate": record.source == "PRIVATE",
-            "status": record.status,
-            "pageCount": int(manifest.get("pageCount", 0)),
+            "status": status,
+            "pageCount": page_count,
             "coverUrl": (
                 f"/api/ppt/assets/{manifest['coverAssetId']}/content"
                 if manifest.get("coverAssetId")
@@ -202,6 +209,9 @@ class PptService:
             "createdAt": record.created_at,
             "updatedAt": record.updated_at,
         }
+        if status == "FAILED" and record.status == "READY" and page_count < 1:
+            payload["errorCode"] = "PPT_TEMPLATE_NO_PAGES"
+            payload["errorMessage"] = "服务器没有保存任何可预览页面"
         if include_manifest:
             payload["manifest"] = manifest
         return payload

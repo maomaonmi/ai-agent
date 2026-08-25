@@ -153,3 +153,26 @@ def test_invalid_patch_uses_stable_error_contract(tmp_path) -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_private_ready_template_without_pages_is_exposed_as_failed(tmp_path) -> None:
+    client, repository = _client(tmp_path)
+    repository.create_template(
+        template_id="template-private-empty",
+        owner_scope="owner-a",
+        name="旧空模板",
+        description=None,
+        scene="CUSTOM",
+        source="PRIVATE",
+        status="READY",
+        manifest={"pageCount": 0},
+    )
+
+    response = client.get(
+        "/api/ppt/templates/template-private-empty",
+        headers={"x-test-owner": "owner-a"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "FAILED"
+    assert response.json()["errorCode"] == "PPT_TEMPLATE_NO_PAGES"
