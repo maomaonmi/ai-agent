@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 export const MODE_OPTIONS = [
+  { id: 'omni', label: '全能模式', icon: '✨', desc: '多模态自然对话', group: 'chat' },
   { id: 'standard', label: '标准对话', icon: '⚡', desc: '快速响应', group: 'chat' },
   { id: 'deep', label: '深度思考', icon: '🧠', desc: '深度推理', group: 'chat' },
   { id: 'web', label: '联网搜索', icon: '🌐', desc: '实时搜索', group: 'chat' },
@@ -44,7 +45,7 @@ const GROUPS: Array<{
 }> = [
   {
     id: 'chat',
-    label: '聊天 + 调研模式',
+    label: '全能对话',
     icon: '💬',
     activeClass: 'border-blue-600 bg-blue-600 text-white',
   },
@@ -66,6 +67,7 @@ interface ModeSelectorProps {
   value: ModeType;
   disabled?: boolean;
   menuPlacement?: 'top' | 'bottom';
+  compact?: boolean;
   /** Why: Code 模式仅保留 Code 组按钮，隐藏聊天/Agent 组；默认全部展示。 */
   allowedGroups?: readonly ModeGroup[];
   onChange: (mode: ModeType) => void;
@@ -75,6 +77,7 @@ export default function ModeSelector({
   value,
   disabled = false,
   menuPlacement = 'top',
+  compact = false,
   allowedGroups,
   onChange,
 }: ModeSelectorProps) {
@@ -107,8 +110,8 @@ export default function ModeSelector({
   return (
     <div ref={containerRef} className="relative flex flex-wrap items-center gap-2">
       {/* Why: 单组模式下不需要 "模式:" 前缀，界面更紧凑。 */}
-      {visibleGroups.length > 1 && <span className="mr-1 text-sm text-gray-500">模式:</span>}
-      {visibleGroups.map((group) => {
+      {!compact && visibleGroups.length > 1 && <span className="mr-1 text-sm text-gray-500">模式:</span>}
+      {(compact ? visibleGroups.filter((group) => group.id === selectedMode.group) : visibleGroups).map((group) => {
         const isSelectedGroup = selectedMode.group === group.id;
         const isOpen = openGroup === group.id;
         const groupModes = MODE_OPTIONS.filter((mode) => mode.group === group.id && !('hidden' in mode && mode.hidden));
@@ -121,7 +124,7 @@ export default function ModeSelector({
               aria-expanded={isOpen}
               disabled={disabled}
               onClick={() => setOpenGroup(isOpen ? null : group.id)}
-              className={`flex min-h-10 items-center gap-2 rounded-lg border px-3 py-2 text-sm font-medium transition-colors ${
+              className={`${compact ? 'flex h-9 items-center gap-1.5 px-2 text-xs' : 'flex min-h-10 items-center gap-2 px-3 py-2 text-sm'} rounded-lg border font-medium transition-colors ${
                 isSelectedGroup
                   ? group.activeClass
                   : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
@@ -152,11 +155,13 @@ export default function ModeSelector({
               <div
                 role="menu"
                 aria-label={`${group.label}选项`}
-                className={`absolute left-0 z-40 w-64 overflow-hidden rounded-xl border border-gray-200 bg-white p-1.5 shadow-xl ${
+                className={`absolute left-0 z-40 ${compact ? 'w-80' : 'w-64'} overflow-hidden rounded-xl border border-gray-200 bg-white p-1.5 shadow-xl ${
                   menuPlacement === 'top' ? 'bottom-full mb-2' : 'top-full mt-2'
                 }`}
               >
-                {groupModes.map((mode) => {
+                {(compact ? visibleGroups : [group]).map((menuGroup) => <div key={menuGroup.id} className={compact ? 'border-b border-slate-100 last:border-b-0' : ''}>
+                  {compact && <div className="flex items-center gap-2 px-3 pb-1 pt-2 text-[11px] font-semibold text-slate-400"><span aria-hidden="true">{menuGroup.icon}</span>{menuGroup.label}</div>}
+                  {(compact ? MODE_OPTIONS.filter((mode) => mode.group === menuGroup.id && !('hidden' in mode && mode.hidden)) : groupModes).map((mode) => {
                   const isActive = value === mode.id;
                   return (
                     <button
@@ -186,16 +191,16 @@ export default function ModeSelector({
                       )}
                     </button>
                   );
-                })}
+                })}</div>)}
               </div>
             )}
           </div>
         );
       })}
 
-      <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">
+      {!compact && <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">
         {selectedMode.icon} {selectedMode.desc}
-      </span>
+      </span>}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import Image from 'next/image';
 import {
   AlertTriangle,
@@ -41,6 +41,8 @@ import { useVideoTask, type VideoConnectionState } from './useVideoTask';
 interface VideoStudioWorkspaceProps {
   initialPrompt?: string;
   onBack: () => void;
+  initialTask?: VideoTask | null;
+  onTaskSucceeded?: (task: VideoTask) => Promise<void> | void;
 }
 
 type VideoMode = 'text_to_video' | 'image_to_video' | 'start_end_video' | 'reference_to_video';
@@ -86,7 +88,7 @@ function connectionLabel(state: VideoConnectionState) {
   return '本地状态轮询中';
 }
 
-export default function VideoStudioWorkspace({ initialPrompt = '', onBack }: VideoStudioWorkspaceProps) {
+export default function VideoStudioWorkspace({ initialPrompt = '', onBack, initialTask = null, onTaskSucceeded }: VideoStudioWorkspaceProps) {
   const [models, setModels] = useState<VideoModelCapability[]>([]);
   const [history, setHistory] = useState<VideoTask[]>([]);
   const [prompt, setPrompt] = useState(initialPrompt);
@@ -108,14 +110,21 @@ export default function VideoStudioWorkspace({ initialPrompt = '', onBack }: Vid
   const [watermark, setWatermark] = useState(false);
   const [shotType, setShotType] = useState<'single' | 'multi'>('single');
   const [promptExtend, setPromptExtend] = useState(true);
-  const [taskId, setTaskId] = useState<string | null>(null);
-  const [createdTask, setCreatedTask] = useState<VideoTask | null>(null);
+  const [taskId, setTaskId] = useState<string | null>(initialTask?.id ?? null);
+  const [createdTask, setCreatedTask] = useState<VideoTask | null>(initialTask);
+  const notifiedTaskIds = useRef(new Set(initialTask ? [initialTask.id] : []));
   const [activeTab, setActiveTab] = useState<'generate' | 'history'>('generate');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isAnalyzingFrames, setIsAnalyzingFrames] = useState(false);
   const [deletingTaskId, setDeletingTaskId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const { task, connectionState, error: taskError } = useVideoTask(taskId, createdTask);
+
+  useEffect(() => {
+    if (task?.status !== 'SUCCEEDED' || notifiedTaskIds.current.has(task.id)) return;
+    notifiedTaskIds.current.add(task.id);
+    void onTaskSucceeded?.(task);
+  }, [onTaskSucceeded, task]);
   const availableModels = useMemo(() => models.filter((item) => item.modes.includes(mode)), [models, mode]);
   const selectedModel = availableModels.find((item) => item.id === model) ?? availableModels[0];
 

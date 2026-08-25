@@ -8,6 +8,19 @@ import {
 } from 'lucide-react';
 import { NodeEvent, WebDoc, ResearchChunk, AgentLoopStageKind } from '../lib/api';
 
+/**
+ * 把 url 压缩成稳定的短 hash（前 12 位）。同 url 必同 id，React key 天然去重。
+ * Why 不直接用 url：超长 url 会被 React 截断 + 含特殊字符可能与 React 内部 id 拼接冲突。
+ */
+function stableHash(input: string): string {
+  // djb2 简化版——12 位足够防止日常 url 集合碰撞，无需 crypto.subtle。
+  let h = 5381;
+  for (let i = 0; i < input.length; i += 1) {
+    h = ((h << 5) + h + input.charCodeAt(i)) >>> 0;
+  }
+  return h.toString(36).padStart(8, '0').slice(0, 12);
+}
+
 interface NodeProgressPanelProps {
   nodeProgress: NodeEvent[];
   currentNode: string | null;
@@ -17,6 +30,7 @@ interface NodeProgressPanelProps {
   researchChunks?: ResearchChunk[];
   /** Why fallback：老快照 DeepThinker extras 里没有 reasoning_full，需从 ChatMessage 兜底读取 */
   researchReasoningFallback?: string;
+  reasoningText?: string;
 }
 
 type InlineView = 'timeline' | 'sources';
@@ -38,9 +52,8 @@ export default function NodeProgressPanel({
   webDocs,
   researchChunks,
   researchReasoningFallback,
+  reasoningText,
 }: NodeProgressPanelProps) {
-  if (nodeProgress.length === 0 && !currentNode) return null;
-
   const readCount = Math.max(
     0,
     ...nodeProgress.map((e) => (e.kept_count != null ? e.kept_count : e.hit_count ?? 0)),
@@ -60,6 +73,9 @@ export default function NodeProgressPanel({
 
   const [inlineView, setInlineView] = useState<InlineView>('timeline');
   const [expandedNodeId, setExpandedNodeId] = useState<number | string | null>(null);
+  const [reasoningOpen, setReasoningOpen] = useState(true);
+  const normalizedReasoning = (reasoningText || researchReasoningFallback || '').trim();
+  const reasoningWordCount = normalizedReasoning.replace(/\s/g, '').length;
 
   const toggleNode = (id: number | string | undefined) => {
     if (id == null) return;
@@ -71,7 +87,9 @@ export default function NodeProgressPanel({
       return researchChunks.map((c, i) => {
         const cast = c as unknown as { title?: string; text?: string; content?: string; url?: string; score?: number };
         return {
-          id: `${c.id ?? i}`,
+          // Why: id 兜底用 url 哈希（同 url 必同 id），避免后端多次 web_docs
+          // 事件 + 前端 spread 追加产生 React duplicate key。
+          id: cast.url ? `chunk-${stableHash(cast.url)}` : `chunk-${c.id ?? i}-${i}`,
           title: cast.title || '未命名片段',
           url: cast.url,
           description: cast.text || cast.content || '',
@@ -81,17 +99,31 @@ export default function NodeProgressPanel({
       });
     }
     if (webDocs && webDocs.length > 0) {
-      return webDocs.map((d, i) => ({
-        id: `${d.id ?? i}`,
-        title: d.title || '未命名页面',
-        url: d.url,
-        description: d.content || '',
-        score: d.score,
-        kind: 'web' as const,
-      }));
+      // 渲染前最终兜底去重：按 url（优先）+ id 兜底双键，确保 React key 唯一。
+      // Why：双层去重在极端情况下（后端未重启 + 旧 webDocs state 残留）仍安全。
+      const seenKey = new Set<string>();
+      const deduped: SourceItem[] = [];
+      webDocs.filter((d) => String(d.url || '').trim()).forEach((d, i) => {
+        const id = d.id != null ? String(d.id) : d.url ? `web-${stableHash(d.url)}` : `web-${i}`;
+        const dupKey = d.url ? `url:${d.url}` : `id:${id}`;
+        if (seenKey.has(dupKey)) return;
+        seenKey.add(dupKey);
+        deduped.push({
+          id,
+          title: d.title || '未命名页面',
+          url: d.url,
+          description: d.content || '',
+          score: d.score,
+          kind: 'web' as const,
+        });
+      });
+      return deduped;
     }
     return [];
   }, [researchChunks, webDocs]);
+  // Search nodes report hit/kept counts while web_docs carries the actual URLs.
+  // Use both so the summary remains visible during streaming and after refresh.
+  const sourceCount = Math.max(readCount, sources.length);
 
   const faviconDots = useMemo(() => {
     const palette = ['#FF5D3B', '#22C55E', '#3B82F6', '#A855F7', '#F59E0B', '#10B981'];
@@ -105,6 +137,7 @@ export default function NodeProgressPanel({
   //   Agent Loop 模式下同名 Think/Search/Observe/Final 节点会跨轮重复，合并去重会把多轮迭代压成一条
   //   导致用户看不到完整循环过程。改为按 iteration 分组 + 时间序平铺双路径渲染。
   const renderItems = useMemo(() => buildRenderItems(nodeProgress), [nodeProgress]);
+  if (nodeProgress.length === 0 && !currentNode && !normalizedReasoning) return null;
 
   return (
     <div className="w-full max-w-[820px]">
@@ -124,10 +157,11 @@ export default function NodeProgressPanel({
         </span>
         <span className="font-medium text-gray-700">{isHistoricalFallback ? '历史链路摘要' : '已思考'}</span>
         <span className="tabular-nums">{isHistoricalFallback ? '（旧会话已完成）' : `（用时 ${thinkingTime} 秒）`}</span>
-        {readCount > 0 && (
+        {reasoningWordCount > 0 && <span className="text-gray-400">· 深度思考 {reasoningWordCount} 字</span>}
+        {sourceCount > 0 && (
           <>
             <span className="text-gray-300">·</span>
-            <span>搜索到 <span className="tabular-nums font-medium text-gray-700">{readCount}</span> 个网页</span>
+            <span>搜索结果 <span className="tabular-nums font-medium text-gray-700">{sourceCount}</span> 个</span>
           </>
         )}
         {faviconDots.length > 0 && (
@@ -151,7 +185,7 @@ export default function NodeProgressPanel({
               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); setInlineView(inlineView === 'sources' ? 'timeline' : 'sources'); } }}
               className="cursor-pointer underline-offset-2 hover:underline"
             >
-              {inlineView === 'sources' ? '返回过程' : `${sources.length} 条来源`}
+              {inlineView === 'sources' ? '返回过程' : '查看来源'}
             </span>
           </>
         )}
@@ -163,6 +197,24 @@ export default function NodeProgressPanel({
       {/* 时间轴 */}
       {open && inlineView === 'timeline' && (
         <ul className="relative ml-0.5 border-l border-gray-100 pl-[18px] pb-1">
+          {reasoningWordCount > 0 && (
+            <li className="relative py-1.5 leading-relaxed">
+              <span className="absolute -left-[21px] top-2.5 flex h-4 w-4 items-center justify-center">
+                <span className="h-1.5 w-1.5 rounded-full bg-gray-300" />
+              </span>
+              <button
+                type="button"
+                aria-expanded={reasoningOpen}
+                onClick={() => setReasoningOpen((value) => !value)}
+                className="flex items-center gap-1.5 text-left text-[13px]"
+              >
+                {reasoningOpen ? <ChevronDown className="h-3.5 w-3.5 text-gray-400" /> : <ChevronRight className="h-3.5 w-3.5 text-gray-400" />}
+                <span className="text-gray-400">思考</span>
+                <span className="text-gray-800">深度思考过程 · {reasoningWordCount} 字</span>
+              </button>
+              {reasoningOpen && <div className="mt-1 whitespace-pre-wrap text-[13px] leading-7 text-gray-700">{normalizedReasoning}</div>}
+            </li>
+          )}
           {renderItems.map((item, index) => {
             if (item.type === 'iteration_header') {
               return (
@@ -336,6 +388,7 @@ export default function NodeProgressPanel({
               <div className="mt-0.5 text-[13px] font-medium text-gray-800 group-hover:text-sky-700">
                 {s.title}
               </div>
+              {s.url && <div className="truncate text-[11px] text-gray-400" title={s.url}>{s.url}</div>}
               <div className="line-clamp-2 text-[12.5px] leading-5 text-gray-500">
                 {s.description}
               </div>

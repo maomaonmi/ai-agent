@@ -92,6 +92,11 @@ export default function ResearchWorkspace({ title, report, sources, loading, sid
     let cancelled = false;
     let pollTimer: number | undefined;
     let timeoutTimer: number | undefined;
+    // Why: 429（限流）会触发 catch → onFiguresChange → 父组件重渲染 → report
+    //   引用变化 → useEffect 重新执行 → 又调 create → 又 429 → 无限循环。
+    //   用 createAttempts 限制同一 requestKey 最多尝试 2 次，429 直接标失败不重试。
+    let createAttempts = 0;
+    const MAX_CREATE_ATTEMPTS = 2;
     const placeholders = currentFigures.length > 0
       ? currentFigures.map((figure) => figure.status === 'succeeded' && figure.image_url
         ? figure
@@ -125,6 +130,14 @@ export default function ResearchWorkspace({ title, report, sources, loading, sid
             job = await createResearchFigureJob({ session_id: sessionId, report_version: requestKey, report, max_images: 10, policy: FIGURE_POLICY, context_mode: 'mixed' });
           }
         } else {
+          if (createAttempts >= MAX_CREATE_ATTEMPTS) {
+            throw new Error('配图任务创建次数已达上限（限流），请手动重试');
+          }
+          createAttempts += 1;
+          // 429 限流时等 3 秒再重试，避免瞬间打满后端 in-flight 上限。
+          if (createAttempts > 1) {
+            await new Promise((resolve) => window.setTimeout(resolve, 3000));
+          }
           // 'pending' is a client-side placeholder ID, never a server job.
           // The create endpoint deduplicates against an existing persisted job
           // by session + report hash, so this is safe after a refresh.
@@ -151,8 +164,14 @@ export default function ResearchWorkspace({ title, report, sources, loading, sid
           }
         };
         update(job);
-      } catch {
-        if (!cancelled) onFiguresChangeRef.current?.(placeholders.map((figure) => ({ ...figure, status: 'failed' as const, error_message: '配图任务暂时不可用' })));
+      } catch (error) {
+        if (cancelled) return;
+        const msg = error instanceof Error ? error.message : '';
+        const isRateLimited = msg.includes('429') || msg.includes('限流') || msg.includes('上限');
+        const errMsg = isRateLimited
+          ? '配图服务暂时限流，可点击重试'
+          : '配图任务暂时不可用';
+        onFiguresChangeRef.current?.(placeholders.map((figure) => ({ ...figure, status: 'failed' as const, error_message: errMsg })));
       }
     };
     // Start the deadline before the network request so a stalled create/job

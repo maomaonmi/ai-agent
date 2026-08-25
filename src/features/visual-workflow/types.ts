@@ -14,7 +14,7 @@ export type WorkflowCanvasNodeData = {
   definition?: VisualWorkflowNodeDefinition;
   config: Record<string, unknown>;
   status?: 'idle' | 'running' | 'success' | 'error';
-  /** Runtime-only artifacts from the latest run; never serialized into the workflow document. */
+  /** Latest run artifacts projected into the card; successful outputs are also copied to config.outputArtifacts on save. */
   runtimeArtifacts?: Array<Record<string, unknown>>;
 };
 
@@ -35,6 +35,9 @@ export function documentToFlow(document: VisualWorkflowDocument): {
         kind: node.kind,
         config: node.config,
         status: 'idle',
+        runtimeArtifacts: Array.isArray(node.config.outputArtifacts)
+          ? node.config.outputArtifacts as Array<Record<string, unknown>>
+          : undefined,
       },
     })),
     edges: document.edges.map((edge) => ({

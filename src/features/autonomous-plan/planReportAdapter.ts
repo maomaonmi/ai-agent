@@ -47,7 +47,8 @@ export function parsePlanTables(markdown: string): PlanReportTable[] {
   return tables;
 }
 
-function numberFromCell(value: string): number | null {
+function numberFromCell(value: string | undefined | null): number | null {
+  if (!value) return null;
   const match = value.replace(/,/g, '').match(/-?\d+(?:\.\d+)?/);
   return match ? Number(match[0]) : null;
 }

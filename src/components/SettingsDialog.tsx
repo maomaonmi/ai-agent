@@ -8,13 +8,16 @@ import MarkdownMessage from './MarkdownMessage';
 type Theme = 'system' | 'light' | 'dark';
 type Font = 'system' | 'inter' | 'serif' | 'mono';
 
-const PRESETS: Record<'deepseek' | 'glm' | 'qwen', Pick<ModelSettings, 'base_url' | 'model_id' | 'display_name' | 'input_context' | 'output_context'>> = {
+const PRESETS: Record<'deepseek' | 'glm' | 'qwen' | 'minimax', Pick<ModelSettings, 'base_url' | 'model_id' | 'display_name' | 'input_context' | 'output_context'>> = {
   deepseek: { base_url: 'https://api.deepseek.com', model_id: 'deepseek-v4-flash', display_name: 'DeepSeek V4 Flash', input_context: 1000000, output_context: 384000 },
   glm: { base_url: 'https://open.bigmodel.cn/api/paas/v4', model_id: 'glm-5v-turbo', display_name: 'GLM-5V Turbo', input_context: 128000, output_context: 16000 },
   qwen: { base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model_id: 'qwen3.7-plus', display_name: '千问 Qwen3.7 Plus', input_context: 256000, output_context: 16000 },
+  // Why: MiniMax 主链路走 Anthropic Messages 协议，base_url 必须是 /anthropic 端点；
+  // OpenAI 兼容端点（/v1）仅由后端 _openai_compat_view 自动切换使用，用户无需感知。
+  minimax: { base_url: 'https://api.minimaxi.com/anthropic', model_id: 'MiniMax-M3', display_name: 'MiniMax M3', input_context: 1000000, output_context: 32000 },
 };
 
-const PROVIDER_LABELS: Record<ModelSettings['provider'], string> = { deepseek: 'DeepSeek', glm: '智谱 GLM', qwen: '千问 Qwen', custom: '自定义' };
+const PROVIDER_LABELS: Record<ModelSettings['provider'], string> = { deepseek: 'DeepSeek', glm: '智谱 GLM', qwen: '千问 Qwen', minimax: 'MiniMax', custom: '自定义' };
 
 // Why: 同步 ModelQuickSwitcher 的 GLM 变体列表，让设置界面也能一键切换官方模型 ID，
 // 避免用户手敲 model_id 拼错导致后端 is_vision_model 判定失效。
@@ -46,6 +49,15 @@ const QWEN_FALLBACK_OPTIONS: Array<{ id: string; label: string; multimodal: bool
   { id: 'qwen3.7-plus', label: '千问 Qwen3.7 Plus · 均衡', multimodal: false },
   { id: 'qwen3.7-flash', label: '千问 Qwen3.7 Flash · 性价比', multimodal: false },
   { id: 'qwen-vl-max', label: '千问 Qwen-VL Max · 视觉', multimodal: true },
+];
+
+// Why: MiniMax 选项同款策略——后端目录为单一数据源，此处仅兜底。
+const MINIMAX_FALLBACK_OPTIONS: Array<{ id: string; label: string; multimodal: boolean }> = [
+  { id: 'MiniMax-M3', label: 'MiniMax M3 · 旗舰 · 视觉', multimodal: true },
+  { id: 'MiniMax-M2.7', label: 'MiniMax M2.7 · 均衡', multimodal: false },
+  { id: 'MiniMax-M2.7-highspeed', label: 'MiniMax M2.7 极速', multimodal: false },
+  { id: 'MiniMax-M2.5', label: 'MiniMax M2.5 · 性价比', multimodal: false },
+  { id: 'MiniMax-M2.5-highspeed', label: 'MiniMax M2.5 极速', multimodal: false },
 ];
 
 const DEFAULTS: ModelSettings = {
@@ -93,11 +105,13 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
   const [form, setForm] = useState<ModelSettings>(DEFAULTS);
   const [advanced, setAdvanced] = useState(true);
   const [showKey, setShowKey] = useState(false);
+  const [showVideoKey, setShowVideoKey] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState('');
   const [theme, setTheme] = useState<Theme>('system');
   const [font, setFont] = useState<Font>('system');
   const [qwenOptions, setQwenOptions] = useState(QWEN_FALLBACK_OPTIONS);
+  const [minimaxOptions, setMinimaxOptions] = useState(MINIMAX_FALLBACK_OPTIONS);
 
   // ---- 全局联网服务 Key：搜索提供商选择 + Tavily / Firecrawl / Reranker ----
   // Why: 与 LLM API Key 不同，这两个是全局搜索/重排服务，不随 provider 切换。
@@ -190,6 +204,8 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
       .then((catalog) => {
         const qwen = (catalog.qwen || []) as ModelVariant[];
         if (qwen.length) setQwenOptions(qwen.map((v) => ({ id: v.model_id, label: v.label, multimodal: v.supports_vision })));
+        const minimax = (catalog.minimax || []) as ModelVariant[];
+        if (minimax.length) setMinimaxOptions(minimax.map((v) => ({ id: v.model_id, label: v.label, multimodal: v.supports_vision })));
       })
       .catch(() => { /* 保留兜底选项 */ });
     const saved = JSON.parse(localStorage.getItem('appearance-settings') || '{}');
@@ -359,7 +375,8 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
       const saved = await getModelSettings(provider);
       setForm({ ...DEFAULTS, ...saved, api_key: '' });
     } catch {
-      patch(provider === 'custom' ? { provider, api_key: '', has_api_key: false } : { provider, ...PRESETS[provider], api_key: '', has_api_key: false, model_family: provider, multimodal: provider === 'glm' });
+      // Why: MiniMax 预设默认模型为 M3（支持视觉），multimodal 初始为 true；M2.x 系列不支持视觉，切模型时由下拉选项的 multimodal 字段覆盖。
+      patch(provider === 'custom' ? { provider, api_key: '', has_api_key: false } : { provider, ...PRESETS[provider], api_key: '', has_api_key: false, model_family: provider, multimodal: provider === 'glm' || (provider === 'minimax' && MINIMAX_FALLBACK_OPTIONS[0]?.multimodal === true) });
     }
   };
   const save = async () => {
@@ -476,10 +493,10 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
         </div>
         <div className="flex gap-2 border-b border-slate-200 px-5 py-3 sm:hidden dark:border-slate-700"><button onClick={() => setSection('model')} className="rounded-lg px-3 py-2 text-sm">模型</button><button onClick={() => setSection('services')} className="rounded-lg px-3 py-2 text-sm">联网</button><button onClick={() => setSection('memory')} className="rounded-lg px-3 py-2 text-sm">记忆</button><button onClick={() => setSection('directory')} className="rounded-lg px-3 py-2 text-sm">MCP·Skills</button><button onClick={() => setSection('appearance')} className="rounded-lg px-3 py-2 text-sm">外观</button></div>
         {section === 'model' ? <div className="space-y-6 p-5 sm:p-7">
-          <div><label className="mb-2 block text-sm font-medium text-slate-800 dark:text-slate-200">模型服务商</label><div className="grid grid-cols-2 gap-2 sm:grid-cols-4">{(['deepseek','glm','qwen','custom'] as const).map((id) => <button type="button" key={id} onClick={() => void chooseProvider(id)} className={`rounded-xl border p-3 text-left transition ${form.provider === id ? 'border-sky-500 bg-sky-50 ring-1 ring-sky-500 dark:bg-sky-950/40' : 'border-slate-200 hover:border-slate-300 dark:border-slate-700'}`}><span className="block text-sm font-semibold text-slate-900 dark:text-white">{PROVIDER_LABELS[id]}</span><span className="mt-1 block text-xs text-slate-500">{id === 'custom' ? 'OpenAI 兼容接口' : '官方服务'}{form.provider === id && form.has_api_key ? ' · 密钥已保存' : ''}</span></button>)}</div></div>
+          <div><label className="mb-2 block text-sm font-medium text-slate-800 dark:text-slate-200">模型服务商</label><div className="grid grid-cols-2 gap-2 sm:grid-cols-5">{(['deepseek','glm','qwen','minimax','custom'] as const).map((id) => <button type="button" key={id} onClick={() => void chooseProvider(id)} className={`rounded-xl border p-3 text-left transition ${form.provider === id ? 'border-sky-500 bg-sky-50 ring-1 ring-sky-500 dark:bg-sky-950/40' : 'border-slate-200 hover:border-slate-300 dark:border-slate-700'}`}><span className="block text-sm font-semibold text-slate-900 dark:text-white">{PROVIDER_LABELS[id]}</span><span className="mt-1 block text-xs text-slate-500">{id === 'custom' ? 'OpenAI 兼容接口' : '官方服务'}{form.provider === id && form.has_api_key ? ' · 密钥已保存' : ''}</span></button>)}</div></div>
           <div className="grid gap-5 sm:grid-cols-2">
             <Field label="API 格式"><Select value={form.api_format}><option value="openai_chat_completions">OpenAI Chat Completions</option></Select></Field>
-            <Field label="模型 ID" required hint={form.provider === 'deepseek' || form.provider === 'glm' || form.provider === 'qwen' ? '可从下拉框选官方模型，或手动输入' : undefined}>
+            <Field label="模型 ID" required hint={form.provider === 'deepseek' || form.provider === 'glm' || form.provider === 'qwen' || form.provider === 'minimax' ? '可从下拉框选官方模型，或手动输入' : undefined}>
               {form.provider === 'deepseek' ? (
                 <div className="space-y-2">
                   <Select
@@ -559,13 +576,48 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
                     <Input value={form.model_id} onChange={(v) => patch({ model_id: v })} placeholder="qwen3.7-plus" />
                   )}
                 </div>
+              ) : form.provider === 'minimax' ? (
+                <div className="space-y-2">
+                  <Select
+                    value={minimaxOptions.some((option) => option.id === form.model_id) ? form.model_id : '__custom__'}
+                    onChange={(v) => {
+                      if (v === '__custom__') return;
+                      const option = minimaxOptions.find((item) => item.id === v);
+                      if (!option) return;
+                      // Why: MiniMax 无 vision_model_id 自动切换机制，视觉能力由所选模型本身决定（仅 M3 支持视觉）；
+                      // 切模型时同步多模态标记与默认思考预算。
+                      patch({
+                        model_id: option.id,
+                        display_name: option.label,
+                        multimodal: option.multimodal,
+                        thinking_budget: form.thinking_budget ?? 8000,
+                      });
+                    }}
+                  >
+                    {minimaxOptions.map((option) => (
+                      <option key={option.id} value={option.id}>{option.label}</option>
+                    ))}
+                    <option value="__custom__">自定义（在下方输入框填写）</option>
+                  </Select>
+                  {!minimaxOptions.some((option) => option.id === form.model_id) && (
+                    <Input value={form.model_id} onChange={(v) => patch({ model_id: v })} placeholder="MiniMax-M3" />
+                  )}
+                </div>
               ) : (
                 <Input value={form.model_id} onChange={(v) => patch({ model_id: v })}/>
               )}
             </Field>
           </div>
           <Field label="请求地址" required hint="填写服务端点地址；关闭“完整 URL”时系统会自动补充 /chat/completions。"><div className="flex gap-3"><Input value={form.base_url} placeholder="https://api.example.com/v1" onChange={(v) => patch({ base_url: v })}/><label className="flex shrink-0 items-center gap-2 text-xs text-slate-600 dark:text-slate-300">完整 URL <Toggle label="完整 URL" checked={form.full_url} onChange={(v) => patch({full_url:v})}/></label></div></Field>
-          <Field label="API 密钥" required hint={form.has_api_key ? `已保存 ${PROVIDER_LABELS[form.provider]}密钥；留空不会覆盖。` : '此服务商尚未保存密钥。密钥仅保存在本机服务端。'}><div className="relative"><Input type={showKey ? 'text' : 'password'} value={form.api_key || ''} placeholder={form.has_api_key ? '••••••••（密钥已保存）' : '输入 API 密钥'} onChange={(v) => patch({api_key:v})}/><button type="button" aria-label={showKey ? '隐藏密钥' : '显示密钥'} onClick={() => setShowKey(!showKey)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">{showKey ? <EyeOff size={17}/> : <Eye size={17}/>}</button></div></Field>
+          <Field label={form.provider === 'minimax' ? 'API 密钥（视频 H3）' : 'API 密钥'} required hint={form.provider === 'minimax' ? (form.has_api_key ? '已保存普通 Key（sk-api-）；留空不覆盖。仅用于视频 H3 生成。' : '普通 Key（sk-api-，H3 视频专用）；文本/搜索/PPT 用下方套餐 Key。') : (form.has_api_key ? `已保存 ${PROVIDER_LABELS[form.provider]}密钥；留空不会覆盖。` : '此服务商尚未保存密钥。密钥仅保存在本机服务端。')}><div className="relative"><Input type={showKey ? 'text' : 'password'} value={form.api_key || ''} placeholder={form.has_api_key ? '••••••••（密钥已保存）' : '输入 API 密钥'} onChange={(v) => patch({api_key:v})}/><button type="button" aria-label={showKey ? '隐藏密钥' : '显示密钥'} onClick={() => setShowKey(!showKey)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">{showKey ? <EyeOff size={17}/> : <Eye size={17}/>}</button></div></Field>
+          {form.provider === 'minimax' && (
+            <Field label="MiniMax 套餐 Key（tokenplan）" hint={form.has_minimax_video_key ? '已保存套餐 Key（sk-cp-）；留空不覆盖。用于文本/搜索/PPT 与图像生成。' : '套餐 Key（sk-cp- 前缀，tokenplan）用于文本/搜索/PPT 与图像生成；视频 H3 用上方普通 Key（sk-api-）。'}>
+              <div className="relative">
+                <Input type={showVideoKey ? 'text' : 'password'} value={form.minimax_video_api_key || ''} placeholder={form.has_minimax_video_key ? '••••••••（套餐 Key 已保存）' : '输入套餐 Key（sk-cp-）'} onChange={(v) => patch({minimax_video_api_key:v})}/>
+                <button type="button" aria-label={showVideoKey ? '隐藏密钥' : '显示密钥'} onClick={() => setShowVideoKey(!showVideoKey)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400">{showVideoKey ? <EyeOff size={17}/> : <Eye size={17}/>}</button>
+              </div>
+            </Field>
+          )}
           <button type="button" onClick={() => setAdvanced(!advanced)} className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-200"><ChevronDown size={16} className={`transition ${advanced ? '' : '-rotate-90'}`}/>高级配置</button>
           {advanced && <div className="space-y-5 rounded-xl border border-slate-200 bg-slate-50/60 p-4 dark:border-slate-700 dark:bg-slate-950/40">
             <div className="grid gap-5 sm:grid-cols-2"><Field label="模型展示名称" hint={`${form.display_name.length}/32`}><Input maxLength={32} value={form.display_name} onChange={(v) => patch({display_name:v})}/></Field><Field label="模型系列"><Select value={form.model_family} onChange={(v) => patch({model_family:v})}><option value="default">默认</option><option value="deepseek">DeepSeek</option><option value="glm">GLM</option><option value="reasoning">推理模型</option></Select></Field></div>
@@ -573,6 +625,7 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
             {form.provider === 'deepseek' && <><div className="grid gap-5 sm:grid-cols-3"><Field label="最大输出 Tokens"><NumberInput value={form.max_tokens} onChange={(v) => patch({max_tokens:v})}/></Field><Field label="Temperature" hint="思考启用时不生效"><input type="number" min={0} max={2} step={0.1} value={form.temperature} onChange={(e)=>patch({temperature:Number(e.target.value)})} className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"/></Field><Field label="思考强度" hint="仅 DeepSeek 生效"><Select value={form.reasoning_effort} onChange={(v) => patch({ reasoning_effort: v })}>{DEEPSEEK_EFFORT_OPTIONS.map((item) => (<option key={item.value} value={item.value}>{item.label}</option>))}</Select></Field></div><div className="grid gap-5 sm:grid-cols-3"><label className="flex h-11 items-center justify-between self-end rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900">启用深度思考<Toggle label="启用深度思考" checked={form.thinking_enabled} onChange={(v)=>patch({thinking_enabled:v})}/></label></div></>}
             {form.provider === 'glm' && <><div className="grid gap-5 sm:grid-cols-2"><Field label="文本模型 ID" hint="无附件时自动使用"><Input value={form.text_model_id} onChange={(v) => patch({text_model_id:v})}/></Field><Field label="多模态模型 ID" hint="包含附件时自动使用"><Input value={form.vision_model_id} onChange={(v) => patch({vision_model_id:v})}/></Field></div><div className="grid gap-5 sm:grid-cols-3"><Field label="最大输出 Tokens"><NumberInput value={form.max_tokens} onChange={(v) => patch({max_tokens:v})}/></Field><Field label="Temperature"><input type="number" min={0} max={2} step={0.1} value={form.temperature} onChange={(e)=>patch({temperature:Number(e.target.value)})} className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"/></Field><Field label="推理强度" hint="仅 GLM 生效"><Select value={form.reasoning_effort} onChange={(v) => patch({ reasoning_effort: v })}>{['max','xhigh','high','medium','low','minimal','none'].map((effort) => (<option key={effort} value={effort}>{effort}</option>))}</Select></Field></div><div className="grid gap-5 sm:grid-cols-3"><label className="flex h-11 items-center justify-between self-end rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900">启用深度思考<Toggle label="启用深度思考" checked={form.thinking_enabled} onChange={(v)=>patch({thinking_enabled:v})}/></label></div></>}
             {form.provider === 'qwen' && <><div className="grid gap-5 sm:grid-cols-3"><Field label="最大输出 Tokens"><NumberInput value={form.max_tokens} onChange={(v) => patch({max_tokens:v})}/></Field><Field label="Temperature"><input type="number" min={0} max={2} step={0.1} value={form.temperature} onChange={(e)=>patch({temperature:Number(e.target.value)})} className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"/></Field><Field label="思考预算 Tokens" hint="仅千问生效；必须小于最大输出"><NumberInput value={form.thinking_budget ?? 8000} onChange={(v) => patch({thinking_budget:v})}/></Field></div><div className="grid gap-5 sm:grid-cols-3"><label className="flex h-11 items-center justify-between self-end rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900">启用深度思考<Toggle label="启用深度思考" checked={form.thinking_enabled} onChange={(v)=>patch({thinking_enabled:v})}/></label></div></>}
+            {form.provider === 'minimax' && <><div className="grid gap-5 sm:grid-cols-3"><Field label="最大输出 Tokens"><NumberInput value={form.max_tokens} onChange={(v) => patch({max_tokens:v})}/></Field><Field label="Temperature" hint="思考启用时不生效"><input type="number" min={0} max={2} step={0.1} value={form.temperature} onChange={(e)=>patch({temperature:Number(e.target.value)})} className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"/></Field><Field label="思考预算 Tokens" hint="Anthropic budget_tokens；下限 1024 且必须小于最大输出"><NumberInput value={form.thinking_budget ?? 8000} onChange={(v) => patch({thinking_budget:v})}/></Field></div><div className="grid gap-5 sm:grid-cols-3"><label className="flex h-11 items-center justify-between self-end rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900">启用深度思考<Toggle label="启用深度思考" checked={form.thinking_enabled} onChange={(v)=>patch({thinking_enabled:v})}/></label></div></>}
             <div className="grid items-end gap-5 sm:grid-cols-2"><Field label="工具调用轮次"><NumberInput value={form.tool_call_rounds} onChange={(v) => patch({tool_call_rounds:v})}/></Field><label className="flex h-11 items-center justify-between rounded-lg border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900">多模态支持<Toggle label="多模态支持" checked={form.multimodal} onChange={(v) => patch({multimodal:v})}/></label></div>
           </div>}
           <div className="sticky bottom-0 -mx-5 flex items-center justify-between border-t border-slate-200 bg-white/95 px-5 py-4 backdrop-blur dark:border-slate-700 dark:bg-slate-900/95 sm:-mx-7 sm:px-7"><span role="status" className="text-sm text-slate-500">{message}</span><button type="button" disabled={saving || !form.base_url || !form.model_id} onClick={save} className="rounded-lg bg-sky-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50">{saving ? '保存中…' : '保存配置'}</button></div>

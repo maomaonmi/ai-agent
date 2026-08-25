@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useMemo, type CSSProperties } from 'react';
+import { useState, useRef, useEffect, useCallback, useMemo, useReducer, type CSSProperties } from 'react';
 import {
   sendChatMessage,
   sendDeepResearch,
@@ -47,6 +47,12 @@ import {
   publishCodeProject,
   PublishedCodeProject,
   getCodeProject,
+  createImageGeneration,
+  type ImageBatch,
+  createVideoTask,
+  getVideoModels,
+  getVideoTaskStatus,
+  type VideoTask,
 } from '../lib/api';
 import { Image as ImageIcon, Paperclip, X, Bot, ArrowUp, Sparkles, SlidersHorizontal, Plus, FileText, Video, Menu, Code2, Languages, WandSparkles, Telescope, Presentation } from 'lucide-react';
 import ResearchProgressPanel from './ResearchProgressPanel';
@@ -56,14 +62,12 @@ import ModeSelector, { ModeType } from './ModeSelector';
 import AgentDrawer from './AgentDrawer';
 import SessionSidebar from './SessionSidebar';
 import RuntimeSettingsDrawer from './RuntimeSettingsDrawer';
-import FirecrawlSearchOptionsPopover from './FirecrawlSearchOptionsPopover';
 import ResearchOptionsPopover from './ResearchOptionsPopover';
-import QwenSearchOptionsPopover from './QwenSearchOptionsPopover';
 import DirectoryPage from './DirectoryPage';
 import HookCenter from './HookCenter';
 import HookMonitorPanel from './HookMonitorPanel';
 import SettingsDialog from './SettingsDialog';
-import ModelQuickSwitcher from './ModelQuickSwitcher';
+import ModelQuickSwitcher, { type VideoComposerParams } from './ModelQuickSwitcher';
 import ChatNodeNavigator, { ChatNode } from './ChatNodeNavigator';
 import CodeWorkspace from './CodeWorkspace';
 import CodeShowcasePage from './code-showcase/CodeShowcasePage';
@@ -84,6 +88,24 @@ import type { WritingDraft } from '../features/ai-writing/writingTypes';
 import type { WritingDocumentState } from '../features/ai-writing/writingDocumentTypes';
 import type { ThesisOutlineState } from '../features/ai-writing/thesis/thesisTypes';
 import { createDefaultWritingValues } from '../features/ai-writing/writingScenes';
+import { createClientMessageId, ensureChatMessageIds } from '../features/omni/messageIdentity';
+import { createArtifactVersion, createConversationArtifact, getArtifactVersion, getConversationOmniContext, listConversationArtifactLinks, referenceConversationArtifact } from '../features/omni/api';
+import ArtifactMessageCards from '../features/omni/ArtifactMessageCards';
+import ArtifactReferencePicker from '../features/omni/ArtifactReferencePicker';
+import ArtifactPanel from '../features/omni/ArtifactPanel';
+import { artifactPanelReducer } from '../features/omni/panelState';
+import { ARTIFACT_PANEL_DEFAULT_WIDTH, clampArtifactPanelWidth } from '../features/omni/artifactResize';
+import OmniComposerToolbar from '../features/omni/OmniComposerToolbar';
+import OmniModeShowcase from '../features/omni/OmniModeShowcase';
+import { capabilityUsesTaskRoute, nextCapabilityMode, selectPreferredCapability, type OmniComposerCapability } from '../features/omni/composerCapabilities';
+import { createOmniTurnContext } from '../features/omni/turnContext';
+import { createWritingArtifactInput, writingDocumentToMarkdown } from '../features/omni/writingArtifactAdapter';
+import { createImageArtifactInput, readImageArtifactPayload } from '../features/omni/imageArtifactAdapter';
+import { createResearchArtifactInput } from '../features/omni/researchArtifactAdapter';
+import { createThesisArtifactInput, readThesisArtifactPayload } from '../features/omni/thesisArtifactAdapter';
+import { createVideoArtifactInput, matchesVideoArtifactTask, readVideoArtifactPayload } from '../features/omni/videoArtifactAdapter';
+import { createPptArtifactInput, readPptArtifactPayload } from '../features/omni/pptArtifactAdapter';
+import type { Artifact, ArtifactSummary, ArtifactVersion, MessageArtifactLink } from '../features/omni/types';
 import { documentFromV1Result } from '../features/ai-writing/writingDocumentTypes';
 import useCodeAutoRepair from '../hooks/useCodeAutoRepair';
 import { SelectedElementContext } from '../lib/codeSandbox';
@@ -109,6 +131,11 @@ const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   webSearchOptions: DEFAULT_WEB_SEARCH_OPTIONS,
   qwenNativeSearchOptions: DEFAULT_QWEN_NATIVE_SEARCH_OPTIONS,
 };
+
+// Legacy telemetry used this identifier for memory-only turns. It is not a
+// real conversation and must never own Omni artifacts or artifact links.
+const LEGACY_GLOBAL_SESSION_ID = '__global__';
+const ARTIFACT_PANEL_WIDTH_STORAGE_KEY = 'omni-artifact-panel-width';
 
 function readRuntimeDefaults(): RuntimeSettings {
   if (typeof window === 'undefined') return DEFAULT_RUNTIME_SETTINGS;
@@ -161,6 +188,42 @@ function mergeResearchSources(current: ResearchChunk[], incoming: ResearchChunk[
   return [...merged.values()].map((source, index) => ({ ...source, id: index + 1 }));
 }
 
+/** Merge provider search batches without letting placeholder cards hide later
+ * results. Native GLM/Qwen/MiniMax search can emit several web_docs events;
+ * each event is a batch, not a replacement snapshot. */
+function mergeWebDocs(current: WebDoc[], incoming: WebDoc[]): WebDoc[] {
+  const merged = new Map<string, WebDoc>();
+  [...current, ...incoming].forEach((doc, index) => {
+    const url = String(doc.url || '').trim();
+    const title = String(doc.title || '').trim();
+    const content = String(doc.content || '').trim();
+    // Empty-url docs are progress placeholders. Keep one only while there are
+    // no real sources yet; remove it as soon as a provider returns URLs.
+    if (!url && !merged.size) {
+      merged.set(`placeholder:${title || index}`, doc);
+      return;
+    }
+    if (!url) return;
+    merged.set(`url:${url}`, doc);
+    void content;
+  });
+  const real = [...merged.values()].filter((doc) => String(doc.url || '').trim());
+  return real.length > 0 ? real : [...merged.values()].slice(0, 1);
+}
+
+function shouldCreateWritingArtifact(
+  capability: OmniComposerCapability,
+  prompt: string,
+  content: string,
+): boolean {
+  if (!content.trim()) return false;
+  if (capability === 'writing') return true;
+  // 全能模式保持自然聊天；只有明显的文档意图才落作品卡片，避免普通
+  // 问答被误存成“文章”。
+  if (capability !== 'omni') return false;
+  return /(论文|文章|报告|文档|综述|研究报告|白皮书|方案|初稿|paper|essay|report|document)/i.test(prompt);
+}
+
 function researchSourcesFromMessage(message?: ChatMessage): ResearchChunk[] {
   if (!message) return [];
   return message.researchChunks?.length
@@ -200,7 +263,6 @@ export default function ChatInterface() {
   if (typeof window !== 'undefined') {
     (window as unknown as { __debugMessages?: ChatMessage[] }).__debugMessages = messages;
   }
-  useEffect(() => { messagesRef.current = messages; }, [messages]);
   const [input, setInput] = useState('');
   const [allSkills, setAllSkills] = useState<SkillCapsule[]>([]);
   const [showSkillPicker, setShowSkillPicker] = useState(false);
@@ -210,7 +272,13 @@ export default function ChatInterface() {
   const [matchedSkill, setMatchedSkill] = useState<SkillCapsule | null>(null);
   const [showMatchedSkillTooltip, setShowMatchedSkillTooltip] = useState(false);
   const inputContainerRef = useRef<HTMLDivElement>(null);
-  const [mode, setMode] = useState<ModeType>('standard');
+  const [mode, setMode] = useState<ModeType>('omni');
+  const [preferredCapability, setPreferredCapability] = useState<OmniComposerCapability>('omni');
+  const [imageModel, setImageModel] = useState('');
+  const [videoModel, setVideoModel] = useState('');
+  const [videoParams, setVideoParams] = useState<VideoComposerParams>({ ratio: '16:9', duration: 6, resolution: '768P', audio: true });
+  const [videoMode, setVideoMode] = useState<'text_to_video' | 'multi_image_to_video'>('multi_image_to_video');
+  const [mentionedArtifactSummaries, setMentionedArtifactSummaries] = useState<ArtifactSummary[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
@@ -288,10 +356,15 @@ export default function ChatInterface() {
   const handleResearchWebDocs = useCallback((event: { docs: WebDoc[] }) => {
     const docs = event.docs ?? [];
     if (!docs.length) return;
-    perRoundWebDocsRef.current = [...perRoundWebDocsRef.current, ...docs];
+    // Why：research 模式 spread 追加；后端 web_docs 事件可能因模型多轮搜索重复到达，
+    //   按 url 去重防 React key 冲突。
+    const seen = new Set(perRoundWebDocsRef.current.map((d) => d.url).filter(Boolean));
+    const fresh = docs.filter((d) => d.url && !seen.has(d.url));
+    if (!fresh.length) return;
+    perRoundWebDocsRef.current = [...perRoundWebDocsRef.current, ...fresh];
     perRoundResearchChunksRef.current = mergeResearchSources(
       perRoundResearchChunksRef.current,
-      researchChunksFromWebDocs(docs),
+      researchChunksFromWebDocs(fresh),
     );
     setWebDocs(perRoundWebDocsRef.current);
     setResearchChunks(perRoundResearchChunksRef.current);
@@ -409,6 +482,68 @@ export default function ChatInterface() {
   const [pptHistory, setPptHistory] = useState<PptHistoryRun[]>([]);
   const [pptHistoryLoading, setPptHistoryLoading] = useState(true);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [artifactPanelState, dispatchArtifactPanel] = useReducer(artifactPanelReducer, { status: 'closed' });
+  const [artifactPanelWidth, setArtifactPanelWidth] = useState(() => {
+    if (typeof window === 'undefined') return ARTIFACT_PANEL_DEFAULT_WIDTH;
+    try {
+      const stored = window.localStorage.getItem(ARTIFACT_PANEL_WIDTH_STORAGE_KEY);
+      return stored === null ? ARTIFACT_PANEL_DEFAULT_WIDTH : clampArtifactPanelWidth(Number(stored));
+    } catch {
+      return ARTIFACT_PANEL_DEFAULT_WIDTH;
+    }
+  });
+  const [conversationArtifactLinks, setConversationArtifactLinks] = useState<MessageArtifactLink[]>([]);
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(ARTIFACT_PANEL_WIDTH_STORAGE_KEY, String(artifactPanelWidth));
+    } catch {
+      // Width persistence is best-effort (private browsing can reject storage).
+    }
+  }, [artifactPanelWidth]);
+  useEffect(() => {
+    const normalizedMessages = ensureChatMessageIds(messages, activeSessionId ?? 'draft-session');
+    messagesRef.current = normalizedMessages;
+    if (normalizedMessages !== messages) setMessages(normalizedMessages);
+  }, [activeSessionId, messages]);
+  useEffect(() => {
+    let cancelled = false;
+    // A task poll can outlive the conversation that started it. Clear the
+    // per-session finalization guards before loading the next session so an
+    // old task can never suppress (or complete) work in the new one.
+    videoFinalizingTasksRef.current.clear();
+    pptFinalizingRunsRef.current.clear();
+    // Do not key this effect by the whole sessions array. Session snapshots are
+    // refreshed while a response streams; closing the panel on every refresh
+    // made the right-hand work preview visibly flash when a document was opened.
+    if (!activeSessionId || activeSessionId === LEGACY_GLOBAL_SESSION_ID) {
+      setConversationArtifactLinks([]);
+      dispatchArtifactPanel({ type: 'close' });
+      return () => { cancelled = true; };
+    }
+    void listConversationArtifactLinks(activeSessionId)
+      .then((response) => { if (!cancelled) setConversationArtifactLinks(response.links); })
+      .catch(() => { if (!cancelled) setConversationArtifactLinks([]); });
+    return () => { cancelled = true; };
+  }, [activeSessionId]);
+  const artifactLinksByMessageId = useMemo(() => {
+    const grouped = new Map<string, MessageArtifactLink[]>();
+    for (const link of conversationArtifactLinks) grouped.set(link.messageId, [...(grouped.get(link.messageId) ?? []), link]);
+    return grouped;
+  }, [conversationArtifactLinks]);
+  const openArtifactPanel = useCallback((artifact: Artifact, version: ArtifactVersion) => {
+    dispatchArtifactPanel({ type: 'open', artifactId: artifact.id, versionId: version.id });
+  }, []);
+  const handleArtifactLoaded = useCallback(() => dispatchArtifactPanel({ type: 'loaded' }), []);
+  const handleArtifactClose = useCallback(() => dispatchArtifactPanel({ type: 'close' }), []);
+  const handleArtifactDisplayModeChange = useCallback((displayMode: 'split' | 'maximized') => {
+    dispatchArtifactPanel({ type: 'setDisplayMode', displayMode });
+  }, []);
+  const handleArtifactOpenVersion = useCallback((artifact: Artifact, versionId: ArtifactVersion['id']) => {
+    dispatchArtifactPanel({ type: 'open', artifactId: artifact.id, versionId });
+  }, []);
+  const handleArtifactPanelWidthChange = useCallback((width: number) => {
+    setArtifactPanelWidth(clampArtifactPanelWidth(width));
+  }, []);
   const [selectedResearchMessageIndex, setSelectedResearchMessageIndex] = useState<number | null>(null);
   const [writingSessionRestore, setWritingSessionRestore] = useState<{
     sessionId: string;
@@ -424,7 +559,26 @@ export default function ChatInterface() {
     document: WritingDocumentState;
     thesisOutline: ThesisOutlineState;
   } | null>(null);
+  const [writingArtifactBridge, setWritingArtifactBridge] = useState<{
+    artifact: Artifact;
+    version: ArtifactVersion;
+    originalContent: string;
+  } | null>(null);
+  const [imageArtifactBridge, setImageArtifactBridge] = useState<{
+    artifact: Artifact;
+    version: ArtifactVersion;
+    prompt: string;
+    referenceImage?: { url: string; name?: string };
+  } | null>(null);
+  const [videoArtifactBridge, setVideoArtifactBridge] = useState<{
+    artifact: Artifact;
+    version: ArtifactVersion;
+    task: VideoTask;
+  } | null>(null);
   const writingRestoreRevisionRef = useRef(0);
+  const thesisArtifactMessageIdRef = useRef<string | null>(null);
+  const videoFinalizingTasksRef = useRef(new Set<string>());
+  const pptFinalizingRunsRef = useRef(new Set<string>());
   // A showcase card opens an unsaved Code workbench draft. It becomes a real
   // conversation only when the user submits the first requirement.
   const [codeWorkbenchDraft, setCodeWorkbenchDraft] = useState(false);
@@ -657,7 +811,7 @@ export default function ChatInterface() {
   const persistResearchMessages = (sessionId: string | null | undefined, nextMessages: ChatMessage[]) => {
     messagesRef.current = nextMessages;
     setMessages(nextMessages);
-    if (!sessionId) return;
+    if (!sessionId || sessionId === LEGACY_GLOBAL_SESSION_ID) return;
     void saveSessionSnapshot(sessionId, buildSnapshot(nextMessages), false).catch((requestError) => {
       setError(requestError instanceof Error ? requestError.message : '保存调研来源失败');
     });
@@ -666,11 +820,130 @@ export default function ChatInterface() {
   const persistPlanMessages = (sessionId: string | null | undefined, nextMessages: ChatMessage[]) => {
     messagesRef.current = nextMessages;
     setMessages(nextMessages);
-    if (!sessionId) return;
+    if (!sessionId || sessionId === LEGACY_GLOBAL_SESSION_ID) return;
     void saveSessionSnapshot(sessionId, buildSnapshot(nextMessages), false).catch((requestError) => {
       setError(requestError instanceof Error ? requestError.message : '保存自主规划进度失败');
     });
   };
+
+  useEffect(() => {
+    if (!activeSessionId || activeSessionId === LEGACY_GLOBAL_SESSION_ID) return undefined;
+    let cancelled = false;
+    const sessionAtStart = activeSessionId;
+    const terminal = new Set(['SUCCEEDED', 'FAILED', 'CANCELLED']);
+    const poll = async () => {
+      const pendingMessages = messagesRef.current.filter((message) => message.id && message.videoTask && !terminal.has(message.videoTask.status));
+      for (const pendingMessage of pendingMessages) {
+        if (cancelled) return;
+        const pendingMessageId = pendingMessage.id;
+        if (!pendingMessageId) continue;
+        const marker = pendingMessage.videoTask!;
+        if (videoFinalizingTasksRef.current.has(marker.taskId)) continue;
+        try {
+          const task = await getVideoTaskStatus(marker.taskId);
+          if (cancelled || sessionAtStart !== activeSessionId) return;
+          if (!terminal.has(task.status)) continue;
+          const initialLink = conversationArtifactLinks.find((link) => link.messageId === pendingMessageId);
+          if (!initialLink) continue;
+          videoFinalizingTasksRef.current.add(marker.taskId);
+          // The message/link may be stale after a conversation switch. Verify
+          // that the artifact's original version belongs to this exact task
+          // before appending a terminal version; otherwise an unrelated task
+          // can be recorded as a new version of the current work.
+          const initialVersion = await getArtifactVersion(initialLink.artifactId, initialLink.versionId);
+          if (cancelled || sessionAtStart !== activeSessionId) return;
+          if (!matchesVideoArtifactTask(initialVersion.payload, initialVersion.sourceRef, marker.taskId)) {
+            continue;
+          }
+          const completionMessageId = createClientMessageId();
+          const mapped = createVideoArtifactInput({ messageId: completionMessageId, task });
+          const created = await createArtifactVersion(initialLink.artifactId, {
+            conversationId: sessionAtStart,
+            // Keep the terminal version on the original assistant message.
+            // Otherwise the initial generating link and the terminal link are
+            // rendered as two separate cards even though they are one task.
+            messageId: pendingMessageId,
+            summary: mapped.summary,
+            sourceRef: mapped.sourceRef,
+            payload: mapped.payload,
+            status: mapped.status,
+          });
+          if (cancelled || sessionAtStart !== activeSessionId) return;
+          const normalizedStatus: NonNullable<ChatMessage['videoTask']>['status'] = task.status === 'SUCCEEDED' ? 'SUCCEEDED' : task.status === 'CANCELLED' ? 'CANCELLED' : 'FAILED';
+          const updatedMessages: ChatMessage[] = messagesRef.current.map((message) => message.id === pendingMessage.id
+            ? { ...message, content: normalizedStatus === 'SUCCEEDED' ? '视频生成完成。' : '视频生成未成功。', videoTask: { taskId: marker.taskId, status: normalizedStatus } }
+            : message);
+          updatedMessages.push({
+            id: completionMessageId,
+            role: 'assistant',
+            content: normalizedStatus === 'SUCCEEDED' ? '视频已生成，点击作品卡片即可播放。' : '视频任务失败，可进入视频工作台调整参数后重试。',
+          });
+          messagesRef.current = updatedMessages;
+          setMessages(updatedMessages);
+          await saveSessionSnapshot(sessionAtStart, { ...buildSnapshot(), messages: updatedMessages }, false);
+          if (cancelled || sessionAtStart !== activeSessionId) return;
+          setConversationArtifactLinks((previous) => [...previous, created.link]);
+        } catch (cause) {
+          setError(cause instanceof Error ? `视频任务状态同步失败：${cause.message}` : '视频任务状态同步失败。');
+        } finally {
+          videoFinalizingTasksRef.current.delete(marker.taskId);
+        }
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 4000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+    // Polling reads the latest message ref and artifact links for refresh recovery.
+  }, [activeSessionId, conversationArtifactLinks]);
+
+  useEffect(() => {
+    if (!activeSessionId || activeSessionId === LEGACY_GLOBAL_SESSION_ID) return undefined;
+    const terminal = new Set(['COMPLETED', 'FAILED', 'CANCELLED']);
+    const poll = async () => {
+      const pendingMessages = messagesRef.current.filter((message) => message.id && message.pptRun && !terminal.has(message.pptRun.status));
+      for (const pendingMessage of pendingMessages) {
+        const marker = pendingMessage.pptRun!;
+        if (pptFinalizingRunsRef.current.has(marker.runId)) continue;
+        try {
+          const run = await pptApi.getRun(marker.runId);
+          if (!terminal.has(run.status)) continue;
+          const initialLink = conversationArtifactLinks.find((link) => link.messageId === pendingMessage.id);
+          if (!initialLink) continue;
+          pptFinalizingRunsRef.current.add(marker.runId);
+          const presentation = await pptApi.getPresentation(marker.presentationId);
+          const completionMessageId = createClientMessageId();
+          const mapped = createPptArtifactInput({ messageId: completionMessageId, presentation, run });
+          const created = await createArtifactVersion(initialLink.artifactId, {
+            conversationId: activeSessionId,
+            messageId: completionMessageId,
+            summary: mapped.summary,
+            sourceRef: mapped.sourceRef,
+            payload: mapped.payload,
+            status: mapped.status,
+          });
+          const normalizedStatus: NonNullable<ChatMessage['pptRun']>['status'] = run.status === 'COMPLETED' ? 'COMPLETED' : run.status === 'CANCELLED' ? 'CANCELLED' : 'FAILED';
+          const updatedMessages: ChatMessage[] = messagesRef.current.map((message) => message.id === pendingMessage.id
+            ? { ...message, content: normalizedStatus === 'COMPLETED' ? 'PPT 生成完成。' : 'PPT 生成未成功。', pptRun: { ...marker, status: normalizedStatus } }
+            : message);
+          updatedMessages.push({ id: completionMessageId, role: 'assistant', content: normalizedStatus === 'COMPLETED' ? `PPT 已生成，共 ${presentation.document.slides.length} 页。` : 'PPT 任务未完成，可进入 PPT 工作台继续处理。' });
+          messagesRef.current = updatedMessages;
+          setMessages(updatedMessages);
+          await saveSessionSnapshot(activeSessionId, { ...buildSnapshot(), messages: updatedMessages }, false);
+          setConversationArtifactLinks((previous) => [...previous, created.link]);
+        } catch (cause) {
+          setError(cause instanceof Error ? `PPT 运行状态同步失败：${cause.message}` : 'PPT 运行状态同步失败。');
+        } finally {
+          pptFinalizingRunsRef.current.delete(marker.runId);
+        }
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 4000);
+    return () => window.clearInterval(timer);
+  }, [activeSessionId, conversationArtifactLinks]);
 
   const resetConversation = () => {
     setMessages([]);
@@ -880,6 +1153,7 @@ export default function ChatInterface() {
       }
       setActiveSessionId(session.session_id);
       setMode(session.mode as ModeType);
+      if (session.mode === 'omni') setPreferredCapability('omni');
       setView(session.mode === 'writing' ? 'writing' : 'chat');
       applySnapshot(history.snapshot);
       localStorage.setItem('activeSessionId', session.session_id);
@@ -958,7 +1232,7 @@ export default function ChatInterface() {
 
   const ensureWritingSession = async (instruction: string) => {
     let sessionId = activeSessionId;
-    if (!sessionId || mode !== 'writing') {
+    if (!sessionId || sessionId === LEGACY_GLOBAL_SESSION_ID || mode !== 'writing') {
       const session = await createSession('writing', instruction.slice(0, 36) || 'AI 写作');
       sessionId = session.session_id;
       setActiveSessionId(sessionId);
@@ -992,15 +1266,120 @@ export default function ChatInterface() {
     return answer || '写作任务已完成。';
   };
 
-  const handleThesisBodyRequest = async ({ phase, title }: { phase: 'start' | 'complete' | 'failed'; title: string }) => {
+  const submitWritingArtifactRevision = async ({ compiledPrompt }: { instruction: string; compiledPrompt: CompiledWritingPrompt }, onStreamToken: (token: string) => void) => {
+    if (!activeSessionId) throw new Error('原会话不存在，无法更新作品。');
+    const request = [compiledPrompt.systemPrompt, ...compiledPrompt.constraints, '', `用户要求：${compiledPrompt.userPrompt}`].join('\n');
+    let answer = '';
+    await sendChatMessage(request, 'standard', {
+      onToken: (token) => { answer += token; onStreamToken(token); },
+      onDone: (event) => { if (event.answer) answer = event.answer; },
+      onError: (event) => { throw new Error(event.message); },
+    }, { sessionId: activeSessionId, runtimeSettings });
+    return answer || '写作修改已完成。';
+  };
+
+  const openWritingArtifactWorkspace = useCallback((artifact: Artifact, version: ArtifactVersion) => {
+    if (!activeSessionId) return;
+    const payload = version.payload && typeof version.payload === 'object' ? version.payload as Record<string, unknown> : null;
+    // Older writing artifacts were stored as `document` even when they came
+    // from the thesis workspace. Detect the structured payload itself so the
+    // full outline, chapters, references and citations are restored instead of
+    // collapsing the work into a one-section markdown draft.
+    const thesisPayload = readThesisArtifactPayload(version.payload);
+    const content = thesisPayload?.markdown || (typeof payload?.content === 'string' ? payload.content : '');
+    if (!content) {
+      setError('这个文档版本没有可编辑的正文快照。');
+      return;
+    }
+    const document = thesisPayload?.document ?? documentFromV1Result('general', content, artifact.title);
+    if (version.sourceRef.type === 'writing_document') document.documentId = version.sourceRef.documentId;
+    document.versionId = version.id;
+    const draft: WritingDraft = {
+      scene: thesisPayload ? 'thesis' : 'general',
+      instruction: artifact.title,
+      valuesByScene: createDefaultWritingValues(),
+    };
+    setWritingArtifactBridge({ artifact, version, originalContent: content });
+    setWritingWorkspaceState(null);
+    setWritingSessionRestore({
+      sessionId: activeSessionId,
+      revision: writingRestoreRevisionRef.current += 1,
+      instruction: artifact.title,
+      result: content,
+      draft,
+      document,
+      thesisOutline: thesisPayload?.outline,
+    });
+    dispatchArtifactPanel({ type: 'close' });
+    setView('writing');
+  }, [activeSessionId]);
+
+  const openPptArtifactWorkspace = useCallback((version: ArtifactVersion) => {
+    const payload = readPptArtifactPayload(version.payload);
+    if (!payload) {
+      setError('这个 PPT 版本没有可恢复的演示文稿快照。');
+      return;
+    }
+    const presentationId = encodeURIComponent(payload.presentation.presentationId);
+    const runId = encodeURIComponent(payload.run.runId);
+    window.location.assign(`/ppt/workspace/${presentationId}?source=artifact&runId=${runId}&resume=1`);
+  }, []);
+
+  const closeWritingArtifactWorkspace = async () => {
+    const bridge = writingArtifactBridge;
+    const workspace = writingWorkspaceState;
+    setView('chat');
+    setWritingArtifactBridge(null);
+    setWritingSessionRestore(null);
+    localStorage.removeItem('ai-writing-draft-v1');
+    localStorage.removeItem('ai-writing-document-v2');
+    localStorage.removeItem('ai-writing-submitted-instruction-v1');
+    if (!bridge || !workspace || !activeSessionId || activeSessionId === LEGACY_GLOBAL_SESSION_ID) return;
+    const content = writingDocumentToMarkdown(workspace.document);
+    if (!content.trim() || content.trim() === bridge.originalContent.trim()) return;
+    const messageId = createClientMessageId();
+    try {
+      const thesisMapped = (bridge.artifact.kind === 'thesis' || Boolean(readThesisArtifactPayload(bridge.version.payload)))
+        ? createThesisArtifactInput({ messageId, document: workspace.document, outline: workspace.thesisOutline })
+        : null;
+      const created = await createArtifactVersion(bridge.artifact.id, {
+        conversationId: activeSessionId,
+        messageId,
+        summary: thesisMapped?.summary ?? content.replace(/\s+/g, ' ').trim().slice(0, 240),
+        sourceRef: {
+          type: 'writing_document',
+          documentId: bridge.version.sourceRef.type === 'writing_document'
+            ? bridge.version.sourceRef.documentId
+            : workspace.document.documentId,
+          revision: bridge.version.versionNumber + 1,
+        },
+        payload: thesisMapped?.payload ?? { format: 'markdown', content },
+      });
+      const nextMessages: ChatMessage[] = [...messagesRef.current, {
+        id: messageId,
+        role: 'assistant',
+        content: `已在写作工作台更新《${bridge.artifact.title}》，生成版本 ${created.version.versionNumber}。`,
+      }];
+      messagesRef.current = nextMessages;
+      setMessages(nextMessages);
+      await saveSessionSnapshot(activeSessionId, { ...buildSnapshot(), messages: nextMessages }, false);
+      setConversationArtifactLinks((previous) => [...previous, created.link]);
+    } catch (cause) {
+      setError(cause instanceof Error ? `文档修改未能保存为新版本：${cause.message}` : '文档修改未能保存为新版本。');
+    }
+  };
+
+  const handleThesisBodyRequest = async ({ phase, title, document, outline }: { phase: 'start' | 'complete' | 'failed'; title: string; document: WritingDocumentState; outline: ThesisOutlineState }) => {
     const instruction = '我要基于大纲生成正文';
     const sessionId = await ensureWritingSession(instruction);
     const previous = messagesRef.current;
-    const nextMessages = phase === 'start'
+    if (phase === 'start') thesisArtifactMessageIdRef.current = createClientMessageId();
+    const artifactMessageId = thesisArtifactMessageIdRef.current ?? createClientMessageId();
+    const nextMessages: ChatMessage[] = phase === 'start'
       ? [
           ...previous,
-          { role: 'user' as const, content: instruction },
-          { role: 'assistant' as const, content: '正文生成中，请稍候…', writingArtifact: { type: 'word' as const, title, status: 'generating' as const } },
+          { id: createClientMessageId(), role: 'user' as const, content: instruction },
+          { id: artifactMessageId, role: 'assistant' as const, content: '正文生成中，请稍候…', writingArtifact: { type: 'word' as const, title, status: 'generating' as const } },
         ]
       : previous.map((message, index, all) => index === all.map((item) => item.role).lastIndexOf('assistant')
         ? { ...message, content: phase === 'complete' ? '正文已生成，可在右侧文档工作台继续编辑。' : '正文生成失败，请稍后重试。', writingArtifact: { type: 'word' as const, title, status: phase } }
@@ -1010,6 +1389,21 @@ export default function ChatInterface() {
     // Persist the conversation event immediately; the writing workspace's
     // structured snapshot is saved separately by its existing autosave.
     await saveSessionSnapshot(sessionId, { ...buildSnapshot(), messages: nextMessages }, false);
+    if (phase === 'complete') {
+      try {
+        const created = await createConversationArtifact(
+          sessionId,
+          createThesisArtifactInput({ messageId: artifactMessageId, document, outline }),
+        );
+        setConversationArtifactLinks((current) => [...current, created.link]);
+      } catch (cause) {
+        setError(cause instanceof Error ? `论文已生成，但保存为作品失败：${cause.message}` : '论文已生成，但保存为作品失败。');
+      } finally {
+        thesisArtifactMessageIdRef.current = null;
+      }
+    } else if (phase === 'failed') {
+      thesisArtifactMessageIdRef.current = null;
+    }
   };
 
   const enterCodeWorkbench = async (project?: PublishedCodeProject) => {
@@ -1020,7 +1414,7 @@ export default function ChatInterface() {
   };
 
   const persistCurrentSession = async () => {
-    if (!activeSessionId || !isSessionReady) return;
+    if (!activeSessionId || activeSessionId === LEGACY_GLOBAL_SESSION_ID || !isSessionReady) return;
     // AI writing persists atomically when generation completes. Its workspace
     // owns richer local document state. Flush that structured state explicitly
     // before switching sessions; otherwise a pending 500ms autosave can leave
@@ -1067,16 +1461,17 @@ export default function ChatInterface() {
     void listSessions()
       .then(async (response) => {
         if (cancelled) return;
-        setSessions(response.sessions);
+        const availableSessions = response.sessions.filter((session) => session.session_id !== LEGACY_GLOBAL_SESSION_ID);
+        setSessions(availableSessions);
         const sharedId = new URLSearchParams(window.location.search).get('session');
         const rememberedId = sharedId || localStorage.getItem('activeSessionId');
         const initial =
-          response.sessions.find((item) => item.session_id === rememberedId) ??
-          response.sessions[0];
+          availableSessions.find((item) => item.session_id === rememberedId) ??
+          availableSessions[0];
         if (initial) {
           await openSession(initial);
         } else {
-          startDraftSession('standard');
+          startDraftSession('omni');
         }
       })
       .catch((requestError) => {
@@ -1097,7 +1492,7 @@ export default function ChatInterface() {
   }, []);
 
   useEffect(() => {
-    if (!activeSessionId || !isSessionReady) return;
+    if (!activeSessionId || activeSessionId === LEGACY_GLOBAL_SESSION_ID || !isSessionReady) return;
     const timeout = window.setTimeout(() => {
       void persistCurrentSession().catch((requestError) => {
         setError(
@@ -1135,7 +1530,7 @@ export default function ChatInterface() {
   ]);
 
   useEffect(() => {
-    if (!activeSessionId || mode !== 'writing' || !writingWorkspaceState) return;
+    if (!activeSessionId || activeSessionId === LEGACY_GLOBAL_SESSION_ID || mode !== 'writing' || !writingWorkspaceState) return;
     const timeout = window.setTimeout(() => {
       void saveSessionSnapshot(activeSessionId, {
         ...buildSnapshot(),
@@ -1254,9 +1649,55 @@ export default function ChatInterface() {
   const openHooks = useCallback(() => setView('hooks'), []);
   const closeHooks = useCallback(() => setView('chat'), []);
   const openImageWorkspace = useCallback((draftPrompt = '') => {
+    setImageArtifactBridge(null);
     setInput(draftPrompt);
     setView('image-studio');
   }, []);
+
+  const openImageArtifactWorkspace = useCallback((artifact: Artifact, version: ArtifactVersion) => {
+    const payload = readImageArtifactPayload(version.payload);
+    if (!payload) {
+      setError('这个图片版本没有可继续编辑的批次数据。');
+      return;
+    }
+    setImageArtifactBridge({
+      artifact,
+      version,
+      prompt: payload.prompt,
+      referenceImage: payload.images[0]
+        ? { url: payload.images[0].url, name: `${artifact.title} · 版本 ${version.versionNumber}` }
+        : undefined,
+    });
+    dispatchArtifactPanel({ type: 'close' });
+    setView('image-studio');
+  }, []);
+
+  const handleImageArtifactBatch = async (batch: ImageBatch) => {
+    if (!imageArtifactBridge || !activeSessionId || activeSessionId === LEGACY_GLOBAL_SESSION_ID) return;
+    const messageId = createClientMessageId();
+    try {
+      const mapped = createImageArtifactInput({ messageId, batch });
+      const created = await createArtifactVersion(imageArtifactBridge.artifact.id, {
+        conversationId: activeSessionId,
+        messageId,
+        summary: mapped.summary,
+        sourceRef: mapped.sourceRef,
+        payload: mapped.payload,
+      });
+      const nextMessages: ChatMessage[] = [...messagesRef.current, {
+        id: messageId,
+        role: 'assistant',
+        content: `已在生图工作台为《${imageArtifactBridge.artifact.title}》生成版本 ${created.version.versionNumber}，包含 ${batch.images.length} 张候选图片。`,
+      }];
+      messagesRef.current = nextMessages;
+      setMessages(nextMessages);
+      await saveSessionSnapshot(activeSessionId, { ...buildSnapshot(), messages: nextMessages }, false);
+      setConversationArtifactLinks((previous) => [...previous, created.link]);
+      setImageArtifactBridge((current) => current ? { ...current, version: created.version, prompt: batch.raw_prompt } : current);
+    } catch (cause) {
+      setError(cause instanceof Error ? `图片批次未能保存为新版本：${cause.message}` : '图片批次未能保存为新版本。');
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -1280,9 +1721,44 @@ export default function ChatInterface() {
     setView('image-plaza');
   }, []);
   const openVideoWorkspace = useCallback((draftPrompt = '') => {
+    setVideoArtifactBridge(null);
     setInput(draftPrompt);
     setView('video-studio');
   }, []);
+  const openVideoArtifactWorkspace = useCallback((artifact: Artifact, version: ArtifactVersion) => {
+    const payload = readVideoArtifactPayload(version.payload);
+    if (!payload) {
+      setError('这个视频版本没有可恢复的任务数据。');
+      return;
+    }
+    setVideoArtifactBridge({ artifact, version, task: payload.task });
+    dispatchArtifactPanel({ type: 'close' });
+    setView('video-studio');
+  }, []);
+
+  const handleVideoArtifactTask = async (task: VideoTask) => {
+    if (!videoArtifactBridge || !activeSessionId || activeSessionId === LEGACY_GLOBAL_SESSION_ID) return;
+    const messageId = createClientMessageId();
+    const mapped = createVideoArtifactInput({ messageId, task });
+    try {
+      const created = await createArtifactVersion(videoArtifactBridge.artifact.id, {
+        conversationId: activeSessionId,
+        messageId,
+        summary: mapped.summary,
+        sourceRef: mapped.sourceRef,
+        payload: mapped.payload,
+        status: mapped.status,
+      });
+      const nextMessages: ChatMessage[] = [...messagesRef.current, { id: messageId, role: 'assistant', content: `已在视频工作台生成版本 ${created.version.versionNumber}，点击作品卡片即可播放。` }];
+      messagesRef.current = nextMessages;
+      setMessages(nextMessages);
+      await saveSessionSnapshot(activeSessionId, { ...buildSnapshot(), messages: nextMessages }, false);
+      setConversationArtifactLinks((previous) => [...previous, created.link]);
+      setVideoArtifactBridge((current) => current ? { ...current, version: created.version, task } : current);
+    } catch (cause) {
+      setError(cause instanceof Error ? `视频结果未能保存为新版本：${cause.message}` : '视频结果未能保存为新版本。');
+    }
+  };
   const openVideoMarket = useCallback((draftPrompt = '') => {
     setInput(draftPrompt);
     setView('video-market');
@@ -1309,7 +1785,7 @@ export default function ChatInterface() {
     if (isLoading) return;
     try {
       await persistCurrentSession();
-      startDraftSession('standard');
+      startDraftSession('omni');
     } catch {
       // 创建失败不阻塞预填
     }
@@ -1452,6 +1928,17 @@ export default function ChatInterface() {
 
     const userMessage = input.trim();
     const requestAttachments = attachments;
+    const userMessageId = createClientMessageId();
+    const assistantMessageId = createClientMessageId();
+    // Freeze all per-turn intent before any awaited session creation or streaming work.
+    // Toolbar changes made while this request runs therefore apply only to the next turn.
+    let omniTurnContext = createOmniTurnContext({
+      preferredCapability,
+      runtimeSettings,
+      attachments: requestAttachments,
+      artifactPanelState,
+      mentionedArtifacts: mentionedArtifactSummaries,
+    });
     if (mode === 'research') setSelectedResearchMessageIndex(null);
     // Why: 新一轮发送前强制上屏上一轮 pacing 残留，避免旧答案继续展开干扰新轮。
     answerPacing.flush();
@@ -1466,7 +1953,7 @@ export default function ChatInterface() {
     setMatchedSkills([]);
     let requestSessionId = activeSessionId;
 
-    if (!requestSessionId) {
+    if (!requestSessionId || requestSessionId === LEGACY_GLOBAL_SESSION_ID) {
       try {
         const session = await createSession(mode);
         requestSessionId = session.session_id;
@@ -1490,8 +1977,41 @@ export default function ChatInterface() {
       }
     }
 
+    try {
+      const context = await getConversationOmniContext(requestSessionId, userMessage);
+      omniTurnContext = createOmniTurnContext({
+        preferredCapability,
+        runtimeSettings,
+        attachments: requestAttachments,
+        artifactPanelState,
+        mentionedArtifacts: mentionedArtifactSummaries,
+        projectSummary: context.projectSummary ?? undefined,
+        candidateArtifactSummaries: context.candidateArtifactSummaries,
+      });
+    } catch {
+      // Context retrieval is additive; chat remains available if the index is temporarily unavailable.
+    }
+
+    const references = [
+      ...mentionedArtifactSummaries,
+      ...(omniTurnContext.activeArtifact && !mentionedArtifactSummaries.some((item) => item.artifactId === omniTurnContext.activeArtifact?.artifactId)
+        ? [{ artifactId: omniTurnContext.activeArtifact.artifactId, versionId: omniTurnContext.activeArtifact.versionId }]
+        : []),
+    ];
+    if (references.length > 0) {
+      const settled = await Promise.allSettled(references.map((item, index) => referenceConversationArtifact(requestSessionId!, {
+        messageId: userMessageId,
+        artifactId: item.artifactId,
+        versionId: item.versionId,
+        displayOrder: index,
+      })));
+      const links = settled.flatMap((result) => result.status === 'fulfilled' ? [result.value.link] : []);
+      if (links.length > 0) setConversationArtifactLinks((previous) => [...previous, ...links]);
+    }
+
     setInput('');
     setAttachments([]);
+    setMentionedArtifactSummaries([]);
     // Why: Day57 @file 提交后清空提及状态,与 input/attachments 同生命周期。
     setMentionedFiles([]);
     setCurrentNode(null);
@@ -1517,6 +2037,7 @@ export default function ChatInterface() {
       // 再追加新的用户消息，实现 ChatGPT 式"编辑并重发"。
       const base = rewritingIndex != null ? prev.slice(0, rewritingIndex) : prev;
       const next = [...base, {
+        id: userMessageId,
         role: 'user' as const,
         content: userMessage,
         // Why: Code 模式历史消息回显图片缩略图；standard/deep 模式消息列表也支持展示附件。
@@ -1528,7 +2049,109 @@ export default function ChatInterface() {
     // 截断后重写索引失效，下一轮提交按普通发送处理
     setRewritingIndex(null);
 
-    if (mode === 'code') {
+    if (preferredCapability === 'ppt' && capabilityUsesTaskRoute(preferredCapability, mode)) {
+      try {
+        const presentation = await pptApi.createPresentation({ title: userMessage.slice(0, 80) || '未命名演示' });
+        const run = await pptApi.createRun({
+          presentationId: presentation.presentationId,
+          prompt: userMessage,
+          modelProvider: 'deepseek',
+          searchProvider: 'auto',
+          searchLimit: 20,
+        });
+        const mapped = createPptArtifactInput({ messageId: assistantMessageId, presentation, run });
+        const created = await createConversationArtifact(requestSessionId, mapped);
+        const runStatus: NonNullable<ChatMessage['pptRun']>['status'] = run.status;
+        const assistantMessage: ChatMessage = {
+          id: assistantMessageId,
+          role: 'assistant',
+          content: `PPT 任务已启动，当前阶段：${run.phase}。刷新页面后仍会继续同步。`,
+          pptRun: { runId: run.runId, presentationId: presentation.presentationId, status: runStatus },
+        };
+        const nextMessages = [...messagesRef.current, assistantMessage];
+        messagesRef.current = nextMessages;
+        setMessages(nextMessages);
+        const updated = await saveSessionSnapshot(requestSessionId, { ...buildSnapshot(), messages: nextMessages }, false);
+        setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+        setConversationArtifactLinks((previous) => [...previous, created.link]);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : 'PPT 任务提交失败。');
+      } finally {
+        setIsLoading(false);
+      }
+    } else if (preferredCapability === 'video' && capabilityUsesTaskRoute(preferredCapability, mode)) {
+      try {
+        const models = await getVideoModels();
+        const selected = models.find((item) => item.id === videoModel && item.enabled && item.modes.includes(videoMode))
+          ?? models.find((item) => item.enabled && item.modes.includes(videoMode));
+        if (!selected) throw new Error('当前没有可用的文生视频模型。');
+        const ratio = selected.ratios.includes(videoParams.ratio) ? videoParams.ratio : selected.ratios[0] ?? '16:9';
+        const resolution = selected.resolutions.includes(videoParams.resolution) ? videoParams.resolution : selected.resolutions[0] ?? '720P';
+        const duration = selected.durations.includes(videoParams.duration) ? videoParams.duration : selected.durations[0] ?? selected.duration_min;
+        const referenceImages = attachments.filter((item) => item.type === 'image_url').map((item) => ({ url: item.url, mediaKind: 'reference_image' as const }));
+        const taskMode = videoMode === 'multi_image_to_video' && referenceImages.length > 0 ? 'multi_image_to_video' : 'text_to_video';
+        const task = await createVideoTask({
+          mode: taskMode,
+          prompt: userMessage,
+          model: selected.id,
+          ratio,
+          duration,
+          resolution,
+          prompt_extend: true,
+          audio: selected.supports_audio ? videoParams.audio : null,
+          references: taskMode === 'multi_image_to_video' ? referenceImages : undefined,
+        });
+        const mapped = createVideoArtifactInput({ messageId: assistantMessageId, task });
+        const created = await createConversationArtifact(requestSessionId, mapped);
+        const pendingStatus = task.status === 'RUNNING' ? 'RUNNING' as const : 'PENDING' as const;
+        const assistantMessage: ChatMessage = {
+          id: assistantMessageId,
+          role: 'assistant',
+          content: `视频任务已提交，当前进度 ${task.progress}%。任务会在后台继续，刷新页面也不会丢失。`,
+          videoTask: { taskId: task.id, status: pendingStatus },
+        };
+        const nextMessages = [...messagesRef.current, assistantMessage];
+        messagesRef.current = nextMessages;
+        setMessages(nextMessages);
+        const updated = await saveSessionSnapshot(requestSessionId, { ...buildSnapshot(), messages: nextMessages }, false);
+        setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+        setConversationArtifactLinks((previous) => [...previous, created.link]);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : '视频任务提交失败。');
+      } finally {
+        setIsLoading(false);
+      }
+    } else if (preferredCapability === 'image' && capabilityUsesTaskRoute(preferredCapability, mode)) {
+      try {
+        const batch = await createImageGeneration({
+          raw_prompt: userMessage,
+          count: 4,
+          model_mode: imageModel ? 'manual' : 'auto',
+          model: imageModel || null,
+          enhance: true,
+        });
+        if (!batch.images.length) throw new Error('图片服务没有返回可用图片。');
+        const created = await createConversationArtifact(
+          requestSessionId,
+          createImageArtifactInput({ messageId: assistantMessageId, batch }),
+        );
+        const assistantMessage: ChatMessage = {
+          id: assistantMessageId,
+          role: 'assistant',
+          content: `已生成 ${batch.images.length} 张候选图片。点击作品卡片可查看本次完整批次。`,
+        };
+        const nextMessages = [...messagesRef.current, assistantMessage];
+        messagesRef.current = nextMessages;
+        setMessages(nextMessages);
+        const updated = await saveSessionSnapshot(requestSessionId, { ...buildSnapshot(), messages: nextMessages }, false);
+        setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+        setConversationArtifactLinks((previous) => [...previous, created.link]);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : '图片生成失败。');
+      } finally {
+        setIsLoading(false);
+      }
+    } else if (mode === 'code') {
       const isIncrementalChange = Boolean(generatedCode.trim());
       const targetElement = selectedElement;
       // Why: MCP 会话级注入——与 webSearch/deepThinking 同链路，随 code 请求 meta 透传后端。
@@ -1565,7 +2188,7 @@ export default function ChatInterface() {
         setIsLoading(false);
         sealOffProcessingNodes();
       }
-    } else if (mode === 'research') {
+    } else if (mode === 'research' || preferredCapability === 'research') {
       // 深度调研模式
       try {
         await sendDeepResearch(userMessage, {
@@ -1595,6 +2218,7 @@ export default function ChatInterface() {
             persistResearchMessages(requestSessionId, [
               ...messagesRef.current,
               {
+                id: assistantMessageId,
                 role: 'assistant',
                 content: event.report ||
                   `✅ 深度调研完成！\n\n已从 ${event.total_pages} 个网页中抓取内容，切分为 ${event.total_chunks} 个切片，通过 BGE-Reranker 精选出 ${event.top_chunks.length} 条高相关性片段。\n\n正在生成深度研究报告...`,
@@ -1656,6 +2280,29 @@ export default function ChatInterface() {
           ...researchOptions,
           enable_feedback: researchEngine === 'qwen' ? enableFeedback : undefined,
         });
+        const reportMessage = [...messagesRef.current].reverse().find((message) => message.id === assistantMessageId && message.role === 'assistant');
+        const report = reportMessage?.content?.trim() ?? '';
+        const lastResearchMessage = messagesRef.current[messagesRef.current.length - 1];
+        const isPendingFeedback = lastResearchMessage?.type === 'qwen_feedback' && !lastResearchMessage.feedbackAnswer;
+        const isPlaceholder = !report || report.includes('正在生成深度研究报告');
+        if (!isPendingFeedback && !isPlaceholder) {
+          try {
+            const created = await createConversationArtifact(
+              requestSessionId,
+              createResearchArtifactInput({
+                messageId: assistantMessageId,
+                report,
+                query: userMessage,
+                sources: perRoundResearchChunksRef.current,
+              }),
+            );
+            setConversationArtifactLinks((previous) => [...previous, created.link]);
+          } catch (artifactError) {
+            setError(artifactError instanceof Error
+              ? `研究报告已生成，但保存为作品失败：${artifactError.message}`
+              : '研究报告已生成，但保存为作品失败。');
+          }
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : '请求失败');
       } finally {
@@ -1826,6 +2473,7 @@ export default function ChatInterface() {
         }, {
           sessionId: requestSessionId,
           runtimeSettings,
+          omniTurnContext,
         });
       } catch (err) {
         setError(err instanceof Error ? err.message : '请求失败');
@@ -1867,6 +2515,7 @@ export default function ChatInterface() {
           discussionRounds,
           sessionId: requestSessionId,
           runtimeSettings,
+          omniTurnContext,
         });
       } catch (err) {
         setError(err instanceof Error ? err.message : '请求失败');
@@ -1879,6 +2528,7 @@ export default function ChatInterface() {
       try {
         let streamedAnswer = '';
         let streamedReasoning = '';
+        let completedAnswer = '';
         await sendChatMessage(userMessage, mode, {
           onNode: handleNodeEvent,
           onReasoning: (event) => {
@@ -1897,13 +2547,13 @@ export default function ChatInterface() {
               const next = [...prev];
               const last = next[next.length - 1];
               if (last?.role === 'assistant') next[next.length - 1] = { ...last, content: streamedAnswer };
-              else next.push({ role: 'assistant', content: streamedAnswer });
+              else next.push({ id: assistantMessageId, role: 'assistant', content: streamedAnswer });
               return next;
             });
           },
           onWebDocs: (event) => {
             // 写入 ref + 同步到最后一条 assistant 消息；右抽屉已移除
-            perRoundWebDocsRef.current = event.docs ?? [];
+            perRoundWebDocsRef.current = mergeWebDocs(perRoundWebDocsRef.current, event.docs ?? []);
             setWebDocs(perRoundWebDocsRef.current);
             syncRoundStateToLastMessage();
           },
@@ -1948,9 +2598,11 @@ export default function ChatInterface() {
             setMatchedSkills((prev) => [...prev, event]);
           },
           onDone: (event) => {
+            completedAnswer = event.answer || streamedAnswer;
             if (!streamedAnswer) {
               // 追加答案时同步挂入本轮累积的所有状态
               setMessages((prev) => [...prev, {
+                id: assistantMessageId,
                 role: 'assistant',
                 content: event.answer,
                 nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : undefined,
@@ -1969,7 +2621,7 @@ export default function ChatInterface() {
               answerPacing.commit(event.answer);
             }
             if (event.web_docs && event.web_docs.length > 0) {
-              perRoundWebDocsRef.current = event.web_docs;
+              perRoundWebDocsRef.current = mergeWebDocs(perRoundWebDocsRef.current, event.web_docs);
               setWebDocs(perRoundWebDocsRef.current);
               syncRoundStateToLastMessage();
             }
@@ -1981,7 +2633,29 @@ export default function ChatInterface() {
           sessionId: requestSessionId,
           runtimeSettings,
           attachments: requestAttachments,
+          omniTurnContext,
         });
+        const documentContent = completedAnswer || streamedAnswer;
+        if (shouldCreateWritingArtifact(preferredCapability, userMessage, documentContent)) {
+          try {
+            const created = await createConversationArtifact(
+              requestSessionId,
+              createWritingArtifactInput({
+                messageId: assistantMessageId,
+                content: documentContent,
+                prompt: userMessage,
+              }),
+            );
+            setConversationArtifactLinks((previous) => [
+              ...previous.filter((link) => link.id !== created.link.id),
+              created.link,
+            ]);
+          } catch (artifactError) {
+            setError(artifactError instanceof Error
+              ? `回答已生成，但保存为作品失败：${artifactError.message}`
+              : '回答已生成，但保存为作品失败。');
+          }
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : '请求失败');
       } finally {
@@ -2011,10 +2685,10 @@ export default function ChatInterface() {
     if (isLoading) return;
     try {
       await persistCurrentSession();
-      // New conversations always start in the standard chat surface. Code mode
+      // New conversations always start in the all-purpose chat surface. Code mode
       // remains available by explicitly switching modes after the draft opens;
       // this prevents a Code draft from rendering without its workspace shell.
-      startDraftSession('standard');
+      startDraftSession('omni');
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -2026,6 +2700,7 @@ export default function ChatInterface() {
 
   const handleModeChange = async (nextMode: ModeType) => {
     if (nextMode === mode || isLoading) return;
+    if (nextMode === 'omni') setPreferredCapability('omni');
     if (nextMode === 'code') {
       setIsHistoryOpen(false);
       changeHistoryCollapsed(true);
@@ -2072,7 +2747,7 @@ export default function ChatInterface() {
         if (remaining[0]) {
           await openSession(remaining[0]);
         } else {
-          startDraftSession('standard');
+          startDraftSession('omni');
         }
       }
     } catch (requestError) {
@@ -2107,7 +2782,7 @@ export default function ChatInterface() {
       titleRequestedRef.current.clear();
       setSessions([]);
       localStorage.removeItem('activeSessionId');
-      startDraftSession('standard');
+      startDraftSession('omni');
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -2312,9 +2987,13 @@ export default function ChatInterface() {
     : isPlanMode && messages.length > 0
       ? ({ '--plan-pane-width': researchPaneWidth } as CSSProperties)
     : undefined;
+  const workspaceStyle = {
+    ...(researchWorkspaceStyle ?? {}),
+    '--artifact-panel-width': `${artifactPanelWidth}vw`,
+  } as CSSProperties;
 
   return (
-    <div style={researchWorkspaceStyle} className={`bg-gradient-to-b from-slate-50 to-slate-100 ${
+    <div style={workspaceStyle} className={`bg-gradient-to-b from-slate-50 to-slate-100 ${
       mode === 'code' ? 'h-screen overflow-hidden' : 'min-h-screen'
     }`}>
       <SessionSidebar
@@ -2405,10 +3084,17 @@ export default function ChatInterface() {
             initialDocument={writingSessionRestore?.document}
             initialThesisOutline={writingSessionRestore?.thesisOutline}
             onWorkspaceChange={setWritingWorkspaceState}
-            onBack={() => { void (async () => { await persistCurrentSession(); setView('chat'); startDraftSession('standard'); })(); }}
-            onSubmit={submitWritingDraft}
-            onEnsureWritingSession={ensureWritingSession}
-            onThesisBodyRequest={handleThesisBodyRequest}
+            onBack={() => { void (writingArtifactBridge
+              ? closeWritingArtifactWorkspace()
+              : (async () => { await persistCurrentSession(); setView('chat'); startDraftSession('omni'); })()); }}
+            onSubmit={writingArtifactBridge ? submitWritingArtifactRevision : submitWritingDraft}
+            onEnsureWritingSession={writingArtifactBridge
+              ? async () => {
+                  if (!activeSessionId) throw new Error('原会话不存在，无法继续编辑。');
+                  return activeSessionId;
+                }
+              : ensureWritingSession}
+            onThesisBodyRequest={writingArtifactBridge ? undefined : handleThesisBodyRequest}
           />
         </div>
       )}
@@ -2416,10 +3102,20 @@ export default function ChatInterface() {
         <ImagePlazaWorkspace initialPrompt={input} onBack={() => setView('chat')} />
       )}
       {view === 'image-studio' && (
-        <ImageStudioWorkspace initialPrompt={input} onBack={() => setView('chat')} />
+        <ImageStudioWorkspace
+          initialPrompt={imageArtifactBridge?.prompt ?? input}
+          initialReferenceImage={imageArtifactBridge?.referenceImage ?? null}
+          onBatchGenerated={imageArtifactBridge ? handleImageArtifactBatch : undefined}
+          onBack={() => { setImageArtifactBridge(null); setView('chat'); }}
+        />
       )}
       {view === 'video-studio' && (
-        <VideoStudioWorkspace initialPrompt={input} onBack={() => setView('chat')} />
+        <VideoStudioWorkspace
+          initialPrompt={videoArtifactBridge?.task.prompt ?? input}
+          initialTask={videoArtifactBridge?.task ?? null}
+          onTaskSucceeded={videoArtifactBridge ? handleVideoArtifactTask : undefined}
+          onBack={() => { setVideoArtifactBridge(null); setView('chat'); }}
+        />
       )}
       {view === 'video-market' && (
         <VideoMarketWorkspace initialPrompt={input} onBack={() => setView('chat')} onCreate={(prompt) => openVideoWorkspace(prompt ?? '')} />
@@ -2456,7 +3152,7 @@ export default function ChatInterface() {
       />
       <HookMonitorPanel events={agentTrace.hookEvents ?? []} />
       <ChatNodeNavigator nodes={chatNodes} isSidebarOpen={false} />
-      <div className={`${isHistoryCollapsed ? 'lg:pl-14' : 'lg:pl-72'} ${mode === 'research' && !isNewConversation ? 'xl:mr-[var(--research-pane-width)]' : ''} ${isPlanMode && !isNewConversation ? 'xl:mr-[var(--plan-pane-width)]' : ''} ${
+      <div className={`${isHistoryCollapsed ? 'lg:pl-14' : 'lg:pl-72'} ${mode === 'research' && !isNewConversation ? 'xl:mr-[var(--research-pane-width)]' : ''} ${isPlanMode && !isNewConversation ? 'xl:mr-[var(--plan-pane-width)]' : ''} ${artifactPanelState.status !== 'closed' && artifactPanelState.displayMode === 'split' ? 'xl:mr-[var(--artifact-panel-width)]' : ''} ${
         mode === 'code' ? 'h-screen overflow-hidden' : ''
       }`}>
         <div className={`p-6 transition-all duration-300 ${
@@ -2502,6 +3198,21 @@ export default function ChatInterface() {
           <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4 text-center">
             <span className="text-red-700">{error}</span>
           </div>
+        )}
+
+        {isNewConversation && preferredCapability !== 'omni' && preferredCapability !== 'music' && (
+          <OmniModeShowcase
+            pageOnly
+            capability={preferredCapability}
+            initialPrompt={input}
+            onBack={() => setPreferredCapability('omni')}
+            onOpenWritingWorkspace={preferredCapability === 'writing' ? () => void openWritingWorkspace() : undefined}
+            onCancel={() => setPreferredCapability('omni')}
+            onUsePrompt={(prompt) => {
+              setInput(prompt);
+              inputRef.current?.focus();
+            }}
+          />
         )}
 
         {/* Chat Messages */}
@@ -2574,7 +3285,7 @@ export default function ChatInterface() {
             </>
           )}
 
-          {isNewConversation && !codeWorkbenchDraft && !isLoading && (
+          {isNewConversation && preferredCapability === 'omni' && !codeWorkbenchDraft && !isLoading && (
             <div className="flex min-h-[34vh] flex-col items-center justify-end px-4 pb-8 text-center">
               <span className="mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-lg shadow-blue-600/20" aria-hidden="true">
                 <Sparkles size={24} />
@@ -2614,9 +3325,28 @@ export default function ChatInterface() {
                           ? buildHistoricalResearchChain(msg.researchChunks?.length ?? msg.webDocs?.length ?? 0)
                           : []));
               const hasProgress = msgNodeProgress.length > 0;
-              const msgWebDocs = msg.webDocs?.length ? msg.webDocs : undefined;
-              const msgResearchChunks = msg.researchChunks?.length ? msg.researchChunks : undefined;
-              const showPanel = isAssistant && hasProgress;
+              // While the response is still streaming, the latest docs live in the
+              // per-round refs until the assistant snapshot catches up. Pass that
+              // live state through so the header count and source list appear
+              // immediately instead of only after a refresh.
+              const msgWebDocs = msg.webDocs?.length
+                ? msg.webDocs
+                : (isAssistant && isLoading && perRoundWebDocsRef.current.length > 0
+                    ? perRoundWebDocsRef.current
+                    : undefined);
+              const msgResearchChunks = msg.researchChunks?.length
+                ? msg.researchChunks
+                : (isAssistant && isLoading && perRoundResearchChunksRef.current.length > 0
+                    ? perRoundResearchChunksRef.current
+                    : undefined);
+              const liveReasoning = reasoningSteps.join('\n\n');
+              const liveReasoningDisplay = index === visibleMessages.length - 1 && (reasonPacingActive || reasonPacedLength > 0)
+                ? liveReasoning.slice(0, reasonPacedLength)
+                : liveReasoning;
+              const msgReasoningText = isAssistant
+                ? (msg.reasoning || (index === visibleMessages.length - 1 ? liveReasoningDisplay : ''))
+                : '';
+              const showPanel = isAssistant && (hasProgress || Boolean(msgReasoningText.trim()));
 
               return (
               <div
@@ -2648,6 +3378,7 @@ export default function ChatInterface() {
                       webDocs={msgWebDocs}
                       researchChunks={msgResearchChunks}
                       researchReasoningFallback={msg.researchReasoning ?? msg.reasoning ?? undefined}
+                      reasoningText={msgReasoningText}
                     />
                   </div>
                 )}
@@ -2753,6 +3484,9 @@ export default function ChatInterface() {
                         : msg.content
                     }
                   />
+                  {msg.id && (artifactLinksByMessageId.get(msg.id)?.length ?? 0) > 0 && (
+                    <ArtifactMessageCards conversationId={activeSessionId ?? ''} links={artifactLinksByMessageId.get(msg.id) ?? []} onOpen={openArtifactPanel} />
+                  )}
                   {isAssistant && answerPacingActive && index === visibleMessages.length - 1 && (
                     <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-blue-600 align-middle" aria-hidden="true" />
                   )}
@@ -2994,7 +3728,7 @@ export default function ChatInterface() {
           </div>
 
           {/* Reasoning Display (Deep Mode) */}
-          {reasoningSteps.length > 0 && (
+          {false && reasoningSteps.length > 0 && (
             <div className="mt-6 border-t border-gray-200 pt-4">
               <h3 className="text-sm font-medium text-purple-600 mb-3 flex items-center gap-2">
                 <span>🧠</span> 深度思考过程
@@ -3023,64 +3757,41 @@ export default function ChatInterface() {
         {(mode !== 'code' || (isNewConversation && !codeWorkbenchDraft)) && <div
           className={`fixed left-0 z-40 bg-gradient-to-t from-slate-100 via-slate-50/95 to-transparent pt-8 transition-[left,right,top,bottom] duration-300 ${
             isHistoryCollapsed ? 'lg:left-14' : 'lg:left-72'
-          } ${isNewConversation ? 'bottom-auto top-[43%]' : 'bottom-0 top-auto'} right-0 ${mode === 'research' && !isNewConversation ? 'xl:right-[var(--research-pane-width)]' : ''} ${isPlanMode && !isNewConversation ? 'xl:right-[var(--plan-pane-width)]' : ''}`}
+          } ${isNewConversation ? (preferredCapability === 'omni' ? 'bottom-auto top-[43%]' : 'bottom-auto top-[27%]') : 'bottom-0 top-auto'} right-0 ${mode === 'research' && !isNewConversation ? 'xl:right-[var(--research-pane-width)]' : ''} ${isPlanMode && !isNewConversation ? 'xl:right-[var(--plan-pane-width)]' : ''} ${artifactPanelState.status !== 'closed' && artifactPanelState.displayMode === 'split' ? 'xl:right-[var(--artifact-panel-width)]' : ''}`}
         >
-          <div className="mx-auto max-w-4xl p-3 sm:p-4">
+          <div className="mx-auto max-w-6xl p-3 sm:p-4">
             <div className="rounded-2xl border border-slate-200/90 bg-white p-2.5 shadow-[0_12px_40px_rgba(15,23,42,0.10)]">
           <form onSubmit={handleSubmit} className="flex flex-col gap-2">
-            <div className="flex flex-wrap items-center justify-between gap-2 px-1">
-            <ModeSelector
-              value={mode}
-              disabled={isLoading || !isSessionReady}
-              onChange={(nextMode) => void handleModeChange(nextMode)}
-            />
-            <div className="flex min-w-0 items-center gap-2">
-              <ModelQuickSwitcher compact disabled={isLoading || !isSessionReady}/>
-              <button type="button" onClick={() => setIsRuntimeSettingsOpen(true)} className="inline-flex h-9 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-800">
-                <SlidersHorizontal size={14}/> 参数
-              </button>
-              {currentModelSettings?.provider === 'qwen' && !isPlanMode && (
-                <QwenSearchOptionsPopover
-                  options={qwenNativeSearchOptions}
-                  onChange={setQwenNativeSearchOptions}
-                  onReset={() => setQwenNativeSearchOptions(DEFAULT_QWEN_NATIVE_SEARCH_OPTIONS)}
-                  modelId={currentModelSettings?.model_id}
-                />
-              )}
-              {(currentModelSettings?.provider === 'deepseek' || isPlanMode) && (
-                <FirecrawlSearchOptionsPopover
-                  options={webSearchOptions}
-                  onChange={setWebSearchOptions}
-                  onReset={() => setWebSearchOptions({ ...DEFAULT_WEB_SEARCH_OPTIONS })}
-                />
-              )}
-              {mode === 'research' && (
-                <div className="flex items-center gap-0.5 rounded-lg bg-slate-100 p-0.5">
-                  {(currentModelSettings?.provider === 'qwen') && <button type="button" onClick={() => setResearchEngine('qwen')} className={`rounded-md px-2 py-1 text-[10px] font-medium ${researchEngine === 'qwen' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>千问原生</button>}
-                  <button type="button" onClick={() => setResearchEngine('firecrawl')} className={`rounded-md px-2 py-1 text-[10px] font-medium ${researchEngine === 'firecrawl' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>Firecrawl</button>
-                  <button type="button" onClick={() => setResearchEngine('self-built')} className={`rounded-md px-2 py-1 text-[10px] font-medium ${researchEngine === 'self-built' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>自研引擎</button>
-                </div>
-              )}
-              {mode === 'research' && researchEngine === 'qwen' && <label className="flex items-center gap-1 text-[11px] text-slate-500"><input type="checkbox" checked={enableFeedback} onChange={(event) => setEnableFeedback(event.target.checked)} className="rounded border-slate-300 text-blue-600"/>反问确认</label>}
-            </div>
-            </div>
-
             {mode === 'research' && researchEngine === 'firecrawl' && <div className="flex justify-end px-1"><ResearchOptionsPopover options={researchOptions} onChange={setResearchOptions} onReset={() => setResearchOptions({ ...DEFAULT_RESEARCH_OPTIONS })}/></div>}
-            {attachments.length > 0 && <div className="flex flex-wrap gap-2 px-1">{attachments.map((item, index) => <span key={`${item.url.slice(0,30)}-${index}`} className="inline-flex max-w-48 items-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs text-sky-800"><Paperclip size={13}/><span className="truncate">{item.name || item.type}</span><button type="button" aria-label={`移除 ${item.name || '附件'}`} onClick={()=>setAttachments((current)=>current.filter((_,i)=>i!==index))}><X size={13}/></button></span>)}</div>}
-
-            {/* Input Row */}
-            <div className="relative flex items-center gap-2" ref={inputContainerRef}>
-              <div className="relative shrink-0">
-                <button type="button" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentMenuOpen} onClick={() => setAttachmentMenuOpen((open) => !open)} className="flex h-10 w-10 items-center justify-center rounded-full text-slate-600 hover:bg-slate-100 hover:text-slate-950">
-                  <Plus size={21}/>
-                </button>
-                {attachmentMenuOpen && <div role="menu" className="absolute bottom-full left-0 z-[70] mb-2 w-40 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
-                  <button type="button" role="menuitem" onClick={() => openAttachmentPicker('image_url')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"><ImageIcon size={16}/>上传图片</button>
-                  <button type="button" role="menuitem" onClick={() => openAttachmentPicker('video_url')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"><Video size={16}/>上传视频</button>
-                  <button type="button" role="menuitem" onClick={() => openAttachmentPicker('file_url')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"><FileText size={16}/>上传文件</button>
-                </div>}
-                <input ref={attachmentInputRef} type="file" className="hidden" onChange={(e)=>{addLocalAttachment(e.target.files?.[0]); e.currentTarget.value='';}}/>
+            {mode === 'research' && <div className="flex items-center justify-end gap-2 px-1">
+              <div className="flex items-center gap-0.5 rounded-lg bg-slate-100 p-0.5">
+                {currentModelSettings?.provider === 'qwen' && <button type="button" onClick={() => setResearchEngine('qwen')} className={`rounded-md px-2 py-1 text-[10px] font-medium ${researchEngine === 'qwen' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>千问原生</button>}
+                {currentModelSettings?.provider === 'minimax' && <button type="button" onClick={() => setResearchEngine('minimax')} className={`rounded-md px-2 py-1 text-[10px] font-medium ${researchEngine === 'minimax' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>MiniMax 原生</button>}
+                <button type="button" onClick={() => setResearchEngine('firecrawl')} className={`rounded-md px-2 py-1 text-[10px] font-medium ${researchEngine === 'firecrawl' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>Firecrawl</button>
+                <button type="button" onClick={() => setResearchEngine('self-built')} className={`rounded-md px-2 py-1 text-[10px] font-medium ${researchEngine === 'self-built' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500'}`}>自研引擎</button>
               </div>
+              {researchEngine === 'qwen' && <label className="flex items-center gap-1 text-[11px] text-slate-500"><input type="checkbox" checked={enableFeedback} onChange={(event) => setEnableFeedback(event.target.checked)} className="rounded border-slate-300 text-blue-600"/>反问确认</label>}
+            </div>}
+            {attachments.length > 0 && <div className="flex flex-wrap gap-2 px-1">{attachments.map((item, index) => <span key={`${item.url.slice(0,30)}-${index}`} className="inline-flex max-w-48 items-center gap-1.5 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs text-sky-800"><Paperclip size={13}/><span className="truncate">{item.name || item.type}</span><button type="button" aria-label={`移除 ${item.name || '附件'}`} onClick={()=>setAttachments((current)=>current.filter((_,i)=>i!==index))}><X size={13}/></button></span>)}</div>}
+            <ArtifactReferencePicker conversationId={activeSessionId === LEGACY_GLOBAL_SESSION_ID ? null : activeSessionId} selected={mentionedArtifactSummaries} onChange={setMentionedArtifactSummaries} />
+            {preferredCapability === 'video' && <div className="rounded-xl border border-transparent px-1 pb-1">
+              <div className="flex items-start gap-3">
+                <button type="button" aria-label="添加视频参考素材" onClick={() => setAttachmentMenuOpen(true)} className="flex h-20 w-20 shrink-0 flex-col items-center justify-center gap-1 rounded-2xl border border-dashed border-slate-300 bg-slate-50 text-sm text-slate-500 transition hover:border-slate-400 hover:bg-slate-100">
+                  <Plus size={21} /><span>参考</span>
+                </button>
+                <textarea
+                  value={input}
+                  onChange={handleInputChange}
+                  onKeyDown={handleInputKeyDown}
+                  placeholder="上传图片、视频进行参考生成，使用 @ 快速调用已上传素材"
+                  disabled={isLoading}
+                  rows={3}
+                  className="min-h-20 flex-1 resize-none border-0 bg-transparent px-1 py-1 text-[15px] leading-7 text-slate-900 outline-none placeholder:text-slate-400 disabled:bg-slate-100"
+                />
+              </div>
+            </div>}
+            {/* Input Row */}
+            <div className={`relative ${preferredCapability === 'video' ? 'hidden' : ''}`} ref={inputContainerRef}>
               {showSkillPicker && filteredSkills.length > 0 && (
                 <>
                   <div className="absolute bottom-full left-0 mb-2 w-80 max-h-80 overflow-y-auto bg-white dark:bg-slate-800 rounded-xl shadow-xl border border-slate-200 dark:border-slate-700 py-1 z-50">
@@ -3155,7 +3866,7 @@ export default function ChatInterface() {
                   }
                   disabled={isLoading}
                   rows={1}
-                  className="min-h-11 max-h-[220px] w-full resize-none rounded-xl border-0 bg-slate-50 px-4 py-2.5 text-[15px] leading-6 text-slate-900 outline-none ring-1 ring-inset ring-slate-200 placeholder:text-slate-400 focus:bg-white focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100"
+                  className="min-h-20 max-h-[220px] w-full resize-none rounded-xl border-0 bg-transparent px-4 py-3 text-[15px] leading-6 text-slate-900 outline-none placeholder:text-slate-400 disabled:bg-slate-100"
                 />
                 {/* 匹配Skill蓝色高亮（简单实现） */}
                 {matchedSkill && (() => {
@@ -3181,20 +3892,49 @@ export default function ChatInterface() {
                   </div>
                 )}
               </div>
-              <div className="relative shrink-0">
+            </div>
+
+            <OmniComposerToolbar
+              preferredCapability={preferredCapability}
+              webSearch={webSearch}
+              deepThinking={deepThinking}
+              disabled={isLoading || !isSessionReady}
+              onCapabilityChange={(capability) => {
+                setPreferredCapability((current) => {
+                  const next = selectPreferredCapability(current, capability);
+                  if (next === 'omni') setVideoMode('text_to_video');
+                  return next;
+                });
+              }}
+              onWebSearchChange={() => changeWebSearch(nextCapabilityMode(webSearch))}
+              onDeepThinkingChange={() => changeDeepThinking(nextCapabilityMode(deepThinking))}
+              modeControl={<ModeSelector value={mode} compact disabled={isLoading || !isSessionReady} menuPlacement="bottom" onChange={(nextMode) => void handleModeChange(nextMode)} />}
+              attachmentControl={<div className="relative">
+                <button type="button" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentMenuOpen} onClick={() => setAttachmentMenuOpen((open) => !open)} className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 hover:text-slate-950">
+                  <Plus size={20}/>
+                </button>
+                {attachmentMenuOpen && <div role="menu" className="absolute bottom-full left-0 z-[70] mb-2 w-40 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
+                  <button type="button" role="menuitem" onClick={() => openAttachmentPicker('image_url')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"><ImageIcon size={16}/>上传图片</button>
+                  <button type="button" role="menuitem" onClick={() => openAttachmentPicker('video_url')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"><Video size={16}/>上传视频</button>
+                  <button type="button" role="menuitem" onClick={() => openAttachmentPicker('file_url')} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-slate-700 hover:bg-slate-100"><FileText size={16}/>上传文件</button>
+                </div>}
+                <input ref={attachmentInputRef} type="file" className="hidden" onChange={(e)=>{addLocalAttachment(e.target.files?.[0]); e.currentTarget.value='';}}/>
+              </div>}
+              moreControl={<div className="relative shrink-0">
                 <button
                   type="button"
                   aria-label="更多工具"
                   aria-haspopup="menu"
                   aria-expanded={moreToolsOpen}
                   onClick={() => setMoreToolsOpen((open) => !open)}
-                  className="inline-flex h-10 items-center gap-1.5 rounded-full px-2.5 text-sm text-slate-600 transition hover:bg-slate-100 hover:text-slate-950"
+                  className="inline-flex h-9 items-center gap-1 rounded-lg px-2 text-xs text-slate-600 transition hover:bg-slate-100 hover:text-slate-950"
                 >
                   <Menu size={18}/><span className="hidden sm:inline">更多</span>
                 </button>
                 {moreToolsOpen && (
-                  <div role="menu" aria-label="更多工具列表" className="absolute bottom-full right-0 z-[80] mb-2 max-h-[min(420px,60vh)] w-48 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_18px_50px_rgba(15,23,42,0.16)]">
+                  <div role="menu" aria-label="更多工具列表" className="absolute right-0 top-full z-[80] mt-2 max-h-[min(420px,60vh)] w-48 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_18px_50px_rgba(15,23,42,0.16)]">
                     {[
+                      { label: '运行设置', icon: SlidersHorizontal },
                       { label: '代码', icon: Code2 },
                       { label: '翻译', icon: Languages },
                       { label: 'AI 写作', icon: WandSparkles },
@@ -3208,7 +3948,8 @@ export default function ChatInterface() {
                         type="button"
                         role="menuitem"
                         onClick={() => {
-                          setMoreToolsOpen(false);
+                           setMoreToolsOpen(false);
+                           if (label === '运行设置') setIsRuntimeSettingsOpen(true);
                           if (label.includes('生图')) openImagePlaza(input);
                           if (label.includes('视频')) openVideoMarket(input);
                           if (label === '代码') setView('code-showcase');
@@ -3223,10 +3964,12 @@ export default function ChatInterface() {
                     ))}
                   </div>
                 )}
-              </div>
-              <button
+              </div>}
+              modelControl={<ModelQuickSwitcher compact disabled={isLoading || !isSessionReady} preferredCapability={preferredCapability} imageModel={imageModel} videoModel={videoModel} onImageModelChange={setImageModel} onVideoModelChange={setVideoModel} videoMode={videoMode} videoParams={videoParams} onVideoParamsChange={setVideoParams}/>}
+              videoModeControl={<select aria-label="视频生成模式" value={videoMode} onChange={(event) => setVideoMode(event.target.value as 'text_to_video' | 'multi_image_to_video')} className="h-9 max-w-28 rounded-lg border-0 bg-transparent px-1.5 text-xs font-medium text-slate-600 outline-none"><option value="text_to_video">单镜头生成</option><option value="multi_image_to_video">多参考生成</option></select>}
+              sendControl={<button
                 type="submit"
-                disabled={isLoading || !input.trim()}
+                disabled={isLoading || !input.trim() || (preferredCapability === 'video' && videoMode === 'multi_image_to_video' && !attachments.some((item) => item.type === 'image_url'))}
                 aria-label="发送消息"
                 className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-white transition-all disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed ${
                   mode === 'web' ? 'bg-green-600 hover:bg-green-700' :
@@ -3250,8 +3993,8 @@ export default function ChatInterface() {
                     </span>
                   </div>
                 ) : <ArrowUp size={19} strokeWidth={2.4} />}
-              </button>
-            </div>
+              </button>}
+            />
 
             {/* Research Mode Tip */}
             {mode === 'research' && !isLoading && (
@@ -3300,6 +4043,24 @@ export default function ChatInterface() {
           sessionId={activeSessionId || undefined}
           onWidthChange={setResearchPaneWidthPx}
           onFiguresChange={handlePlanFiguresChange}
+        />
+      )}
+      {artifactPanelState.status !== 'closed' && (
+        <ArtifactPanel
+          state={artifactPanelState}
+          onLoaded={handleArtifactLoaded}
+          onClose={handleArtifactClose}
+          onDisplayModeChange={handleArtifactDisplayModeChange}
+          onOpenVersion={handleArtifactOpenVersion}
+          panelWidth={artifactPanelWidth}
+          onPanelWidthChange={handleArtifactPanelWidthChange}
+          onOpenProfessional={(artifact, version) => artifact.kind === 'image'
+            ? openImageArtifactWorkspace(artifact, version)
+            : artifact.kind === 'video'
+              ? openVideoArtifactWorkspace(artifact, version)
+              : artifact.kind === 'presentation'
+                ? openPptArtifactWorkspace(version)
+                : openWritingArtifactWorkspace(artifact, version)}
         />
       )}
 

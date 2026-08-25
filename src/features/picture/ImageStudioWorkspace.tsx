@@ -32,6 +32,7 @@ interface ImageStudioWorkspaceProps {
   initialPrompt?: string;
   onBack: () => void;
   initialReferenceImage?: { url: string; name?: string } | null;
+  onBatchGenerated?: (batch: ImageBatch) => Promise<void> | void;
 }
 
 interface ReferenceImage {
@@ -58,7 +59,7 @@ function modelLabel(model: ImageModelCapability | undefined) {
   return `${model.name} · ${model.provider}`;
 }
 
-export default function ImageStudioWorkspace({ initialPrompt = '', onBack, initialReferenceImage = null }: ImageStudioWorkspaceProps) {
+export default function ImageStudioWorkspace({ initialPrompt = '', onBack, initialReferenceImage = null, onBatchGenerated }: ImageStudioWorkspaceProps) {
   const [prompt, setPrompt] = useState(initialPrompt);
   const [models, setModels] = useState<ImageModelCapability[]>([]);
   const [director, setDirector] = useState<ImageDirectorResult | null>(null);
@@ -152,6 +153,7 @@ export default function ImageStudioWorkspace({ initialPrompt = '', onBack, initi
       const result = await createImageGeneration({ raw_prompt: prompt, ratio, count, model_mode: manualModel ? 'manual' : 'auto', model: manualModel || null, enhance: true, reference_image: referenceImageData });
       setBatch(result);
       setHistory((current) => [result, ...current.filter((item) => item.batch_id !== result.batch_id)]);
+      await onBatchGenerated?.(result);
       if (result.director) setDirector(result.director);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '生成失败，请检查图片模型配置');

@@ -77,15 +77,29 @@ export const useVisualWorkflowStore = create<VisualWorkflowState>((set, get) => 
     dirty: true,
   })),
   setViewport: (viewport) => set({ viewport, dirty: true }),
-  setNodeStatuses: (statuses, artifacts) => set((state) => ({
-    nodes: state.nodes.map((node) => {
+  setNodeStatuses: (statuses, artifacts) => set((state) => {
+    let changedPersistedOutput = false;
+    const nodes = state.nodes.map((node) => {
       if (!statuses[node.id]) return node;
       const nextArtifacts = artifacts && Object.prototype.hasOwnProperty.call(artifacts, node.id)
         ? artifacts[node.id]
         : node.data.runtimeArtifacts;
-      return { ...node, data: { ...node.data, status: statuses[node.id], runtimeArtifacts: nextArtifacts } };
-    }),
-  })),
+      const shouldPersistOutput = statuses[node.id] === 'success' && Array.isArray(nextArtifacts) && nextArtifacts.length > 0;
+      const previousPersisted = node.data.config.outputArtifacts;
+      const outputChanged = shouldPersistOutput && JSON.stringify(previousPersisted) !== JSON.stringify(nextArtifacts);
+      if (outputChanged) changedPersistedOutput = true;
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          status: statuses[node.id],
+          runtimeArtifacts: nextArtifacts,
+          ...(outputChanged ? { config: { ...node.data.config, outputArtifacts: nextArtifacts } } : {}),
+        },
+      };
+    });
+    return { nodes, dirty: state.dirty || changedPersistedOutput };
+  }),
   selectNode: (selectedNodeId) => set({ selectedNodeId }),
   undo: () => set((state) => {
     const previous = state.undoStack[state.undoStack.length - 1];

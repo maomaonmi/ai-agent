@@ -3,8 +3,10 @@
 import { MODE_OPTIONS } from './ModeSelector';
 import { SessionSummary } from '../lib/api';
 import type { PptHistoryRun } from '../features/ppt/api';
-import { Activity, Check, ChevronRight, ChevronUp, Film, FolderInput, LogOut, MoreHorizontal, Pencil, Pin, Presentation, Puzzle, Settings, Share2, Trash2, UserRound, Workflow } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { Activity, Check, ChevronDown, ChevronRight, ChevronUp, Film, Folder, FolderInput, FolderPlus, LogOut, MoreHorizontal, Pencil, Pin, Presentation, Puzzle, Settings, Share2, Trash2, UserRound, Workflow } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { assignConversationToProject, createProject, listProjects, removeConversationFromProject, type ProjectWithConversations } from '../features/projects/api';
+import { buildProjectConversationTree } from '../features/projects/projectTree';
 
 interface SessionSidebarProps {
   sessions: SessionSummary[];
@@ -84,6 +86,10 @@ export default function SessionSidebar({
   const [pinnedSessionIds, setPinnedSessionIds] = useState<Set<string>>(new Set());
   const [sessionProjects, setSessionProjects] = useState<Record<string, string>>({});
   const [projectNames, setProjectNames] = useState<string[]>([]);
+  const [projects, setProjects] = useState<ProjectWithConversations[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
+  const [projectsError, setProjectsError] = useState('');
+  const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(new Set());
   const [shareNotice, setShareNotice] = useState<string | null>(null);
   const [pptPinnedIds, setPptPinnedIds] = useState<Set<string>>(new Set());
   const [pptTitleOverrides, setPptTitleOverrides] = useState<Record<string, string>>({});
@@ -111,6 +117,22 @@ export default function SessionSidebar({
     storageHydratedRef.current = true;
     skipPersistenceRef.current = true;
   }, []);
+  const refreshProjects = useCallback(async () => {
+    setProjectsLoading(true);
+    try {
+      const response = await listProjects();
+      setProjects(response.projects);
+      setProjectsError('');
+      setExpandedProjectIds((current) => current.size > 0
+        ? current
+        : new Set(response.projects.map((project) => project.id)));
+    } catch (cause) {
+      setProjectsError(cause instanceof Error ? cause.message : '项目加载失败');
+    } finally {
+      setProjectsLoading(false);
+    }
+  }, []);
+  useEffect(() => { void refreshProjects(); }, [refreshProjects]);
   useEffect(() => {
     if (!storageHydratedRef.current) return;
     if (skipPersistenceRef.current) {
@@ -153,6 +175,7 @@ export default function SessionSidebar({
     const pinDifference = Number(pinnedSessionIds.has(right.session_id)) - Number(pinnedSessionIds.has(left.session_id));
     return pinDifference || right.updated_at - left.updated_at;
   });
+  const projectTree = buildProjectConversationTree(projects, orderedSessions);
   const closeSessionMenu = () => {
     setOpenSessionMenuId(null);
     setOpenPptMenuId(null);
@@ -197,6 +220,40 @@ export default function SessionSidebar({
     if (!project) return;
     setProjectNames((current) => current.includes(project) ? current : [...current, project]);
     moveToProject(sessionId, project);
+  };
+  const createServerProject = async (sessionId?: string) => {
+    const name = window.prompt('新建项目', '')?.trim();
+    if (!name) return;
+    try {
+      const project = await createProject({ name });
+      if (sessionId) {
+        await assignConversationToProject(project.id, sessionId);
+        await refreshProjects();
+      } else {
+        setProjects((current) => [project, ...current]);
+      }
+      setExpandedProjectIds((current) => new Set(current).add(project.id));
+      setProjectsError('');
+    } catch (cause) {
+      setProjectsError(cause instanceof Error ? cause.message : '项目创建失败');
+    }
+  };
+  const moveConversationToServerProject = async (sessionId: string, projectId: string) => {
+    try {
+      await assignConversationToProject(projectId, sessionId);
+      await refreshProjects();
+      closeSessionMenu();
+    } catch (cause) {
+      setProjectsError(cause instanceof Error ? cause.message : '移动会话失败');
+    }
+  };
+  const removeConversationFromServerProject = async (sessionId: string, projectId: string) => {
+    try {
+      await removeConversationFromProject(projectId, sessionId);
+      await refreshProjects();
+    } catch (cause) {
+      setProjectsError(cause instanceof Error ? cause.message : '移出项目失败');
+    }
   };
   const visiblePptHistory = pptHistory.filter((run) => !hiddenPptIds.has(run.runId));
   const orderedPptHistory = [...visiblePptHistory].sort((left, right) => {
@@ -334,6 +391,38 @@ export default function SessionSidebar({
         </div>
 
         <nav className="min-h-0 flex-1 overflow-y-auto p-2">
+          <section aria-labelledby="project-heading" className="mb-3 border-b border-slate-100 pb-3">
+            <div className="flex items-center justify-between px-3 py-2">
+              <h3 id="project-heading" className="text-xs font-semibold text-slate-700">项目</h3>
+              <button type="button" onClick={() => void createServerProject()} className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-slate-500 hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400">
+                <FolderPlus size={14} /><span>新建项目</span>
+              </button>
+            </div>
+            {projectsLoading ? (
+              <div role="status" aria-label="正在加载项目" className="space-y-2 px-3 py-2"><div className="h-9 animate-pulse rounded-lg bg-slate-100" /><div className="h-9 animate-pulse rounded-lg bg-slate-100" /></div>
+            ) : projectsError ? (
+              <div className="px-3 py-2 text-xs text-rose-600"><p>{projectsError}</p><button type="button" onClick={() => void refreshProjects()} className="mt-1 font-medium underline">重试</button></div>
+            ) : projects.length === 0 ? (
+              <p className="px-3 py-3 text-xs text-slate-400">还没有项目，可随时把普通对话整理进来。</p>
+            ) : (
+              <ul className="space-y-1" aria-label="项目会话列表">
+                {projectTree.groups.map(({ project, conversations }) => {
+                  const expanded = expandedProjectIds.has(project.id);
+                  return <li key={project.id}>
+                    <button type="button" aria-expanded={expanded} onClick={() => setExpandedProjectIds((current) => { const next = new Set(current); if (next.has(project.id)) next.delete(project.id); else next.add(project.id); return next; })} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100">
+                      {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}<Folder size={15} className="text-slate-500" /><span className="min-w-0 flex-1 truncate">{project.name}</span><span className="text-[10px] font-normal text-slate-400">{conversations.length}</span>
+                    </button>
+                    {expanded && <ul className="ml-7 space-y-0.5 border-l border-slate-200 pl-2">
+                      {conversations.length === 0 ? <li className="px-2 py-2 text-xs text-slate-400">暂无会话</li> : conversations.map((session) => <li key={session.session_id} className="group flex items-center rounded-lg hover:bg-slate-100">
+                        <button type="button" onClick={() => onSelect(session)} className={`min-w-0 flex-1 px-2 py-2 text-left text-xs ${session.session_id === activeSessionId ? 'font-semibold text-slate-950' : 'text-slate-600'}`}><span className="block truncate">{session.title}</span></button>
+                        <button type="button" aria-label={`将“${session.title}”移出项目`} title="移出项目" onClick={() => void removeConversationFromServerProject(session.session_id, project.id)} className="mr-1 flex h-7 w-7 items-center justify-center rounded-md text-slate-400 opacity-0 hover:bg-white hover:text-slate-700 focus-visible:opacity-100 group-hover:opacity-100"><FolderInput size={14} /></button>
+                      </li>)}
+                    </ul>}
+                  </li>;
+                })}
+              </ul>
+            )}
+          </section>
           <section ref={pptMenuRef} aria-labelledby="ppt-history-heading" className="mb-3 border-b border-slate-100 pb-3">
             <div className="flex items-center justify-between px-3 py-2">
               <h3 id="ppt-history-heading" className="text-xs font-semibold text-slate-700">PPT 历史记录</h3>
@@ -420,16 +509,15 @@ export default function SessionSidebar({
               </ul>
             )}
           </section>
-          {sessions.length === 0 ? (
+          {projectTree.unassigned.length === 0 ? (
             <div className="px-3 py-10 text-center text-sm text-slate-400">
-              暂无历史会话
+              暂无未归类会话
             </div>
           ) : (
             <ul ref={sessionMenuRef} className="space-y-1">
-              {orderedSessions.map((session) => {
+              {projectTree.unassigned.map((session) => {
                 const active = session.session_id === activeSessionId;
                 const pinned = pinnedSessionIds.has(session.session_id);
-                const project = sessionProjects[session.session_id];
                 const menuOpen = openSessionMenuId === session.session_id;
                 return (
                   <li key={session.session_id} className="relative">
@@ -447,7 +535,7 @@ export default function SessionSidebar({
                           {session.title}
                         </span>
                         <span className="mt-0.5 block truncate text-xs text-slate-500">
-                          {modeLabel(session.mode)}{project ? ` · ${project}` : ''}
+                          {modeLabel(session.mode)}
                         </span>
                       </button>
                       <button
@@ -481,9 +569,8 @@ export default function SessionSidebar({
                         </button>
                         {projectMenuSessionId === session.session_id && (
                           <div className="mt-1 border-t border-slate-100 pt-1" role="menu" aria-label="选择项目">
-                            <button type="button" role="menuitem" onClick={() => moveToProject(session.session_id, '未分类')} className="flex w-full items-center rounded-lg px-3 py-2 text-xs text-slate-600 hover:bg-slate-100">未分类{!project && <Check size={14} className="ml-auto text-violet-600" />}</button>
-                            {projectNames.map((name) => <button key={name} type="button" role="menuitem" onClick={() => moveToProject(session.session_id, name)} className="flex w-full items-center rounded-lg px-3 py-2 text-xs text-slate-600 hover:bg-slate-100">{name}{project === name && <Check size={14} className="ml-auto text-violet-600" />}</button>)}
-                            <button type="button" role="menuitem" onClick={() => createProjectFromMenu(session.session_id)} className="mt-1 flex w-full items-center rounded-lg border-t border-slate-100 px-3 py-2 text-xs font-medium text-violet-700 hover:bg-violet-50">＋ 新建项目</button>
+                            {projects.map((project) => <button key={project.id} type="button" role="menuitem" onClick={() => void moveConversationToServerProject(session.session_id, project.id)} className="flex w-full items-center rounded-lg px-3 py-2 text-xs text-slate-600 hover:bg-slate-100">{project.name}</button>)}
+                            <button type="button" role="menuitem" onClick={() => void createServerProject(session.session_id)} className="mt-1 flex w-full items-center rounded-lg border-t border-slate-100 px-3 py-2 text-xs font-medium text-violet-700 hover:bg-violet-50">＋ 新建项目</button>
                           </div>
                         )}
                         <div className="my-1 border-t border-slate-100" />

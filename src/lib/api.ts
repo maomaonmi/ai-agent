@@ -3,6 +3,8 @@
  * 支持：标准对话 / 深度思考 / 联网搜索 / 深度调研
  */
 
+import type { OmniTurnContext } from '../features/omni/types';
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const ACCEPTANCE_REQUEST_TIMEOUT_MS = 50_000;
 
@@ -468,7 +470,7 @@ export interface VideoTask {
   provider: string;
   model: string;
   prompt: string;
-  mode?: 'text_to_video' | 'image_to_video' | 'start_end_video' | 'reference_to_video';
+  mode?: 'text_to_video' | 'image_to_video' | 'start_end_video' | 'reference_to_video' | 'multi_image_to_video';
   parameters: {
     ratio: string; duration: number; resolution: string; audio_url?: string | null;
     first_frame_url?: string | null; last_frame_url?: string | null; negative_prompt?: string | null;
@@ -488,9 +490,10 @@ export interface VideoTask {
 export type VideoReferencePurpose = 'subject' | 'style' | 'motion' | 'scene';
 
 export interface VideoReference {
-  assetId: string;
+  assetId?: string;
+  url?: string;
   mediaKind: 'reference_video' | 'reference_image' | 'first_frame';
-  purpose: VideoReferencePurpose;
+  purpose?: VideoReferencePurpose;
 }
 
 export interface VideoReferenceAsset {
@@ -533,7 +536,7 @@ export async function getVideoModels(): Promise<VideoModelCapability[]> {
 }
 
 export async function createVideoTask(input: {
-  mode?: 'text_to_video' | 'image_to_video' | 'start_end_video' | 'reference_to_video';
+  mode?: 'text_to_video' | 'image_to_video' | 'start_end_video' | 'reference_to_video' | 'multi_image_to_video';
   prompt: string;
   model: string;
   ratio: string;
@@ -847,12 +850,14 @@ export async function createHookDraft(prompt: string): Promise<HookDraftResult> 
 }
 
 export interface ModelSettings {
-  provider: 'deepseek' | 'glm' | 'qwen' | 'custom';
-  api_format: 'openai_chat_completions';
+  provider: 'deepseek' | 'glm' | 'qwen' | 'minimax' | 'custom';
+  api_format: 'openai_chat_completions' | 'anthropic_messages';
   base_url: string;
   model_id: string;
   api_key?: string;
   has_api_key?: boolean;
+  minimax_video_api_key?: string;
+  has_minimax_video_key?: boolean;
   display_name: string;
   model_family: string;
   input_context: number;
@@ -878,8 +883,10 @@ export interface ModelVariant {
   supports_vision: boolean;
   // Why: 对齐后端 MODEL_CATALOG 的 thinking_control 值，收口前端字面量。
   // glm=GLM 协议(extra_body.thinking)，qwen_budget=千问协议(enable_thinking+thinking_budget)，
-  // deepseek=DeepSeek 协议(extra_body.thinking.type + 顶层 reasoning_effort)，none=不支持思考。
-  thinking_control: 'glm' | 'qwen_budget' | 'deepseek' | 'none';
+  // deepseek=DeepSeek 协议(extra_body.thinking.type + 顶层 reasoning_effort)，
+  // minimax=Anthropic Messages 协议(thinking 块)，none=不支持思考。
+  thinking_control: 'glm' | 'qwen_budget' | 'deepseek' | 'minimax' | 'none';
+  supports_active_cache?: boolean;
   input_context: number;
   output_context: number;
 }
@@ -1032,6 +1039,8 @@ export async function getMemoryTracesMarkdown(scope: 'global' | 'code'): Promise
 // ==========================================
 
 export interface ChatMessage {
+  /** Stable identity used by artifact/version links; legacy snapshots are normalized on restore. */
+  id?: string;
   role: 'user' | 'assistant';
   content: string;
   /** AI 写作论文正文生成的可持久化文档卡片状态。 */
@@ -1040,6 +1049,17 @@ export interface ChatMessage {
     title: string;
     status: 'generating' | 'complete' | 'failed';
     generatedAt?: number;
+  };
+  /** Persisted async video task marker; pending tasks resume polling after refresh. */
+  videoTask?: {
+    taskId: string;
+    status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
+  };
+  /** Persisted async PPT run marker; exact run resumes after refresh. */
+  pptRun?: {
+    runId: string;
+    presentationId: string;
+    status: 'QUEUED' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
   };
   reasoning?: string;
   reasoning_time?: number;
@@ -1108,7 +1128,7 @@ export interface ReasoningEvent {
 }
 
 export interface WebDoc {
-  id: number;
+  id: number | string;
   title: string;
   content: string;
   url: string;
@@ -1237,6 +1257,7 @@ export interface McpPhaseEvent {
 export type McpEvent = McpPhaseEvent | McpToolCallEvent | McpToolResultEvent;
 
 export type ChatMode =
+  | 'omni'
   | 'standard'
   | 'deep'
   | 'web'
@@ -1558,6 +1579,7 @@ export interface ChatOptions {
   sessionId?: string;
   runtimeSettings?: RuntimeSettings;
   attachments?: ChatAttachment[];
+  omniTurnContext?: OmniTurnContext;
 }
 
 export interface SessionSummary {
@@ -1859,6 +1881,7 @@ export async function sendChatMessage(
           }
         : undefined,
       attachments: options.attachments,
+      omni_context: options.omniTurnContext,
     }),
   });
 
@@ -2086,7 +2109,7 @@ export async function sendChatMessage(
 // ==========================================
 
 // 调研引擎选择：firecrawl（Deep Research API 异步任务）/ self-built（自研 day32+day33）/ qwen（千问原生深度研究）
-export type ResearchEngine = 'firecrawl' | 'self-built' | 'qwen';
+export type ResearchEngine = 'firecrawl' | 'self-built' | 'qwen' | 'minimax';
 
 // Firecrawl Deep Research 参数（用户可控）
 export interface ResearchOptions {
@@ -2577,8 +2600,21 @@ export async function checkHealth(): Promise<boolean> {
 
 async function parseApiError(response: Response): Promise<string> {
   try {
-    const payload = await response.json() as { detail?: string; error?: { message?: string } };
-    return payload.error?.message || payload.detail || `请求失败（${response.status}）`;
+    const payload = await response.json() as { detail?: unknown; error?: { message?: unknown } };
+    const detail = payload.detail;
+    const normalizedDetail = typeof detail === 'string'
+      ? detail
+      : Array.isArray(detail)
+        ? detail.map((item) => {
+            if (typeof item === 'string') return item;
+            if (item && typeof item === 'object' && 'msg' in item) return String((item as { msg?: unknown }).msg ?? '请求参数无效');
+            return JSON.stringify(item);
+          }).join('；')
+        : detail && typeof detail === 'object'
+          ? JSON.stringify(detail)
+          : '';
+    const errorMessage = payload.error?.message;
+    return typeof errorMessage === 'string' ? errorMessage : normalizedDetail || `请求失败（${response.status}）`;
   } catch {
     return `请求失败（${response.status}）`;
   }

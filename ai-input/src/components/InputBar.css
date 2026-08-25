@@ -1,0 +1,431 @@
+/* ====================== 输入框主体 ====================== */
+.input-bar {
+  width: 100%;
+  max-width: 960px;
+  background: var(--color-card);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: 16px 20px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  position: relative;
+}
+
+.input-bar--chat {
+  /* 对话模式有底栏 + 文字行 */
+}
+
+/* 文字输入区 */
+.input-bar__text {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.input-bar__field {
+  width: 100%;
+  font-size: 15px;
+  color: var(--color-text);
+  padding: 4px 32px 4px 0;
+  height: 26px;
+  background: transparent;
+}
+
+.input-bar__dots {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  gap: 4px;
+}
+
+.input-bar__dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent-2);
+  opacity: 0.85;
+}
+
+.input-bar__dots span:nth-child(2) {
+  background: var(--color-violet);
+}
+
+/* 底栏 */
+.input-bottom {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 28px;
+}
+
+.input-bottom__left {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.input-bottom__right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.mode-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--color-border);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+
+/* ====================== 通用按钮 ====================== */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  color: var(--color-text-2);
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.icon-btn:hover {
+  background: var(--color-border-soft);
+  color: var(--color-text);
+}
+
+.icon-btn--plus {
+  font-size: 18px;
+}
+
+/* ====================== 模式按钮（对话模式用） ====================== */
+.mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 6px;
+  color: var(--color-text-2);
+  font-size: 13px;
+  transition: background var(--transition-fast), color var(--transition-fast);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.mode-btn:hover {
+  background: var(--color-border-soft);
+  color: var(--color-text);
+}
+
+.mode-btn--active {
+  color: var(--color-text);
+  background: var(--color-border-soft);
+}
+
+.mode-btn__chevron {
+  color: var(--color-text-3);
+  margin-left: 1px;
+}
+
+/* ====================== 豆包快速按钮 ====================== */
+.voice-mode-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 30px;
+  padding: 0 4px;
+  border-radius: 8px;
+  color: var(--color-text-2);
+  font-size: 13px;
+  transition: background var(--transition-fast);
+  flex-shrink: 0;
+}
+
+.voice-mode-btn:hover {
+  background: var(--color-border-soft);
+  color: var(--color-text);
+}
+
+/* ====================== 语音按钮 ====================== */
+.voice-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--color-dark);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.voice-btn:hover {
+  background: #000;
+  transform: scale(1.04);
+}
+
+.voice-btn--hover {
+  background: #000;
+}
+
+/* ====================== 模式 Tag（PPT/视频等用） ====================== */
+.mode-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  background: var(--color-tag-bg);
+  color: var(--color-tag-text);
+  font-size: 13px;
+  font-weight: 500;
+  transition: background var(--transition-fast);
+  white-space: nowrap;
+}
+
+.mode-tag:hover {
+  background: #e1e6ff;
+}
+
+.mode-tag__close {
+  margin-left: 2px;
+  opacity: 0.7;
+}
+
+.mode-tag:hover .mode-tag__close {
+  opacity: 1;
+}
+
+/* ====================== 模式选项 ====================== */
+.mode-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 6px;
+  color: var(--color-text-2);
+  font-size: 13px;
+  transition: background var(--transition-fast);
+  white-space: nowrap;
+}
+
+.mode-option:hover {
+  background: var(--color-border-soft);
+  color: var(--color-text);
+}
+
+.mode-option__chevron {
+  color: var(--color-text-3);
+}
+
+/* ====================== 麦克风 + 发送按钮（模式用） ====================== */
+.icon-btn--mic {
+  background: transparent;
+  color: var(--color-text-2);
+}
+
+.send-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--color-dark);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition-fast), transform var(--transition-fast);
+}
+
+.send-btn:hover {
+  background: #000;
+  transform: scale(1.04);
+}
+
+/* ====================== 参考图区域（视频模式） ====================== */
+.input-bar__reference {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.reference-card {
+  width: 56px;
+  height: 56px;
+  border-radius: 10px;
+  border: 1px dashed var(--color-border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  color: var(--color-text-3);
+  font-size: 11px;
+  background: var(--color-bg);
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+  cursor: pointer;
+}
+
+.reference-card:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.reference-card svg {
+  color: inherit;
+}
+
+/* ====================== 设置弹窗（视频模式用） ====================== */
+.settings-panel {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 360px;
+  background: var(--color-card);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(15, 18, 30, 0.12);
+  border: 1px solid var(--color-border-soft);
+  padding: 16px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  z-index: 10;
+}
+
+.settings-panel__section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-panel__label {
+  font-size: 13px;
+  color: var(--color-text-2);
+  font-weight: 500;
+}
+
+.settings-panel__label--with-icon {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.settings-panel__info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1px solid var(--color-text-3);
+  color: var(--color-text-3);
+  font-size: 10px;
+  font-style: italic;
+  font-weight: 500;
+  line-height: 1;
+  cursor: help;
+}
+
+.settings-panel__segmented {
+  display: flex;
+  background: var(--color-bg);
+  border-radius: 8px;
+  padding: 3px;
+  gap: 2px;
+}
+
+.settings-panel__segmented--3 {
+  /* 3 个选项自动平分 */
+}
+
+.settings-panel__seg {
+  flex: 1;
+  height: 30px;
+  border-radius: 6px;
+  color: var(--color-text-2);
+  font-size: 13px;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.settings-panel__seg:hover {
+  color: var(--color-text);
+}
+
+.settings-panel__seg.is-active {
+  background: var(--color-card);
+  color: var(--color-text);
+  font-weight: 500;
+  box-shadow: var(--shadow-soft);
+}
+
+.settings-panel__ratios {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+}
+
+.settings-panel__ratio {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 0;
+  border-radius: 8px;
+  color: var(--color-text-2);
+  font-size: 12px;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.settings-panel__ratio:hover {
+  background: var(--color-bg);
+}
+
+.settings-panel__ratio.is-active {
+  background: var(--color-accent-bg);
+  color: var(--color-accent);
+  font-weight: 500;
+}
+
+.settings-panel__shape {
+  display: block;
+  background: currentColor;
+  opacity: 0.85;
+  border-radius: 2px;
+}
+
+.settings-panel__shape--tall {
+  width: 10px;
+  height: 16px;
+}
+.settings-panel__shape--medium-tall {
+  width: 12px;
+  height: 16px;
+}
+.settings-panel__shape--square {
+  width: 14px;
+  height: 14px;
+}
+.settings-panel__shape--medium-wide {
+  width: 16px;
+  height: 12px;
+}
+.settings-panel__shape--wide {
+  width: 18px;
+  height: 10px;
+}
+
+.settings-panel__ratio-label {
+  font-size: 12px;
+}

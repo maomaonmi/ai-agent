@@ -11,7 +11,7 @@ import { compileWritingPrompt } from './prompts';
 import { createDefaultWritingValues, WRITING_SCENE_MAP, WRITING_SCENES } from './writingScenes';
 import { documentFromV1Result, createEmptyWritingDocument, formatCitationMarkers, WritingDocumentState, WritingDocumentView } from './writingDocumentTypes';
 import { CompiledWritingPrompt, WritingDraft, WritingSceneId } from './writingTypes';
-import { routeWritingModel } from './writingModelRouter';
+import { routeWritingModel, THESIS_PROVIDER_OPTIONS, ThesisProvider } from './writingModelRouter';
 import ThesisOutlineView from './thesis/ThesisOutlineView';
 import ThesisBodyView, { type WritingRevisionSuggestion, type WritingTextSelection } from './thesis/ThesisBodyView';
 import { createRestoredReferenceSearchKeys } from './thesis/thesisReferencePersistence';
@@ -414,7 +414,7 @@ interface WritingWorkspaceProps {
   onBack: () => void;
   onSubmit: (payload: { instruction: string; compiledPrompt: ReturnType<typeof compileWritingPrompt> }, onStreamToken: (token: string) => void) => Promise<string>;
   onEnsureWritingSession: (instruction: string) => Promise<string>;
-  onThesisBodyRequest?: (payload: { phase: 'start' | 'complete' | 'failed'; title: string }) => Promise<void> | void;
+  onThesisBodyRequest?: (payload: { phase: 'start' | 'complete' | 'failed'; title: string; document: WritingDocumentState; outline: ThesisOutlineState }) => Promise<void> | void;
   initialResult?: string;
   initialInstruction?: string;
   restoreFromSession?: boolean;
@@ -503,6 +503,7 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
   const styleField = scene.fields.find((field) => field.id === 'style');
   const compiled = useMemo(() => compileWritingPrompt(draft.scene, draft.instruction, values), [draft, values]);
   const route = routeWritingModel(compiled);
+  const [thesisProvider, setThesisProvider] = useState<ThesisProvider>('qwen');
   const displayedInstruction = submittedInstruction.trim() || draft.instruction.trim() || writingDoc.title;
   const documentTitle = thesisOutline.title || writingDoc.title || '论文正文';
   const restoredBodyArtifactStatus = inferBodyArtifactStatus(writingDoc);
@@ -621,11 +622,12 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
       void streamThesisReferences({
         instruction,
         chapters: [{ id: chapter.id, title: chapter.title, summary: chapter.summary }],
+        provider: thesisProvider,
       }, dispatchThesisOutline).catch((reason) => {
         setError(reason instanceof Error ? reason.message : '参考资料搜索失败');
       });
     }
-  }, [draft.instruction, draft.scene, submittedInstruction, thesisOutline.chapters, thesisOutline.status, thesisOutline.title]);
+  }, [draft.instruction, draft.scene, submittedInstruction, thesisOutline.chapters, thesisOutline.status, thesisOutline.title, thesisProvider]);
 
   const selectScene = (next: WritingSceneId) => {
     setDraft((current) => ({ ...current, scene: next }));
@@ -703,6 +705,7 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
           educationLevel: values.level || '学段不限',
           targetWords: parsedLength ? parsedLength as ThesisTargetWords : null,
           sessionId,
+          provider: thesisProvider,
         }, handleThesisOutlineEvent);
         setWritingDoc((current) => ({ ...current, researchStatus: 'searching', updatedAt: Date.now() }));
       } catch (reason) {
@@ -741,6 +744,7 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
         instruction: submittedInstruction || draft.instruction,
         thesisType: values.type || '通用类型', educationLevel: values.level || '学段不限',
         targetWords: (Number(values.length?.match(/\d+/)?.[0] || 0) || null) as ThesisTargetWords | null, sessionId, previousOutline: thesisOutline,
+        provider: thesisProvider,
       }, handleThesisOutlineEvent);
     } catch (reason) { dispatchThesisOutline({ type: 'error', message: reason instanceof Error ? reason.message : '候选大纲生成失败' }); }
     finally { setIsSubmitting(false); }
@@ -819,8 +823,8 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
     const controller = new AbortController(); bodyAbortRef.current = controller;
     setBodyPaused(false); setIsSubmitting(true); setError('');
     try {
-      try { await onThesisBodyRequest?.({ phase: 'start', title: documentTitle }); } catch { /* conversation persistence must not block document generation */ }
-      await streamThesisBody({ outline: thesisOutline, completedChapterIds }, applyThesisBodyEvent, controller.signal);
+      try { await onThesisBodyRequest?.({ phase: 'start', title: documentTitle, document: writingDocRef.current, outline: thesisOutline }); } catch { /* conversation persistence must not block document generation */ }
+      await streamThesisBody({ outline: thesisOutline, completedChapterIds, provider: thesisProvider }, applyThesisBodyEvent, controller.signal);
       await new Promise<void>((resolve) => {
         const waitForVisualQueue = () => {
           if (!bodyQueueRef.current.length && !bodyActiveRef.current) resolve();
@@ -832,14 +836,14 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
       const wordBlob = await createThesisWordDocument(writingDocRef.current, layoutTocSections, true);
       setBodyArtifactUrl(URL.createObjectURL(wordBlob));
       setBodyArtifactStatus('complete');
-      try { await onThesisBodyRequest?.({ phase: 'complete', title: documentTitle }); } catch { /* document generation already succeeded */ }
+      try { await onThesisBodyRequest?.({ phase: 'complete', title: documentTitle, document: writingDocRef.current, outline: thesisOutline }); } catch { /* document generation already succeeded */ }
       setDraft((current) => ({ ...current, instruction: '' }));
     } catch (reason) {
       if (!controller.signal.aborted) {
         setError(reason instanceof Error ? reason.message : '论文正文生成失败');
         applyThesisBodyEvent({ type: 'body_error', message: reason instanceof Error ? reason.message : '论文正文生成失败' });
         setBodyArtifactStatus('failed');
-        try { await onThesisBodyRequest?.({ phase: 'failed', title: documentTitle }); } catch { /* conversation persistence should not mask the generation error */ }
+        try { await onThesisBodyRequest?.({ phase: 'failed', title: documentTitle, document: writingDocRef.current, outline: thesisOutline }); } catch { /* conversation persistence should not mask the generation error */ }
       }
     } finally { if (bodyAbortRef.current === controller) bodyAbortRef.current = null; setIsSubmitting(false); }
   };
@@ -931,7 +935,7 @@ export default function WritingWorkspace({ onBack, onSubmit, onEnsureWritingSess
   return <main data-writing-document data-writing-workspace style={{ gridTemplateColumns: `${leftPanePercent}% 8px minmax(0, 1fr)` }} className="grid h-full min-h-0 grid-cols-none overflow-hidden bg-white text-slate-950">
     <section className="relative flex min-h-0 min-w-0 flex-col bg-white">
       <header className="flex h-14 shrink-0 items-center justify-between px-5 sm:px-7">
-        <div className="flex min-w-0 items-center gap-3"><button type="button" onClick={onBack} aria-label="返回对话" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><ArrowLeft size={17}/></button><span className="truncate text-base font-medium text-slate-900">Qwen3.7-千问</span><ChevronDown size={15} className="text-slate-500" /></div>
+        <div className="flex min-w-0 items-center gap-3"><button type="button" onClick={onBack} aria-label="返回对话" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100"><ArrowLeft size={17}/></button><label className="flex min-w-0 items-center gap-1"><span className="sr-only">写作模型</span><select aria-label="选择写作模型" value={thesisProvider} onChange={(event) => setThesisProvider(event.target.value as ThesisProvider)} className="max-w-44 truncate rounded-md border border-slate-200 bg-white px-1.5 py-1 text-base font-medium text-slate-900 outline-none hover:border-blue-200 focus:border-blue-300">{THESIS_PROVIDER_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</select><ChevronDown size={15} className="text-slate-500" /></label></div>
         <span className="hidden text-xs text-slate-400 sm:inline">{route.label}</span>
         <button type="button" onClick={clearDraft} aria-label="清除草稿" className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-rose-600"><Trash2 size={16}/></button>
       </header>

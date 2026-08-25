@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test:omni": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test --experimental-strip-types test/omniTypesContract.test.ts test/omniMessageIdentity.test.ts test/projectApiContract.test.ts test/projectTree.test.ts test/artifactApiContract.test.ts test/artifactPresentation.test.ts test/artifactResize.test.ts test/omniComposerToolbar.test.ts test/omniTurnContext.test.ts test/artifactReferenceContext.test.ts test/writingArtifactAdapter.test.ts test/imageArtifactAdapter.test.ts test/researchArtifactAdapter.test.ts test/thesisArtifactAdapter.test.ts test/videoArtifactAdapter.test.ts test/pptArtifactAdapter.test.ts test/videoParamPlacement.test.ts",
     "test:ppt": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test --experimental-strip-types test/pptxExporter.test.ts test/pptTypesContract.test.ts test/pptApiStore.test.ts"
   },
   "dependencies": {

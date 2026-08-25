@@ -3,11 +3,12 @@
 /* Workflow artifacts come from user-configured public URLs; next/image would require a fixed remote host allowlist. */
 /* eslint-disable @next/next/no-img-element */
 
-import { ArrowLeft, Check, Cloud, Loader2, Play, Save, ShieldCheck, Undo2, Redo2, CircleHelp, LayoutPanelTop, MoreHorizontal, XCircle } from 'lucide-react';
+import { ArrowLeft, Check, Cloud, Loader2, Play, Save, ShieldCheck, Undo2, Redo2, CircleHelp, LayoutPanelTop, MoreHorizontal, XCircle, Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   createVisualWorkflow,
   createVisualWorkflowRun,
+  getVisualWorkflow,
   getVisualWorkflowNodeDefinitions,
   getVisualWorkflowRun,
   listVisualWorkflows,
@@ -23,7 +24,7 @@ import WorkflowCanvas from './WorkflowCanvas';
 import WorkflowNodeInspector from './WorkflowNodeInspector';
 import { useVisualWorkflowStore } from './store';
 
-interface VisualWorkflowWorkspaceProps { onBack: () => void; }
+interface VisualWorkflowWorkspaceProps { onBack: () => void; workflowId?: string; }
 
 function isPreviewableUrl(value: unknown): value is string {
   if (typeof value !== 'string') return false;
@@ -44,7 +45,7 @@ function RunArtifactPreview({ artifact }: { artifact: Record<string, unknown> })
     : <img className="mt-2 max-h-28 w-full rounded-md border border-slate-200 bg-white object-contain dark:border-white/[0.08]" src={value} alt="节点输出预览" loading="lazy" />;
 }
 
-export default function VisualWorkflowWorkspace({ onBack }: VisualWorkflowWorkspaceProps) {
+export default function VisualWorkflowWorkspace({ onBack, workflowId }: VisualWorkflowWorkspaceProps) {
   const [workflow, setWorkflow] = useState<VisualWorkflow | null>(null);
   const [definitions, setDefinitions] = useState<VisualWorkflowNodeDefinition[]>([]);
   const [issues, setIssues] = useState<VisualWorkflowValidationIssue[]>([]);
@@ -73,8 +74,13 @@ export default function VisualWorkflowWorkspace({ onBack }: VisualWorkflowWorksp
   const applyRun = useCallback((next: VisualWorkflowRun) => {
     setRun(next);
     setIsRunning(!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(next.status));
+    // The API uses terminal names such as SUCCEEDED; the canvas store intentionally
+    // uses the smaller success/error vocabulary so successful artifacts are persisted.
     setNodeStatuses(
-      Object.fromEntries(next.nodeRuns.map((nodeRun) => [nodeRun.node_id, nodeRun.status.toLowerCase() as 'idle' | 'running' | 'success' | 'error'])),
+      Object.fromEntries(next.nodeRuns.map((nodeRun) => [
+        nodeRun.node_id,
+        nodeRun.status === 'SUCCEEDED' ? 'success' : nodeRun.status === 'FAILED' ? 'error' : nodeRun.status === 'RUNNING' ? 'running' : 'idle',
+      ])),
       Object.fromEntries(next.nodeRuns.map((nodeRun) => [nodeRun.node_id, nodeRun.output_artifacts ?? []])),
     );
   }, [setNodeStatuses]);
@@ -85,10 +91,12 @@ export default function VisualWorkflowWorkspace({ onBack }: VisualWorkflowWorksp
       try {
         const [nodeDefinitions, existing] = await Promise.all([
           getVisualWorkflowNodeDefinitions(),
-          listVisualWorkflows(1, 1),
+          workflowId ? getVisualWorkflow(workflowId) : listVisualWorkflows(1, 1),
         ]);
         if (!active) return;
-        const created = existing.workflows[0] ?? await createVisualWorkflow('未命名工作流', '可视化 AI 视频生成流程');
+        const created = 'workflows' in existing
+          ? existing.workflows[0] ?? await createVisualWorkflow('未命名工作流', '可视化 AI 视频生成流程')
+          : existing;
         setDefinitions(nodeDefinitions);
         hydrate(created.document, nodeDefinitions);
         setWorkflow(created);
@@ -99,7 +107,7 @@ export default function VisualWorkflowWorkspace({ onBack }: VisualWorkflowWorksp
       }
     })();
     return () => { active = false; };
-  }, [hydrate]);
+  }, [hydrate, workflowId]);
 
   const refreshRun = useCallback(async () => {
     if (!workflow || !run) return;
@@ -184,7 +192,7 @@ export default function VisualWorkflowWorkspace({ onBack }: VisualWorkflowWorksp
   return (
     <div className="visual-workflow-shell flex h-full min-h-0 flex-col bg-[#f6f8fb] text-slate-900 dark:bg-[#0b0f14] dark:text-slate-100">
       <header className="z-30 flex min-h-[72px] shrink-0 items-center gap-3 border-b border-slate-200/80 bg-white/90 px-4 shadow-[0_1px_0_rgba(15,23,42,0.03)] backdrop-blur-xl dark:border-white/[0.08] dark:bg-[#10151c]/90 sm:px-6">
-        <button type="button" onClick={onBack} aria-label="返回聊天" className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 dark:border-white/[0.1] dark:hover:border-cyan-500/40 dark:hover:bg-cyan-500/10 dark:hover:text-cyan-300"><ArrowLeft size={17} /></button>
+        <button type="button" onClick={onBack} aria-label="返回视频流工作台主页" className="group flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 text-slate-500 transition hover:border-cyan-300 hover:bg-cyan-50 hover:text-cyan-700 dark:border-white/[0.1] dark:hover:border-cyan-500/40 dark:hover:bg-cyan-500/10 dark:hover:text-cyan-300"><span className="group-hover:hidden"><Sparkles size={17} /></span><span className="hidden group-hover:inline"><ArrowLeft size={17} /></span></button>
         <div className="min-w-0 flex-1">
           <div className="mb-0.5 flex items-center gap-2">
             <span className="hidden text-[10px] font-bold uppercase tracking-[0.2em] text-cyan-600 dark:text-cyan-400 sm:inline">AI WORKFLOW / V2</span>

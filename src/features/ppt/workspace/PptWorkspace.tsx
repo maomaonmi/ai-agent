@@ -11,6 +11,8 @@ import {
   ArrowRight,
   BarChart3,
   Check,
+  ChevronLeft,
+  ChevronRight,
   ChevronDown,
   Circle,
   Copy,
@@ -30,6 +32,7 @@ import {
   Redo2,
   RefreshCcw,
   Search,
+  Send,
   Shapes,
   Sparkles,
   Table2,
@@ -42,7 +45,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 
-import { PptApiError, pptApi, resolvePptAssetUrl, type PptPresentationResponse, type PptRunEvent } from "../api.ts";
+import { PptApiError, pptApi, resolvePptAssetUrl, type PptPresentationResponse, type PptRunEvent, type PptRunStatus, type PptTemplate } from "../api.ts";
 import type { PresentationDocument } from "../types.ts";
 
 type CanvasItem =
@@ -83,8 +86,8 @@ interface WorkflowStep {
 
 type ExportElement = { kind: string; [key: string]: unknown };
 type ChatMessage = { id: string; role: "user" | "assistant"; text: string };
-type ModelProvider = "deepseek" | "qwen" | "glm";
-type SearchProvider = "auto" | "firecrawl" | "qwen" | "glm";
+type ModelProvider = "deepseek" | "qwen" | "glm" | "minimax";
+type SearchProvider = "auto" | "firecrawl" | "qwen" | "glm" | "minimax";
 type SearchSource = { title: string; url: string; imageUrl?: string; pageUrl?: string };
 type AssetProvenance = { imageUrl: string; pageUrl?: string; alt?: string };
 type RunConfig = { modelProvider: ModelProvider; searchProvider: SearchProvider; searchLimit: number };
@@ -320,8 +323,23 @@ function presentationDocumentFromWorkspace(presentationId: string, templateId: s
 }
 
 
+function dedupeWorkspaceSlides(slides: WorkspaceSlide[]): WorkspaceSlide[] {
+  const positions = new Map<string, number>();
+  const result: WorkspaceSlide[] = [];
+  for (const slide of slides) {
+    const position = positions.get(slide.id);
+    if (position === undefined) {
+      positions.set(slide.id, result.length);
+      result.push(slide);
+    } else {
+      result[position] = slide;
+    }
+  }
+  return result;
+}
+
 function workspaceSlidesFromDocument(document: PresentationDocument, assetUrlsById: Record<string, string> = {}): WorkspaceSlide[] {
-  return document.slides.map((slide, index) => {
+  const restoredSlides: WorkspaceSlide[] = document.slides.map((slide, index): WorkspaceSlide => {
     const textElements = slide.elements.filter((element) => element.type === "TEXT");
     const title = textElements.find((element) => element.id.endsWith("-title"))?.text ?? `第 ${index + 1} 页`;
     const subtitle = textElements.find((element) => element.id.endsWith("-subtitle"))?.text ?? "从资料、观点到下一步行动。";
@@ -348,6 +366,7 @@ function workspaceSlidesFromDocument(document: PresentationDocument, assetUrlsBy
       : generatedAssets[index % generatedAssets.length];
     return { id: slide.id, eyebrow, title, subtitle, image, tone: backgroundColor === "#F4EFE8" ? "light" : "dark", notes: slide.notes ?? "", items };
   });
+  return dedupeWorkspaceSlides(restoredSlides);
 }
 
 
@@ -647,6 +666,7 @@ function WorkflowPanel({
   step,
   running,
   started,
+  completed,
   details,
   searchSources,
   assetSources,
@@ -661,6 +681,7 @@ function WorkflowPanel({
   step: number;
   running: boolean;
   started: boolean;
+  completed: boolean;
   details: Record<string, string>;
   searchSources: Record<string, SearchSource[]>;
   assetSources: Record<string, string[]>;
@@ -686,7 +707,7 @@ function WorkflowPanel({
     onSendMessage(message, runConfig);
     setDraft("");
   };
-  const progress = started ? Math.min(100, ((step + 1) / workflow.length) * 100) : 0;
+  const progress = completed ? 100 : started ? Math.min(100, ((step + 1) / workflow.length) * 100) : 0;
   const webAssetsMeta = details["web-assets"] ?? "等待事件";
   const aiAssetsMeta = details["ai-assets"] ?? "等待事件";
   const selectedPreviewUrls = [...(assetSources["web-assets"] ?? []), ...(assetSources["ai-assets"] ?? [])];
@@ -719,15 +740,15 @@ function WorkflowPanel({
           {started && <section aria-label="AI 工作流链路" className="rounded-2xl border border-slate-200 bg-white shadow-sm">
             <button type="button" aria-expanded={workflowOpen} onClick={() => setWorkflowOpen((value) => !value)} className="flex w-full items-center gap-3 px-4 py-3 text-left">
               <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-violet-100 text-violet-700"><FileSearch size={15} /></span>
-              <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-900">AI 工作流链路</span><span className="mt-0.5 block text-[11px] text-slate-500">{started ? `${Math.min(step + 1, workflow.length)} / ${workflow.length} 阶段 · ${running ? "正在执行" : "已暂停"}` : "等待你的指令后开始"} · 每次不超过 20 条 · 当前 {runConfig.searchLimit} 条</span></span>
+              <span className="min-w-0 flex-1"><span className="block text-sm font-semibold text-slate-900">AI 工作流链路</span><span className="mt-0.5 block text-[11px] text-slate-500">{started ? `${Math.min(step + 1, workflow.length)} / ${workflow.length} 阶段 · ${completed ? "已完成" : running ? "正在执行" : "已暂停"}` : "等待你的指令后开始"} · 每次不超过 20 条 · 当前 {runConfig.searchLimit} 条</span></span>
               <ChevronDown size={15} className={`text-slate-400 transition ${workflowOpen ? "rotate-180" : ""}`} />
             </button>
             {workflowOpen && <div className="border-t border-slate-100 px-4 pb-3 pt-3">
               <div className="mb-3 h-1.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full bg-violet-600 transition-all duration-500" style={{ width: `${progress}%` }} /></div>
               <div className="space-y-1">
                 {workflow.map((item, index) => {
-                  const complete = started && index < step;
-                  const active = started && index === step;
+                  const complete = completed || (started && index < step);
+                  const active = !completed && started && index === step;
                   const expanded = expandedSteps[item.id] ?? active;
                   return <div key={item.id} className="rounded-xl border border-transparent hover:border-slate-200">
                     <button type="button" aria-expanded={expanded} onClick={() => setExpandedSteps((current) => ({ ...current, [item.id]: !expanded }))} className="flex w-full items-center gap-2 px-2.5 py-2 text-left">
@@ -747,12 +768,70 @@ function WorkflowPanel({
       <div className="shrink-0 border-t border-slate-200 p-4">
         <div className="rounded-2xl border border-slate-200 bg-white p-2 shadow-sm focus-within:border-violet-300 focus-within:ring-2 focus-within:ring-violet-100">
           <textarea value={draft} onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); submit(); } }} aria-label="AI PPT 对话输入" placeholder="描述你想制作的 PPT…" rows={2} className="w-full resize-none bg-transparent px-2 py-1 text-sm leading-6 text-slate-800 outline-none placeholder:text-slate-400" />
-          {searchOptionsOpen && <div className="mb-2 grid grid-cols-2 gap-2 border-t border-slate-100 px-1 pt-2"><label className="text-[10px] text-slate-500">搜索服务<select aria-label="搜索服务" value={runConfig.searchProvider} onChange={(event) => { const value = event.target.value as SearchProvider; onSendMessage("", { ...runConfig, searchProvider: value }); }} className="mt-1 h-8 w-full rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-700"><option value="auto">自动选择</option><option value="firecrawl">Firecrawl</option><option value="qwen">千问原生</option><option value="glm">GLM 原生</option></select></label><label className="text-[10px] text-slate-500">每轮搜索数量<select aria-label="每轮搜索数量" value={runConfig.searchLimit} onChange={(event) => onSendMessage("", { ...runConfig, searchLimit: Math.min(20, Number(event.target.value)) })} className="mt-1 h-8 w-full rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-700"><option value={10}>10 条</option><option value={15}>15 条</option><option value={20}>20 条</option></select></label></div>}
-          <div className="flex items-center justify-between gap-2 px-1"><div className="flex min-w-0 items-center gap-2"><label className="flex items-center gap-1 text-[10px] text-slate-500">模型<select aria-label="选择生成模型" value={runConfig.modelProvider} onChange={(event) => onSendMessage("", { ...runConfig, modelProvider: event.target.value as ModelProvider })} className="h-7 rounded-md border border-slate-200 bg-white px-1.5 text-[10px] text-slate-700"><option value="deepseek">DeepSeek</option><option value="qwen">千问</option><option value="glm">GLM</option></select></label><button type="button" aria-expanded={searchOptionsOpen} onClick={() => setSearchOptionsOpen((value) => !value)} className="h-7 rounded-md border border-slate-200 px-2 text-[10px] text-slate-500 hover:border-violet-200 hover:text-violet-700">搜索参数</button><span className="hidden text-[10px] text-slate-400 sm:inline">Enter 发送 · Shift + Enter 换行</span></div><button type="button" onClick={submit} aria-label="发送 PPT 需求" disabled={!draft.trim()} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-violet-600 text-white hover:bg-violet-500 disabled:bg-slate-200 disabled:text-slate-400"><ArrowRight size={15} /></button></div>
+          {searchOptionsOpen && <div className="mb-2 grid grid-cols-2 gap-2 border-t border-slate-100 px-1 pt-2"><label className="text-[10px] text-slate-500">搜索服务<select aria-label="搜索服务" value={runConfig.searchProvider} onChange={(event) => { const value = event.target.value as SearchProvider; onSendMessage("", { ...runConfig, searchProvider: value }); }} className="mt-1 h-8 w-full rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-700"><option value="auto">自动选择</option><option value="firecrawl">Firecrawl</option><option value="qwen">千问原生</option><option value="glm">GLM 原生</option><option value="minimax">MiniMax 原生</option></select></label><label className="text-[10px] text-slate-500">每轮搜索数量<select aria-label="每轮搜索数量" value={runConfig.searchLimit} onChange={(event) => onSendMessage("", { ...runConfig, searchLimit: Math.min(20, Number(event.target.value)) })} className="mt-1 h-8 w-full rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-700"><option value={10}>10 条</option><option value={15}>15 条</option><option value={20}>20 条</option></select></label></div>}
+          <div className="flex items-center justify-between gap-2 px-1"><div className="flex min-w-0 items-center gap-2"><label className="flex items-center gap-1 text-[10px] text-slate-500">模型<select aria-label="选择生成模型" value={runConfig.modelProvider} onChange={(event) => onSendMessage("", { ...runConfig, modelProvider: event.target.value as ModelProvider })} className="h-7 rounded-md border border-slate-200 bg-white px-1.5 text-[10px] text-slate-700"><option value="deepseek">DeepSeek</option><option value="qwen">千问</option><option value="glm">GLM</option><option value="minimax">MiniMax</option></select></label><button type="button" aria-expanded={searchOptionsOpen} onClick={() => setSearchOptionsOpen((value) => !value)} className="h-7 rounded-md border border-slate-200 px-2 text-[10px] text-slate-500 hover:border-violet-200 hover:text-violet-700">搜索参数</button><span className="hidden text-[10px] text-slate-400 sm:inline">Enter 发送 · Shift + Enter 换行</span></div><button type="button" onClick={submit} aria-label="发送 PPT 需求" disabled={!draft.trim()} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-violet-600 text-white hover:bg-violet-500 disabled:bg-slate-200 disabled:text-slate-400"><ArrowRight size={15} /></button></div>
         </div>
         {started && <button type="button" onClick={onRestart} className="mt-2 flex h-8 w-full items-center justify-center gap-2 rounded-lg text-[11px] font-medium text-slate-500 hover:bg-slate-50"><RefreshCcw size={12} /> 重新规划并生成</button>}
       </div>
     </aside>
+  );
+}
+
+
+function PresentationPreviewDialog({
+  mode,
+  slides,
+  activeIndex,
+  canPublish,
+  publishing,
+  publishedTemplate,
+  publishError,
+  onClose,
+  onPublish,
+  onOpenMarket,
+}: {
+  mode: "publish" | "present";
+  slides: WorkspaceSlide[];
+  activeIndex: number;
+  canPublish: boolean;
+  publishing: boolean;
+  publishedTemplate: PptTemplate | null;
+  publishError: string | null;
+  onClose: () => void;
+  onPublish: () => void;
+  onOpenMarket: () => void;
+}) {
+  const [page, setPage] = useState(Math.min(Math.max(activeIndex, 0), Math.max(0, slides.length - 1)));
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowLeft") setPage((value) => Math.max(0, value - 1));
+      if (event.key === "ArrowRight" || event.key === " ") setPage((value) => Math.min(slides.length - 1, value + 1));
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, slides.length]);
+  const current = slides[page] ?? slides[0];
+  if (!current) return null;
+  const previous = () => setPage((value) => Math.max(0, value - 1));
+  const next = () => setPage((value) => Math.min(slides.length - 1, value + 1));
+  return (
+    <div className="fixed inset-0 z-[100] flex flex-col bg-slate-950/95 p-3 text-white sm:p-6" role="dialog" aria-modal="true" aria-label={mode === "publish" ? "发布前预览" : "PPT 放映"}>
+      <div className="flex h-12 shrink-0 items-center justify-between gap-3 px-1 sm:px-2">
+        <div className="min-w-0"><p className="truncate text-sm font-semibold">{mode === "publish" ? "发布前预览" : "PPT 放映"}</p><p className="text-[11px] text-white/50">第 {page + 1} / {slides.length} 页</p></div>
+        <div className="flex items-center gap-2">
+          {mode === "publish" && !publishedTemplate && <button type="button" onClick={onPublish} disabled={!canPublish || publishing} className="inline-flex h-9 items-center gap-2 rounded-full bg-violet-500 px-4 text-xs font-semibold text-white transition hover:bg-violet-400 disabled:cursor-not-allowed disabled:bg-white/15 disabled:text-white/45"><Send size={14} />{publishing ? "发布中…" : canPublish ? "发布到市场" : "完成后可发布"}</button>}
+          {publishedTemplate && <button type="button" onClick={onOpenMarket} className="inline-flex h-9 items-center gap-2 rounded-full bg-emerald-500 px-4 text-xs font-semibold text-white hover:bg-emerald-400"><Check size={14} />查看市场</button>}
+          <button type="button" onClick={onClose} aria-label="关闭预览" className="flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-white/80 hover:bg-white/20"><X size={17} /></button>
+        </div>
+      </div>
+        <div className="flex min-h-0 flex-1 items-center justify-center gap-2 sm:gap-5">
+          <button type="button" onClick={previous} disabled={page === 0} aria-label="上一页" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/10 text-white/80 hover:bg-white/20 disabled:invisible"><ChevronLeft size={20} /></button>
+        <div className={`flex min-w-0 items-center justify-center ${mode === "present" ? "h-[calc(100vh-132px)] max-h-full w-auto max-w-[96vw] aspect-video" : "flex-1 max-h-full max-w-[min(1120px,88vw)]"}`}><div className="w-full overflow-hidden rounded-lg bg-white shadow-2xl"><SlideSurface slide={current} /></div></div>
+        <button type="button" onClick={next} disabled={page >= slides.length - 1} aria-label="下一页" className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-white/10 text-white/80 hover:bg-white/20 disabled:invisible"><ChevronRight size={20} /></button>
+      </div>
+      {mode === "publish" && <div className="mx-auto mt-3 max-w-[1120px] shrink-0 text-center text-[11px] text-white/55">{publishedTemplate ? `已发布「${publishedTemplate.name}」` : canPublish ? "确认后会以私有模板形式出现在模板市场，可继续复用主题与版式。" : "只有 AI 工作流完成并通过最终阶段后，才可以发布到市场。"}{publishError && <span className="ml-2 text-rose-300">{publishError}</span>}</div>}
+    </div>
   );
 }
 
@@ -775,8 +854,13 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const [candidateSources, setCandidateSources] = useState<Record<string, AssetProvenance[]>>({});
   const [runConfig, setRunConfig] = useState<RunConfig>({ modelProvider: "deepseek", searchProvider: "auto", searchLimit: 20 });
   const [running, setRunning] = useState(false);
-  const [zoom, setZoom] = useState(82);
+  const [runStatus, setRunStatus] = useState<PptRunStatus | null>(null);
+  const [zoom, setZoom] = useState(100);
   const [exporting, setExporting] = useState(false);
+  const [previewMode, setPreviewMode] = useState<"publish" | "present" | null>(null);
+  const [publishing, setPublishing] = useState(false);
+  const [publishedTemplate, setPublishedTemplate] = useState<PptTemplate | null>(null);
+  const [publishError, setPublishError] = useState<string | null>(null);
   const [mobileWorkflowOpen, setMobileWorkflowOpen] = useState(false);
   const [leftWidth, setLeftWidth] = useState(420);
   const [serverPresentation, setServerPresentation] = useState<PptPresentationResponse | null>(null);
@@ -799,6 +883,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
   const activeSlide = slides.find((slide) => slide.id === activeSlideId) ?? slides[0];
   const activeIndex = slides.findIndex((slide) => slide.id === activeSlide.id);
   const started = running || workflowStep > 0 || chatMessages.some((message) => message.role === "user");
+  const canPublish = Boolean(serverPresentation && runId && serverState === "ready" && runStatus === "COMPLETED");
 
   const registerRunAssets = (values: unknown[]) => {
     const next = { ...assetUrlsByIdRef.current, ...assetUrlsByIdFromRunState(...values) };
@@ -866,9 +951,11 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
 
   const statusText = useMemo(() => {
     if (!started) return "等待你的指令";
-    if (workflowStep >= workflow.length - 1) return "已完成 · 所有页面均可编辑";
+    if (runStatus === "COMPLETED") return "已完成 · 所有页面均可编辑";
+    if (runStatus === "FAILED") return "生成失败 · 可检查后重试";
+    if (runStatus === "CANCELLED" || runStatus === "PAUSED") return "已暂停 · 可继续";
     return `正在${workflow[workflowStep].label}`;
-  }, [started, workflowStep]);
+  }, [runStatus, started, workflowStep]);
 
   const persistOperations = (operations: Array<Record<string, unknown>>) => {
     if (operations.length === 0 || !serverPresentationRef.current) return;
@@ -903,6 +990,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     const currentPresentation = serverPresentationRef.current;
     if (!currentPresentation) {
       setRunning(false);
+      setRunStatus(null);
       setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "演示文稿还在连接中，暂时无法开始实时生成。" }]);
       return;
     }
@@ -921,6 +1009,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         ...(resume ? { resume: true } : {}),
       });
       setRunId(run.runId);
+      setRunStatus(run.status);
       if (!existingRunId) {
         // Keep the durable run attached to this workspace URL. A refresh or
         // reopening the same tab can then hydrate the exact run, including a
@@ -937,7 +1026,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
       // remaining phases look as if they completed instantly.
       if (!existingRunId || !resume) lastRunEventIdRef.current = 0;
       setWorkflowStep(workflowStepForPhase(run.phase));
-      setRunning(run.status === "RUNNING" || run.status === "QUEUED");
+      setRunning(run.status === "RUNNING" || run.status === "QUEUED" || run.status === "PAUSED");
 
       const handleRunEvent = (event: PptRunEvent) => {
         if (event.id > 0) lastRunEventIdRef.current = Math.max(lastRunEventIdRef.current, event.id);
@@ -949,6 +1038,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           const limit = typeof event.data.limit === "number" ? event.data.limit : null;
           setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: provider ? `请求 ${provider} · 最多 ${limit ?? 20} 条` : "执行中" }));
           setRunning(true);
+          setRunStatus("RUNNING");
           return;
         }
         if (event.type === "phase.completed" && phaseStep !== null) {
@@ -1036,10 +1126,10 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
             if (liveSlide) {
               setSlides((current) => {
                 const existingIndex = current.findIndex((item) => item.id === liveSlide.id);
-                if (existingIndex >= 0) return current.map((item, itemIndex) => itemIndex === existingIndex ? liveSlide : item);
+                if (existingIndex >= 0) return dedupeWorkspaceSlides(current.map((item, itemIndex) => itemIndex === existingIndex ? liveSlide : item));
                 const next = [...current];
                 next.splice(Math.min(Math.max(0, livePageNumber - 1), next.length), 0, liveSlide);
-                return next;
+                return dedupeWorkspaceSlides(next);
               });
               setActiveSlideId(liveSlide.id);
             }
@@ -1075,6 +1165,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         if (event.type === "run.completed") {
           setWorkflowStep(workflow.length - 1);
           setRunning(false);
+          setRunStatus("COMPLETED");
           const completedPresentation = serverPresentationRef.current;
           if (completedPresentation) {
             void pptApi.getPresentation(completedPresentation.presentationId).then((updated) => {
@@ -1092,11 +1183,13 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         }
         if (event.type === "run.cancelled") {
           setRunning(false);
+          setRunStatus("CANCELLED");
           setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "这次生成已暂停，你可以继续编辑当前页面或重新规划。" }]);
           return;
         }
         if (event.type === "run.failed") {
           setRunning(false);
+          setRunStatus("FAILED");
           if (phaseStep !== null) {
             setWorkflowStep(phaseStep);
             setWorkflowDetails((current) => ({ ...current, [workflow[phaseStep].id]: "失败 · 请重试" }));
@@ -1106,13 +1199,41 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         }
       };
 
-      await pptApi.subscribeRunEvents(run.runId, handleRunEvent, {
-        after: lastRunEventIdRef.current,
-        signal: eventController.signal,
-      });
+      // SSE 流可能因网络抖动/代理超时提前断开，后端仍在运行。
+      // 断开后轮询 run 状态，若仍在跑则重新订阅（最多 3 次）。
+      const activeStatuses = new Set(["RUNNING", "QUEUED", "PAUSED"]);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (eventController.signal.aborted) return;
+        try {
+          const latestRun = await pptApi.getRun(run.runId);
+          // The SSE stream can close after the final persisted event. Reconcile
+          // the durable run status before deciding that there is nothing left
+          // to subscribe to, otherwise a completed REVIEW phase remains stuck
+          // on screen and the publish action stays disabled.
+          setRunStatus(latestRun.status);
+          if (latestRun.status === "COMPLETED") {
+            setWorkflowStep(workflow.length - 1);
+            setRunning(false);
+            return;
+          }
+          if (latestRun.status === "FAILED" || latestRun.status === "CANCELLED") {
+            setRunning(false);
+            return;
+          }
+          if (!activeStatuses.has(latestRun.status)) return;
+          // 后端仍在跑，重新订阅 SSE（从上次 event id 续接）
+          await pptApi.subscribeRunEvents(run.runId, handleRunEvent, {
+            after: lastRunEventIdRef.current,
+            signal: eventController.signal,
+          });
+        } catch {
+          return;
+        }
+      }
     } catch (error) {
       if (eventController.signal.aborted) return;
       setRunning(false);
+      setRunStatus("FAILED");
       const message = error instanceof PptApiError
         ? `${error.message}（实时事件流已断开）`
         : "实时事件流连接失败，请检查后端服务后重试。";
@@ -1158,11 +1279,12 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
           }
         }
         const nextConfig: RunConfig = {
-          modelProvider: state.modelProvider === "qwen" || state.modelProvider === "glm" ? state.modelProvider : "deepseek",
-          searchProvider: state.searchProvider === "firecrawl" || state.searchProvider === "qwen" || state.searchProvider === "glm" ? state.searchProvider : "auto",
+          modelProvider: state.modelProvider === "qwen" || state.modelProvider === "glm" || state.modelProvider === "minimax" ? state.modelProvider : "deepseek",
+          searchProvider: state.searchProvider === "firecrawl" || state.searchProvider === "qwen" || state.searchProvider === "glm" || state.searchProvider === "minimax" ? state.searchProvider : "auto",
           searchLimit: typeof state.searchLimit === "number" ? Math.min(20, Math.max(1, state.searchLimit)) : 20,
         };
         setRunConfig(nextConfig);
+        setRunStatus(run.status);
         const prompt = typeof state.prompt === "string" ? state.prompt : "继续完成这份 PPT";
         setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: prompt }, { id: nextId("assistant"), role: "assistant", text: "已恢复这条 AI PPT 历史会话，已保存的搜索、素材和搭建进度正在载入。" }]);
         setWorkflowStep(workflowStepForPhase(run.phase));
@@ -1189,6 +1311,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
       const previousPrompt = [...chatMessages].reverse().find((item) => item.role === "user")?.text ?? "继续完成这份 PPT";
       setChatMessages((current) => [...current, { id: nextId("user"), role: "user", text: message }, { id: nextId("assistant"), role: "assistant", text: "我会从已保存的断点开始检查，先补齐缺失阶段，再继续后续搭建。" }]);
       setRunning(true);
+      setRunStatus("QUEUED");
       void startAgentRun(previousPrompt, config, runId, true);
       return;
     }
@@ -1200,6 +1323,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     setAssetProvenance({});
     setCandidateSources({});
     setRunning(true);
+    setRunStatus("QUEUED");
     void startAgentRun(message, config);
   };
 
@@ -1212,6 +1336,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     setAssetProvenance({});
     setCandidateSources({});
     setRunning(true);
+    setRunStatus("QUEUED");
     void startAgentRun("重新规划当前演示文稿", runConfig);
   };
 
@@ -1220,6 +1345,7 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     runEventControllerRef.current?.abort();
     void pptApi.cancelRun(runId).then(() => {
       setRunning(false);
+      setRunStatus("CANCELLED");
       setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "已暂停当前生成。你可以继续编辑当前页面，或重新规划并生成。" }]);
     }).catch(() => {
       setChatMessages((current) => [...current, { id: nextId("assistant"), role: "assistant", text: "暂停请求未完成，请稍后重试。" }]);
@@ -1358,6 +1484,34 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
     }
   };
 
+  const openPreview = (mode: "publish" | "present") => {
+    setPublishError(null);
+    if (mode === "publish") setPublishedTemplate(null);
+    if (mode === "present" && typeof document !== "undefined" && document.fullscreenEnabled && !document.fullscreenElement) {
+      void document.documentElement.requestFullscreen?.().catch(() => undefined);
+    }
+    setPreviewMode(mode);
+  };
+
+  const closePreview = () => {
+    setPreviewMode(null);
+    if (typeof document !== "undefined" && document.fullscreenElement) void document.exitFullscreen?.().catch(() => undefined);
+  };
+
+  const handlePublish = async () => {
+    if (!canPublish || !serverPresentation) return;
+    setPublishing(true);
+    setPublishError(null);
+    try {
+      const response = await pptApi.publishPresentation(serverPresentation.presentationId);
+      setPublishedTemplate(response.template);
+    } catch (error) {
+      setPublishError(error instanceof PptApiError ? error.message : "发布失败，请稍后重试");
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   return (
     <div data-ppt-workspace className="flex h-screen min-h-[720px] flex-col overflow-hidden bg-[#eef0f4] text-slate-950">
       <header className="flex h-[58px] shrink-0 items-center justify-between border-b border-slate-200 bg-white px-3 sm:px-5">
@@ -1369,18 +1523,21 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
         </div>
         <div className="flex items-center gap-1.5">
           <button type="button" onClick={() => setMobileWorkflowOpen(true)} className="flex h-9 items-center gap-2 rounded-full border border-slate-200 px-3 text-xs font-medium lg:hidden"><Menu size={15} /> 工作流</button>
-          <button type="button" className="hidden h-9 items-center gap-2 rounded-full px-3 text-xs font-medium text-slate-600 hover:bg-slate-100 sm:flex"><MonitorPlay size={15} /> 放映 <ChevronDown size={12} /></button>
+          <button type="button" onClick={() => openPreview("publish")} className="inline-flex h-9 items-center gap-2 rounded-full border border-violet-200 px-3 text-xs font-semibold text-violet-700 hover:bg-violet-50"><Send size={14} /> 发布</button>
+          <button type="button" onClick={() => openPreview("present")} className="inline-flex h-9 items-center gap-2 rounded-full px-3 text-xs font-medium text-slate-600 hover:bg-slate-100"><MonitorPlay size={15} /> 放映</button>
           <button type="button" onClick={() => void handleExport()} disabled={exporting} className="flex h-9 items-center gap-2 rounded-full bg-slate-950 px-3.5 text-xs font-semibold text-white hover:bg-slate-800 disabled:opacity-60"><Download size={14} /> {exporting ? "导出中…" : "导出 PPTX"}</button>
           <button type="button" aria-label="更多操作" className="flex h-9 w-9 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100"><MoreHorizontal size={18} /></button>
         </div>
       </header>
 
+      {previewMode && <PresentationPreviewDialog mode={previewMode} slides={slides} activeIndex={activeIndex} canPublish={canPublish} publishing={publishing} publishedTemplate={publishedTemplate} publishError={publishError} onClose={closePreview} onPublish={() => void handlePublish()} onOpenMarket={() => { closePreview(); router.push("/ppt"); }} />}
+
       <div className="flex min-h-0 flex-1">
-        <div className="hidden min-h-0 shrink-0 lg:flex" style={{ width: leftWidth }}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} searchSources={searchSources} assetSources={assetSources} assetProvenance={assetProvenance} candidateSources={candidateSources} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /></div>
+        <div className="hidden min-h-0 shrink-0 lg:flex" style={{ width: leftWidth }}><WorkflowPanel step={workflowStep} running={running} started={started} completed={runStatus === "COMPLETED"} details={workflowDetails} searchSources={searchSources} assetSources={assetSources} assetProvenance={assetProvenance} candidateSources={candidateSources} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /></div>
         <div role="separator" aria-label="调整 AI 对话区宽度" aria-orientation="vertical" onPointerDown={beginResize} className="hidden w-1 shrink-0 cursor-col-resize bg-slate-200 transition hover:bg-violet-300 lg:block" />
         {mobileWorkflowOpen && (
           <div className="fixed inset-0 z-50 flex bg-slate-950/30 lg:hidden" onClick={() => setMobileWorkflowOpen(false)}>
-            <div className="relative flex h-full w-[min(92vw,430px)]" onClick={(event) => event.stopPropagation()}><WorkflowPanel step={workflowStep} running={running} started={started} details={workflowDetails} searchSources={searchSources} assetSources={assetSources} assetProvenance={assetProvenance} candidateSources={candidateSources} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /><button type="button" aria-label="关闭工作流" onClick={() => setMobileWorkflowOpen(false)} className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500 shadow"><X size={15} /></button></div>
+            <div className="relative flex h-full w-[min(92vw,430px)]" onClick={(event) => event.stopPropagation()}><WorkflowPanel step={workflowStep} running={running} started={started} completed={runStatus === "COMPLETED"} details={workflowDetails} searchSources={searchSources} assetSources={assetSources} assetProvenance={assetProvenance} candidateSources={candidateSources} runConfig={runConfig} messages={chatMessages} onCancel={cancelAgentRun} onRestart={restartWorkflow} onSendMessage={sendChatMessage} /><button type="button" aria-label="关闭工作流" onClick={() => setMobileWorkflowOpen(false)} className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center rounded-full bg-white text-slate-500 shadow"><X size={15} /></button></div>
           </div>
         )}
 
@@ -1426,11 +1583,11 @@ export default function PptWorkspace({ presentationId }: { presentationId: strin
 
             <section className="flex min-w-0 flex-1 flex-col bg-[#e9ebef]" onClick={() => setSelectedItemId(null)}>
               <div className="flex h-9 shrink-0 items-center justify-between border-b border-slate-300/60 px-4 text-[11px] text-slate-500">
-                <span className="flex items-center gap-2"><span className={`h-1.5 w-1.5 rounded-full ${workflowStep >= workflow.length - 1 ? "bg-emerald-500" : "bg-violet-500"}`} /> {statusText}</span>
+                <span className="flex items-center gap-2"><span className={`h-1.5 w-1.5 rounded-full ${runStatus === "COMPLETED" ? "bg-emerald-500" : "bg-violet-500"}`} /> {statusText}</span>
                 <span>{activeIndex + 1} / {slides.length}</span>
               </div>
-              <div ref={canvasRef} className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-4 sm:p-8 xl:p-10">
-                <div className="w-full max-w-[1120px] transition-transform" style={{ width: `${zoom}%` }} onClick={(event) => event.stopPropagation()}>
+              <div ref={canvasRef} className="flex min-h-0 flex-1 items-center justify-center overflow-auto p-2 sm:p-4 xl:p-5">
+                <div className="w-full max-w-[1500px] transition-transform" style={{ width: `${zoom}%` }} onClick={(event) => event.stopPropagation()}>
                   <div className="overflow-hidden rounded-sm bg-white shadow-[0_20px_70px_rgba(15,23,42,0.18)] ring-1 ring-slate-300"><SlideSurface slide={activeSlide} selectedItemId={selectedItemId} onSelectItem={setSelectedItemId} onChange={updateActiveSlide} /></div>
                 </div>
               </div>

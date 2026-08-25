@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { Check, ChevronDown, Copy, Menu, Pause, Play, RefreshCw, Sparkles, TextSelect } from 'lucide-react';
-import { formatCitationMarkers, type WritingDocumentState } from '../writingDocumentTypes';
+import { formatCitationMarkers, normalizeWritingContent, type WritingDocumentState } from '../writingDocumentTypes';
 import type { ThesisOutlineState } from './thesisTypes';
 import WritingEditorToolbar from './WritingEditorToolbar';
 import WritingNavigationPanel from './WritingNavigationPanel';
@@ -56,7 +56,7 @@ function RevisionCard({ suggestion, onApply, onDismiss }: { suggestion: WritingR
 }
 
 function EditableSection({ sectionId, content, references, generating, onChange, onTextSelection }: { sectionId: string; content: string; references: WritingDocumentState['references']; generating: boolean; onChange: (sectionId: string, content: string) => void; onTextSelection?: (selection: WritingTextSelection) => void }) {
-  const displayContent = formatCitationMarkers(content.replace(/\n[\t ]*\n(?:[\t ]*\n)+/g, '\n\n'), references);
+  const displayContent = formatCitationMarkers(normalizeWritingContent(content.replace(/\n[\t ]*\n(?:[\t ]*\n)+/g, '\n\n')), references);
   const captureSelection = (container: HTMLDivElement) => {
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || !selection.anchorNode || !container.contains(selection.anchorNode)) return;
@@ -66,7 +66,7 @@ function EditableSection({ sectionId, content, references, generating, onChange,
       onTextSelection?.({ sectionId, text, anchorRect: { top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left } });
     }
   };
-  return <div contentEditable={!generating} suppressContentEditableWarning role="textbox" aria-label="正文段落" aria-multiline="true" onMouseUp={(event) => captureSelection(event.currentTarget)} onKeyUp={(event) => captureSelection(event.currentTarget)} onBlur={(event) => onChange(sectionId, event.currentTarget.innerText)} className="mt-2 min-h-12 whitespace-pre-wrap text-[17px] leading-[1.95] text-slate-800 outline-none empty:before:text-slate-300 empty:before:content-['正文将在这里生成'] focus-visible:rounded-md focus-visible:ring-2 focus-visible:ring-blue-100">{displayContent}</div>;
+  return <div contentEditable={!generating} suppressContentEditableWarning role="textbox" aria-label="正文段落" aria-multiline="true" onMouseUp={(event) => captureSelection(event.currentTarget)} onKeyUp={(event) => captureSelection(event.currentTarget)} onBlur={(event) => onChange(sectionId, normalizeWritingContent(event.currentTarget.innerText))} className="mt-2 min-h-12 whitespace-pre-wrap text-[17px] leading-7 text-slate-800 outline-none empty:before:text-slate-300 empty:before:content-['正文将在这里生成'] focus-visible:rounded-md focus-visible:ring-2 focus-visible:ring-blue-100">{displayContent}</div>;
 }
 
 export default function ThesisBodyView({ document: writingDocument, outline, generating, paused, onPause, onContinue, onSectionChange, showNavigation = true, showGenerationControls = true, styleOptions = [], currentStyle, onStyleChange, onTextSelection, onRevisionAction, revisionSuggestion, onApplyRevision, onDismissRevision }: ThesisBodyViewProps) {

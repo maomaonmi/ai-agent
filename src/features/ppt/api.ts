@@ -67,6 +67,10 @@ export interface PptPresentationResponse {
   ignoredOperationIds?: string[];
 }
 
+export interface PptPublishResponse {
+  template: PptTemplate;
+}
+
 export interface CreatePptPresentationInput {
   presentationId?: string;
   templateId?: string;
@@ -128,7 +132,7 @@ export interface CreatePptRunInput {
   prompt: string;
   maxIterations?: number;
   modelProvider?: "deepseek" | "qwen" | "glm" | "minimax";
-  searchProvider?: "auto" | "firecrawl" | "qwen" | "glm";
+  searchProvider?: "auto" | "firecrawl" | "qwen" | "glm" | "minimax";
   searchLimit?: number;
   resume?: boolean;
 }
@@ -185,6 +189,7 @@ export interface PptApi {
   deleteTemplate(templateId: string): Promise<void>;
   createPresentation(input?: CreatePptPresentationInput, signal?: AbortSignal): Promise<PptPresentationResponse>;
   getPresentation(presentationId: string, signal?: AbortSignal): Promise<PptPresentationResponse>;
+  publishPresentation(presentationId: string, signal?: AbortSignal): Promise<PptPublishResponse>;
   applyOperations(presentationId: string, input: ApplyPptOperationsInput, signal?: AbortSignal): Promise<PptPresentationResponse>;
   createRun(input: CreatePptRunInput, signal?: AbortSignal): Promise<PptRunResponse>;
   listResumableRuns(signal?: AbortSignal): Promise<PptRunListResponse>;
@@ -321,6 +326,10 @@ export function createPptApi(baseUrl = DEFAULT_API_BASE_URL): PptApi {
     getPresentation: (presentationId, signal) => request<PptPresentationResponse>(
       `/api/ppt/presentations/${encodeURIComponent(presentationId)}`,
       { signal },
+    ),
+    publishPresentation: (presentationId, signal) => request<PptPublishResponse>(
+      `/api/ppt/presentations/${encodeURIComponent(presentationId)}/publish`,
+      { method: "POST", signal },
     ),
     applyOperations: (presentationId, input, signal) => request<PptPresentationResponse>(
       `/api/ppt/presentations/${encodeURIComponent(presentationId)}/operations`,

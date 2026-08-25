@@ -1,4 +1,4 @@
-import { WritingSceneId } from './writingTypes';
+import type { WritingSceneId } from './writingTypes';
 
 export type WritingDocumentView = 'outline' | 'body' | 'layout';
 export type WritingSectionStatus = 'pending' | 'generating' | 'complete' | 'failed';
@@ -38,6 +38,34 @@ export interface WritingCitation {
   referenceId: string;
   quote?: string;
   status: CitationStatus;
+}
+
+/** Remove process-oriented boilerplate without touching the document structure. */
+export function stripWritingPreamble(content: string): string {
+  const value = content.replace(/\r\n/g, '\n').trim();
+  if (!/^我将为您/u.test(value)) return value;
+
+  const headingOffset = value.search(/#{1,6}\s+\S/);
+  if (headingOffset > 0) {
+    return value.slice(headingOffset).trim();
+  }
+
+  return value
+    .replace(/^我将为您[^\n。！？]*[。！？]\s*/u, '')
+    .replace(/^(?:首先|接下来|下面)[^\n。！？]*(?:搜索|检索|撰写|生成|介绍|说明)[^\n。！？]*[。！？]\s*/u, '')
+    .trim();
+}
+
+/** Normalize legacy/editable writing text while preserving ordinary prose. */
+export function normalizeWritingContent(content: string): string {
+  return stripWritingPreamble(content)
+    .replace(/^#{1,6}\s*/gm, '')
+    .replace(/\*\*([\s\S]*?)\*\*/g, '$1')
+    .replace(/__([\s\S]*?)__/g, '$1')
+    .replace(/^\s*[-*_]{3,}\s*$/gm, '')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 /**
@@ -128,11 +156,12 @@ export function createEmptyWritingDocument(scene: WritingSceneId, title = '未�
 export function documentFromV1Result(scene: WritingSceneId, content: string, title = '未命名写作'): WritingDocumentState {
   const document = createEmptyWritingDocument(scene, title);
   const section = document.sections[0];
-  section.content = content;
-  section.status = content.trim() ? 'complete' : 'pending';
-  document.generatedLength = content.replace(/\s/g, '').length;
-  document.researchStatus = content.trim() ? 'done' : 'idle';
-  document.view = content.trim() ? 'body' : 'outline';
+  const normalizedContent = normalizeWritingContent(content);
+  section.content = normalizedContent;
+  section.status = normalizedContent.trim() ? 'complete' : 'pending';
+  document.generatedLength = normalizedContent.replace(/\s/g, '').length;
+  document.researchStatus = normalizedContent.trim() ? 'done' : 'idle';
+  document.view = normalizedContent.trim() ? 'body' : 'outline';
   document.updatedAt = Date.now();
   return document;
 }

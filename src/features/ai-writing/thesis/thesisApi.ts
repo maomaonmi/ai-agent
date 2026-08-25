@@ -1,4 +1,5 @@
 import { ThesisBodyEvent, ThesisOutlineEvent, ThesisOutlineState, ThesisTargetWords } from './thesisTypes';
+import { ThesisProvider } from '../writingModelRouter';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
@@ -9,6 +10,7 @@ interface StreamThesisOutlineInput {
   targetWords: ThesisTargetWords | null;
   sessionId?: string;
   previousOutline?: object;
+  provider?: ThesisProvider;
 }
 
 export async function streamThesisOutline(input: StreamThesisOutlineInput, onEvent: (event: ThesisOutlineEvent) => void, signal?: AbortSignal): Promise<void> {
@@ -23,6 +25,7 @@ export async function streamThesisOutline(input: StreamThesisOutlineInput, onEve
       target_words: input.targetWords,
       session_id: input.sessionId,
       previous_outline: input.previousOutline,
+      provider: input.provider ?? 'qwen',
     }),
   });
   if (!response.ok) {
@@ -48,7 +51,7 @@ export async function streamThesisOutline(input: StreamThesisOutlineInput, onEve
   }
 }
 
-export async function streamThesisReferences(input: { instruction: string; chapters: Array<{ id: string; title: string; summary: string }> }, onEvent: (event: ThesisOutlineEvent) => void, signal?: AbortSignal): Promise<void> {
+export async function streamThesisReferences(input: { instruction: string; chapters: Array<{ id: string; title: string; summary: string }>; provider?: ThesisProvider }, onEvent: (event: ThesisOutlineEvent) => void, signal?: AbortSignal): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/writing/thesis/references/stream`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
     body: JSON.stringify(input),
@@ -74,10 +77,11 @@ export async function streamThesisReferences(input: { instruction: string; chapt
   }
 }
 
-export async function streamThesisBody(input: { outline: ThesisOutlineState; completedChapterIds?: string[] }, onEvent: (event: ThesisBodyEvent) => void, signal?: AbortSignal): Promise<void> {
+export async function streamThesisBody(input: { outline: ThesisOutlineState; completedChapterIds?: string[]; provider?: ThesisProvider }, onEvent: (event: ThesisBodyEvent) => void, signal?: AbortSignal): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/writing/thesis/body/stream`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, signal,
     body: JSON.stringify({
+      provider: input.provider ?? 'qwen',
       title: input.outline.title,
       completed_chapter_ids: input.completedChapterIds ?? [],
       chapters: input.outline.chapters.map((chapter) => ({
