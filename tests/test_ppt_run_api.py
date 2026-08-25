@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -33,6 +34,7 @@ def _client(tmp_path: Path) -> TestClient:
 
     app = FastAPI()
     app.include_router(create_ppt_router(repository, owner_resolver=owner_resolver))
+    app.state.ppt_repository = repository
     return TestClient(app)
 
 
@@ -168,6 +170,202 @@ def test_ppt_history_lists_terminal_and_active_runs_with_presentation_binding(tm
     assert records["run-history-001"]["title"] == "Run test"
     assert records["run-history-001"]["prompt"] == "记录已完成的历史 PPT"
     assert records["run-history-001"]["status"] == "CANCELLED"
+
+
+def test_completed_presentation_can_be_published_to_market_idempotently(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    headers = {"x-test-owner": "owner-a"}
+    client.app.state.ppt_repository.create_run(
+        run_id="run-publish-001",
+        presentation_id="presentation-run-001",
+        owner_scope="owner-a",
+        status="COMPLETED",
+        phase="REVIEW",
+        state={"qualityReport": {"status": "passed"}},
+    )
+    published = client.post("/api/ppt/presentations/presentation-run-001/publish", headers=headers)
+    repeated = client.post("/api/ppt/presentations/presentation-run-001/publish", headers=headers)
+    assert published.status_code == 200
+    assert published.json()["template"]["isPrivate"] is True
+    assert published.json()["template"]["status"] == "READY"
+    assert published.json()["template"]["pageCount"] == 1
+    assert published.json()["template"]["manifest"]["presentationDocument"]["slides"][0]["id"] == "slide-001"
+    assert repeated.json()["template"]["id"] == published.json()["template"]["id"]
+    market = client.get("/api/ppt/templates?page=1&pageSize=50&source=PRIVATE", headers=headers)
+    assert market.status_code == 200
+    assert published.json()["template"]["id"] in {item["id"] for item in market.json()["templates"]}
+
+
+def test_published_presentation_syncs_first_slide_image_as_market_cover(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    headers = {"x-test-owner": "owner-a"}
+    repository = client.app.state.ppt_repository
+    record = repository.get_presentation("presentation-run-001", owner_scope="owner-a")
+    assert record is not None
+    document = json.loads(json.dumps(record.document))
+    document["slides"][0]["background"] = {
+        "type": "IMAGE",
+        "assetId": "asset-cover-001",
+        "fit": "COVER",
+        "opacity": 1,
+    }
+    repository.commit_revision(
+        presentation_id=record.id,
+        owner_scope="owner-a",
+        expected_revision=record.current_revision,
+        document={**document, "revision": record.current_revision + 1},
+        operations=[],
+        operation_payloads={},
+    )
+    repository.create_run(
+        run_id="run-publish-cover-001",
+        presentation_id="presentation-run-001",
+        owner_scope="owner-a",
+        status="COMPLETED",
+        phase="REVIEW",
+        state={"qualityReport": {"status": "passed"}},
+    )
+
+    published = client.post("/api/ppt/presentations/presentation-run-001/publish", headers=headers)
+
+    assert published.status_code == 200
+    template = published.json()["template"]
+    assert template["coverUrl"].endswith("/api/ppt/assets/asset-cover-001/content")
+    assert template["manifest"]["coverAssetId"] == "asset-cover-001"
+
+
+def test_republishing_after_private_template_soft_delete_restores_the_same_entry(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    headers = {"x-test-owner": "owner-a"}
+    repository = client.app.state.ppt_repository
+    repository.create_run(
+        run_id="run-publish-restored-001",
+        presentation_id="presentation-run-001",
+        owner_scope="owner-a",
+        status="COMPLETED",
+        phase="REVIEW",
+        state={"qualityReport": {"status": "passed"}},
+    )
+
+    first = client.post("/api/ppt/presentations/presentation-run-001/publish", headers=headers)
+    assert first.status_code == 200
+    template_id = first.json()["template"]["id"]
+    assert client.delete(f"/api/ppt/templates/{template_id}", headers=headers).status_code == 204
+    assert client.get(f"/api/ppt/templates/{template_id}", headers=headers).status_code == 404
+
+    restored = client.post("/api/ppt/presentations/presentation-run-001/publish", headers=headers)
+
+    assert restored.status_code == 200
+    assert restored.json()["template"]["id"] == template_id
+    assert restored.json()["template"]["status"] == "READY"
+    market = client.get("/api/ppt/templates?page=1&pageSize=50&source=PRIVATE", headers=headers)
+    assert template_id in {item["id"] for item in market.json()["templates"]}
+
+
+def test_getting_an_older_published_template_backfills_its_preview_document(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    repository = client.app.state.ppt_repository
+    template_id = f"template-published-{uuid.uuid5(uuid.NAMESPACE_URL, 'owner-a:presentation-run-001').hex}"
+    repository.create_template(
+        template_id=template_id,
+        owner_scope="owner-a",
+        name="旧发布记录",
+        description="旧记录",
+        scene="CUSTOM",
+        source="PRIVATE",
+        status="READY",
+        manifest={"pageCount": 0, "publishedPresentationId": "presentation-run-001"},
+    )
+
+    detail = client.get(f"/api/ppt/templates/{template_id}", headers={"x-test-owner": "owner-a"})
+
+    assert detail.status_code == 200
+    assert detail.json()["pageCount"] == 1
+    assert detail.json()["manifest"]["presentationDocument"]["slides"][0]["id"] == "slide-001"
+    listed = client.get("/api/ppt/templates?page=1&pageSize=50&source=PRIVATE", headers={"x-test-owner": "owner-a"})
+    listed_template = next(item for item in listed.json()["templates"] if item["id"] == template_id)
+    assert listed_template["pageCount"] == 1
+
+
+def test_completed_presentation_with_legacy_numeric_metadata_can_be_published(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    headers = {"x-test-owner": "owner-a"}
+    repository = client.app.state.ppt_repository
+    record = repository.get_presentation("presentation-run-001", owner_scope="owner-a")
+    assert record is not None
+    legacy_document = record.document
+    legacy_document["metadata"]["updatedAt"] = 1787495566.5002158
+    repository.commit_revision(
+        presentation_id=record.id,
+        owner_scope="owner-a",
+        expected_revision=record.current_revision,
+        document={**legacy_document, "revision": record.current_revision + 1},
+        operations=[],
+        operation_payloads={},
+    )
+    repository.create_run(
+        run_id="run-publish-legacy-001",
+        presentation_id="presentation-run-001",
+        owner_scope="owner-a",
+        status="COMPLETED",
+        phase="REVIEW",
+        state={"qualityReport": {"status": "passed"}},
+    )
+
+    published = client.post("/api/ppt/presentations/presentation-run-001/publish", headers=headers)
+
+    assert published.status_code == 200
+    assert published.json()["template"]["status"] == "READY"
+
+
+def test_completed_presentation_with_replayed_duplicate_slide_can_be_published(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    headers = {"x-test-owner": "owner-a"}
+    repository = client.app.state.ppt_repository
+    record = repository.get_presentation("presentation-run-001", owner_scope="owner-a")
+    assert record is not None
+    duplicate_document = {
+        **record.document,
+        "slides": [record.document["slides"][0], {**record.document["slides"][0], "order": 1}],
+        "revision": record.current_revision + 1,
+    }
+    repository.commit_revision(
+        presentation_id=record.id,
+        owner_scope="owner-a",
+        expected_revision=record.current_revision,
+        document=duplicate_document,
+        operations=[],
+        operation_payloads={},
+    )
+    repository.create_run(
+        run_id="run-publish-duplicate-001",
+        presentation_id="presentation-run-001",
+        owner_scope="owner-a",
+        status="COMPLETED",
+        phase="REVIEW",
+        state={"qualityReport": {"status": "passed"}},
+    )
+
+    published = client.post("/api/ppt/presentations/presentation-run-001/publish", headers=headers)
+
+    assert published.status_code == 200
+    assert published.json()["template"]["pageCount"] == 1
+
+
+def test_unfinished_presentation_cannot_be_published(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    headers = {"x-test-owner": "owner-a"}
+    client.app.state.ppt_repository.create_run(
+        run_id="run-publish-pending",
+        presentation_id="presentation-run-001",
+        owner_scope="owner-a",
+        status="RUNNING",
+        phase="BUILD",
+        state={},
+    )
+    rejected = client.post("/api/ppt/presentations/presentation-run-001/publish", headers=headers)
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "PPT_PRESENTATION_NOT_READY"
 
 
 def test_ppt_asset_content_is_served_from_local_storage_and_owner_scoped(tmp_path: Path) -> None:

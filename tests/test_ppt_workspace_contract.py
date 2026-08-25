@@ -35,6 +35,10 @@ def test_ppt_workspace_route_and_core_editor_controls_exist() -> None:
         '插入表格',
         '演讲者备注',
         '导出 PPTX',
+        '发布前预览',
+        '发布到市场',
+        'requestFullscreen',
+        'PPT 放映',
     ):
         assert contract_marker in source
     assert 'useState(false)' in source
@@ -70,6 +74,15 @@ def test_workspace_resumes_durable_runs_and_does_not_claim_uncreated_ai_assets()
     assert 'nextQuery.set("runId", run.runId)' in workspace
     assert 'nextQuery.set("resume", "1")' in workspace
     assert 'loading="lazy"' in workspace
+
+
+def test_workspace_uses_durable_run_status_for_completion_and_publish() -> None:
+    workspace = (FRONTEND / "features" / "ppt" / "workspace" / "PptWorkspace.tsx").read_text(encoding="utf-8")
+
+    assert 'type PptRunStatus' in workspace
+    assert 'runStatus === "COMPLETED"' in workspace
+    assert 'setRunStatus(latestRun.status)' in workspace
+    assert 'completed={runStatus === "COMPLETED"}' in workspace
 
 
 def test_main_sidebar_exposes_a_dedicated_ppt_history_group() -> None:

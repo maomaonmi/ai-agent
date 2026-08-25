@@ -13,6 +13,7 @@ import copy
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
@@ -522,7 +523,7 @@ class AgentRunService:
         normalized = section.strip()
         if index == 0:
             return "hero"
-        if normalized in {"趋势", "指标", "对比"}:
+        if normalized in {"关键事实", "趋势", "指标", "对比", "洞察", "风险"}:
             return "chart"
         if normalized in {"案例", "落地"}:
             return "image-focus"
@@ -626,6 +627,32 @@ class AgentRunService:
         return {"status": "passed" if passed else "needs_attention", "checks": checks, "slideCount": len(slides) if isinstance(slides, list) else 0, "outlineCount": int((outline or {}).get("slideCount", 0)), "referenceCount": references}
 
     @staticmethod
+    def _dedupe_slide_records(slides: list[object]) -> list[dict[str, Any]]:
+        """Normalize replayed BUILD records before they reach the canvas.
+
+        A resumed run can contain the same page once from the persisted
+        document and once from a replayed phase event. React then reports a
+        duplicate key and the editor renders two copies of the page. Keep the
+        latest record for each stable slide id while preserving order.
+        """
+        result: list[dict[str, Any]] = []
+        positions: dict[str, int] = {}
+        for value in slides:
+            if not isinstance(value, dict):
+                continue
+            slide_id = str(value.get("id") or "")
+            if not slide_id:
+                result.append(value)
+                continue
+            existing_position = positions.get(slide_id)
+            if existing_position is None:
+                positions[slide_id] = len(result)
+                result.append(value)
+            else:
+                result[existing_position] = value
+        return result
+
+    @staticmethod
     def _slide_from_outline(
         slide: Mapping[str, Any],
         index: int,
@@ -645,8 +672,13 @@ class AgentRunService:
         # Keep the model-written paragraph visible on the slide. The old
         # renderer only showed bullets, which made BUILD look like a static
         # outline even after a model had produced the section prose.
-        body_text = body[:420]
-        if bullet_text:
+        # Cards/timelines already expose their key points as individual
+        # components. Keeping a short paragraph there prevents the final
+        # copy from being pushed below the 16:9 canvas while still preserving
+        # the model-written section text for the other layouts.
+        body_limit = 64 if layout in {"grid", "timeline"} else 220
+        body_text = body[:body_limit]
+        if bullet_text and layout not in {"grid", "timeline"}:
             body_text = f"{body_text}\n\n{bullet_text}" if body_text else bullet_text
         elements: list[dict[str, Any]] = []
 
@@ -698,13 +730,17 @@ class AgentRunService:
         elif layout == "timeline":
             title_element.update({"width": 0.82, "y": 0.15})
             subtitle_element.update({"width": 0.82, "y": 0.35})
-            body_element.update({"width": 0.82, "y": 0.84, "height": 0.10})
+            body_element.update({"width": 0.82, "y": 0.79, "height": 0.14})
+            body_element["style"]["fontSize"] = 12
             elements.extend([eyebrow, title_element, subtitle_element, body_element])
             points = [str(item).strip() for item in key_points[:4] if str(item).strip()] or ["准备", "验证", "执行", "复盘"]
             for point_index, point in enumerate(points):
+                pill_width = 0.18
                 x = 0.08 + point_index * (0.78 / max(1, len(points) - 1))
-                elements.append(shape_element(f"step-{point_index + 1}", x - 0.018, 0.59, 0.036, 0.036, fill="#8B5CF6", stroke="#C4B5FD", opacity=1))
-                elements.append(text_element(f"step-{point_index + 1}-text", point, max(0.04, x - 0.08), 0.68, 0.16, 0.13, size=12, color=text_color, bold=True, align="CENTER"))
+                pill_x = min(0.82, max(0.01, x - pill_width / 2))
+                elements.append(shape_element(f"step-{point_index + 1}", pill_x, 0.56, pill_width, 0.11, fill="#8B5CF6", stroke="#C4B5FD", opacity=1))
+                label = point if len(point) <= 10 else f"{point[:10]}…"
+                elements.append(text_element(f"step-{point_index + 1}-text", label, pill_x + 0.01, 0.575, pill_width - 0.02, 0.08, size=10, color="#FFFFFF", bold=True, align="CENTER", z_index=3))
         else:  # closing
             title_element.update({"width": 0.82, "y": 0.24, "height": 0.25})
             subtitle_element.update({"width": 0.82, "y": 0.57})
@@ -715,11 +751,16 @@ class AgentRunService:
 
         chart_spec = slide.get("chart") if isinstance(slide.get("chart"), Mapping) else None
         if layout == "chart":
-            chart_spec = chart_spec or {"chartType": "BAR", "categories": ["阶段一", "阶段二", "阶段三"], "series": [{"name": "示意值", "values": [42, 68, 86], "color": "#8B5CF6"}], "showLegend": False}
+            chart_types = {"关键事实": "BAR", "趋势": "LINE", "指标": "DOUGHNUT", "对比": "BAR", "洞察": "AREA", "风险": "PIE"}
+            fallback_type = chart_types.get(str(slide.get("section") or ""), ("BAR", "LINE", "AREA", "PIE", "DOUGHNUT")[index % 5])
+            chart_spec = chart_spec or {"chartType": fallback_type, "categories": ["阶段一", "阶段二", "阶段三"], "series": [{"name": "示意值", "values": [42, 68, 86], "color": "#8B5CF6"}], "showLegend": False}
             categories = chart_spec.get("categories") if isinstance(chart_spec.get("categories"), list) else ["阶段一", "阶段二", "阶段三"]
             series = chart_spec.get("series") if isinstance(chart_spec.get("series"), list) else [{"name": "示意值", "values": [42, 68, 86], "color": "#8B5CF6"}]
             elements.append({"type": "CHART", "id": f"{slide_id}-chart", "x": 0.53, "y": 0.20, "width": 0.39, "height": 0.55, "rotation": 0, "zIndex": 1, "opacity": 0.96, "isLocked": False, "isHidden": False, "chartType": str(chart_spec.get("chartType") or "BAR"), "categories": categories[:8], "series": series[:3], "showLegend": bool(chart_spec.get("showLegend", False))})
-        if asset_id:
+        # Chart pages reserve the entire right column for the chart. A web
+        # image on the same coordinates made the chart unreadable; image-led
+        # layouts still receive the downloaded research asset.
+        if asset_id and layout != "chart":
             image_position = (0.56, 0.19, 0.36, 0.58) if layout in {"split", "image-focus"} else (0.73, 0.18, 0.21, 0.45)
             elements.append({"type": "IMAGE", "id": f"{slide_id}-material", "x": image_position[0], "y": image_position[1], "width": image_position[2], "height": image_position[3], "rotation": 0, "zIndex": 1, "opacity": 0.94, "isLocked": False, "isHidden": False, "assetId": asset_id, "alt": "网页研究素材", "fit": "COVER"})
         source_urls = slide.get("sourceUrls") if isinstance(slide.get("sourceUrls"), list) else []
@@ -1144,6 +1185,7 @@ class AgentRunService:
                     existing_document_slides = presentation.document.get("slides", [])
                     if not isinstance(existing_document_slides, list):
                         existing_document_slides = []
+                    existing_document_slides = self._dedupe_slide_records(existing_document_slides)
                     can_resume_build = (
                         isinstance(existing_build, dict)
                         and existing_build.get("contentMode") == "model-segmented"
@@ -1299,7 +1341,7 @@ class AgentRunService:
                             elif component_type == "element" and isinstance(component_payload, Mapping):
                                 current_slide.setdefault("elements", []).append(copy.deepcopy(component_payload))
                             working_document["revision"] = presentation.current_revision + 1
-                            working_document.setdefault("metadata", {})["updatedAt"] = time.time()
+                            working_document.setdefault("metadata", {})["updatedAt"] = datetime.now(UTC).isoformat().replace("+00:00", "Z")
                             operation_id = f"ppt-agent-build-v4-{run_id}-{build_attempt_id}-{index + 1}-{component_index + 1}"
                             operation = {
                                 "operationId": operation_id,

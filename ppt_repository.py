@@ -338,6 +338,56 @@ class PptRepository:
         assert record is not None
         return record
 
+    def restore_template(
+        self,
+        template_id: str,
+        *,
+        owner_scope: str,
+        name: str,
+        scene: str,
+        source: TemplateSource,
+        status: str,
+        manifest: dict[str, Any],
+        description: str | None = None,
+        source_asset_id: str | None = None,
+    ) -> TemplateRecord | None:
+        """Restore a soft-deleted private template while replacing its metadata.
+
+        Published PPTs use a deterministic template id so retries are idempotent.
+        A deleted row still occupies that id, therefore a retry must restore the
+        row instead of attempting a second INSERT.
+        """
+        if source != "PRIVATE":
+            raise ValueError("only private templates can be restored")
+        timestamp = _now()
+        with self._connection(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE ppt_templates
+                SET owner_scope = ?, name = ?, description = ?, scene = ?, source = ?,
+                    status = ?, manifest_json = ?, source_asset_id = ?,
+                    updated_at = ?, deleted_at = NULL
+                WHERE id = ? AND owner_scope = ? AND source = 'PRIVATE'
+                  AND deleted_at IS NOT NULL
+                """,
+                (
+                    owner_scope,
+                    name,
+                    description,
+                    scene,
+                    source,
+                    status,
+                    _json_dump(manifest),
+                    source_asset_id,
+                    timestamp,
+                    template_id,
+                    owner_scope,
+                ),
+            )
+        if cursor.rowcount != 1:
+            return None
+        return self.get_template(template_id, owner_scope=owner_scope)
+
     def get_template(self, template_id: str, *, owner_scope: str) -> TemplateRecord | None:
         with self._connection() as connection:
             row = connection.execute(

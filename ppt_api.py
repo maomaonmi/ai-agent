@@ -27,6 +27,7 @@ from ppt_template_pipeline import (
 from ppt_service import (
     PresentationDocumentInvalid,
     PresentationNotFound,
+    PresentationNotReady,
     PptService,
     TemplateNotFound,
     TemplateReadOnly,
@@ -311,6 +312,21 @@ def create_ppt_router(
             return service.get_presentation(presentation_id, owner_scope=owner_scope)
         except PresentationNotFound:
             return _error("PPT_PRESENTATION_NOT_FOUND", "演示文稿不存在", status_code=404)
+
+    @router.post("/presentations/{presentation_id}/publish", response_model=None)
+    async def publish_presentation(presentation_id: str, request: Request) -> dict[str, Any] | JSONResponse:
+        owner_scope = await _resolve_owner(owner_resolver, request)
+        try:
+            template = service.publish_presentation(presentation_id, owner_scope=owner_scope)
+            return {"template": template}
+        except PresentationNotFound:
+            return _error("PPT_PRESENTATION_NOT_FOUND", "演示文稿不存在", status_code=404)
+        except PresentationNotReady as exc:
+            return _error("PPT_PRESENTATION_NOT_READY", str(exc), status_code=409)
+        except PresentationDocumentInvalid as exc:
+            return _error("PPT_DOCUMENT_INVALID", str(exc), status_code=422)
+        except RepositoryConflict:
+            return _error("PPT_TEMPLATE_PUBLISH_CONFLICT", "模板发布记录冲突，请刷新后重试", status_code=409)
 
     @router.post("/presentations/{presentation_id}/operations", response_model=None)
     async def apply_presentation_operations(

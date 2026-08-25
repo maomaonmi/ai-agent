@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal, Union
 from urllib.parse import urlparse
 
@@ -413,4 +413,42 @@ def parse_presentation_document(raw: dict[str, Any]) -> PresentationDocument:
         candidate = _migrate_v0(candidate)
     elif version != 1:
         raise UnsupportedPresentationSchema(version)
+    # A resumed BUILD from an older worker could append the same page twice
+    # with the same stable id.  Collapse those replayed records and rebuild
+    # the contiguous order before strict model validation.  This keeps old
+    # completed presentations publishable without weakening the contract for
+    # newly-written documents.
+    slides = candidate.get("slides")
+    if isinstance(slides, list):
+        normalized_slides: list[dict[str, Any]] = []
+        positions: dict[str, int] = {}
+        for index, slide in enumerate(slides):
+            if not isinstance(slide, dict):
+                continue
+            slide_copy = copy.deepcopy(slide)
+            slide_id = str(slide_copy.get("id") or f"slide-{index + 1}")
+            existing_position = positions.get(slide_id)
+            if existing_position is None:
+                positions[slide_id] = len(normalized_slides)
+                normalized_slides.append(slide_copy)
+            else:
+                # Keep the latest replay, matching the agent's resumable
+                # build dedupe policy.
+                normalized_slides[existing_position] = slide_copy
+        for index, slide in enumerate(normalized_slides):
+            slide["order"] = index
+        candidate["slides"] = normalized_slides
+    # Older component-build workers persisted Unix timestamps directly into
+    # metadata.  Keep those durable documents readable and emit the canonical
+    # ISO-8601 representation expected by the versioned contract.
+    metadata = candidate.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("createdAt", "updatedAt"):
+            value = metadata.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                try:
+                    metadata[key] = datetime.fromtimestamp(value, UTC).isoformat().replace("+00:00", "Z")
+                except (OverflowError, OSError, ValueError):
+                    # Let Pydantic report the original invalid value below.
+                    pass
     return PresentationDocument.model_validate(candidate)

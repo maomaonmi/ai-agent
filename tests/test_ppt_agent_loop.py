@@ -22,6 +22,35 @@ def test_search_batch_never_allows_more_than_twenty_results() -> None:
     assert batch.limit == 20
 
 
+def test_slide_layout_keeps_timeline_labels_inside_pills_and_chart_clear(tmp_path: Path) -> None:
+    timeline = AgentRunService._slide_from_outline(
+        {
+            "section": "方法",
+            "title": "实施方法",
+            "body": "一段足够长的正文，用于验证时间线下方的说明仍然留在画布范围内。" * 4,
+            "keyPoints": ["准备", "验证", "执行", "复盘"],
+        },
+        7,
+        "web-asset",
+    )
+    pill_labels = [
+        element for element in timeline["elements"]
+        if element.get("id", "").endswith("-text") and element.get("text") in {"准备", "验证", "执行", "复盘"}
+    ]
+    assert len(pill_labels) == 4
+    assert all(element["y"] < 0.7 for element in pill_labels)
+    assert all(element["x"] + element["width"] <= 1 for element in timeline["elements"])
+    assert all(element["y"] + element["height"] <= 1 for element in timeline["elements"])
+
+    chart = AgentRunService._slide_from_outline(
+        {"section": "洞察", "title": "洞察", "body": "基于资料形成判断。", "keyPoints": ["事实", "判断"]},
+        6,
+        "web-asset",
+    )
+    assert {element["chartType"] for element in chart["elements"] if element.get("type") == "CHART"} == {"AREA"}
+    assert not any(element.get("type") == "IMAGE" for element in chart["elements"])
+
+
 def test_agent_run_uses_configured_search_download_and_image_adapters(tmp_path: Path) -> None:
     repository = PptRepository(tmp_path / "ppt.db")
     repository.initialize()
@@ -570,6 +599,7 @@ def test_build_writes_model_generated_sections_one_page_at_a_time(tmp_path: Path
     assert len({slide.get("layout") for slide in snapshot.state["outline"]["slides"]}) >= 6
     presentation = repository.get_presentation("presentation-narrative-001", owner_scope="owner-a")
     assert presentation is not None
+    assert len({slide["id"] for slide in presentation.document["slides"]}) == len(presentation.document["slides"])
     assert presentation.document["slides"][0]["elements"][1]["text"] == "模型标题 1"
     assert "模型真实写入的第 1 页正文" in next(
         element["text"] for element in presentation.document["slides"][0]["elements"] if element["id"].endswith("-body")
@@ -583,6 +613,7 @@ def test_build_writes_model_generated_sections_one_page_at_a_time(tmp_path: Path
     assert chart_elements
     assert chart_elements[0]["categories"] == ["阶段一", "阶段二", "阶段三"]
     assert chart_elements[0]["series"][0]["values"] == [42, 68, 86]
+    assert len({str(element["chartType"]) for element in chart_elements}) >= 3
     progress = [
         event for event in repository.list_run_events(run.id, after_sequence=0, limit=500)
         if event.event_type == "phase.progress" and event.payload.get("phase") == "BUILD"
