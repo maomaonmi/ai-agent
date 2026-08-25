@@ -58,7 +58,7 @@ import { Image as ImageIcon, Paperclip, X, Bot, ArrowUp, Sparkles, SlidersHorizo
 import ResearchProgressPanel from './ResearchProgressPanel';
 import MarkdownMessage from './MarkdownMessage';
 import NodeProgressPanel from './NodeProgressPanel';
-import ModeSelector, { ModeType } from './ModeSelector';
+import ModeSelector, { ModeType, normalizeMode } from './ModeSelector';
 import AgentDrawer from './AgentDrawer';
 import SessionSidebar from './SessionSidebar';
 import RuntimeSettingsDrawer from './RuntimeSettingsDrawer';
@@ -1152,8 +1152,9 @@ export default function ChatInterface() {
         setWritingSessionRestore(null);
       }
       setActiveSessionId(session.session_id);
-      setMode(session.mode as ModeType);
-      if (session.mode === 'omni') setPreferredCapability('omni');
+      const restoredMode = normalizeMode(session.mode);
+      setMode(restoredMode);
+      if (restoredMode === 'omni') setPreferredCapability('omni');
       setView(session.mode === 'writing' ? 'writing' : 'chat');
       applySnapshot(history.snapshot);
       localStorage.setItem('activeSessionId', session.session_id);

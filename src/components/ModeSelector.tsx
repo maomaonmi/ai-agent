@@ -37,6 +37,17 @@ export const MODE_OPTIONS = [
 export type ModeType = typeof MODE_OPTIONS[number]['id'];
 type ModeGroup = typeof MODE_OPTIONS[number]['group'];
 
+/**
+ * Persisted sessions can outlive the mode list shipped by the current build.
+ * Keep the newest Omni default for unknown legacy values instead of allowing
+ * the selector to render against an undefined option.
+ */
+export function normalizeMode(value: string): ModeType {
+  return MODE_OPTIONS.some((mode) => mode.id === value)
+    ? value as ModeType
+    : MODE_OPTIONS[0].id;
+}
+
 const GROUPS: Array<{
   id: ModeGroup;
   label: string;
@@ -83,7 +94,7 @@ export default function ModeSelector({
 }: ModeSelectorProps) {
   const [openGroup, setOpenGroup] = useState<ModeGroup | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const selectedMode = MODE_OPTIONS.find((mode) => mode.id === value)!;
+  const selectedMode = MODE_OPTIONS.find((mode) => mode.id === value) ?? MODE_OPTIONS[0];
   // Why: 过滤后渲染的组列表，未传 allowedGroups 则展示全部。
   const visibleGroups = allowedGroups
     ? GROUPS.filter((g) => allowedGroups.includes(g.id))
