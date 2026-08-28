@@ -6,6 +6,10 @@ export interface ParsedMusicDraft {
   note: string;
 }
 
+export interface StreamingMusicDraft extends ParsedMusicDraft {
+  complete: boolean;
+}
+
 const tagValue = (value: string, tag: string) => {
   const match = value.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i'));
   return match?.[1]?.trim() ?? '';
@@ -21,6 +25,20 @@ export function parseMusicDraft(value: string): ParsedMusicDraft {
     title: title || '未命名歌词',
     lyrics: value.trim(),
     note,
+  };
+}
+
+export function parseStreamingMusicDraft(value: string): StreamingMusicDraft {
+  const lyricsStart = value.search(/<lyrics>/i);
+  const closedLyrics = tagValue(value, 'lyrics');
+  const partialLyrics = lyricsStart >= 0
+    ? value.slice(lyricsStart).replace(/^<lyrics>/i, '').split(/<\/lyrics>/i)[0].trimStart()
+    : '';
+  return {
+    title: tagValue(value, 'title'),
+    note: tagValue(value, 'note'),
+    lyrics: closedLyrics || partialLyrics,
+    complete: /<\/lyrics>/i.test(value),
   };
 }
 

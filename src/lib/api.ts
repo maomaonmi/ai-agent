@@ -1593,6 +1593,8 @@ export interface ChatOptions {
   attachments?: ChatAttachment[];
   omniTurnContext?: OmniTurnContext;
   providerOverride?: 'deepseek' | 'qwen' | 'glm' | 'minimax';
+  maxTokensOverride?: number;
+  thinkingBudgetOverride?: number;
 }
 
 export interface SessionSummary {
@@ -1902,6 +1904,8 @@ export async function sendChatMessage(
       attachments: options.attachments,
       omni_context: options.omniTurnContext,
       provider_override: options.providerOverride,
+      max_tokens_override: options.maxTokensOverride,
+      thinking_budget_override: options.thinkingBudgetOverride,
     }),
   });
 

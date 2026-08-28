@@ -12,7 +12,7 @@ import {
   type SessionSnapshot,
   type SessionSummary,
 } from '../../../lib/api';
-import { buildMusicAgentPrompt, musicSessionTitle, parseMusicDraft, type MusicProvider } from '../musicInspiration';
+import { buildMusicAgentPrompt, musicSessionTitle, parseMusicDraft, parseStreamingMusicDraft, type MusicProvider } from '../musicInspiration';
 import MusicInspirationComposer from './MusicInspirationComposer';
 import MusicShowcaseGrid from './MusicShowcaseGrid';
 import { inspirationFromTrack, type MusicTrack } from '../musicCatalog';
@@ -42,6 +42,7 @@ export default function MusicInspirationPage({
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [reasoningSteps, setReasoningSteps] = useState<string[]>([]);
+  const [activeReasoning, setActiveReasoning] = useState('');
   const [document, setDocument] = useState<MusicDocument>(EMPTY_DOCUMENT);
   const [savedLyrics, setSavedLyrics] = useState('');
   const [busy, setBusy] = useState(false);
@@ -63,6 +64,7 @@ export default function MusicInspirationPage({
       setSessionId(activeSessionId);
       setMessages(stored.messages ?? []);
       setReasoningSteps(stored.reasoningSteps ?? []);
+      setActiveReasoning([...(stored.messages ?? [])].reverse().find((item) => item.role === 'assistant')?.reasoning ?? '');
       if (stored.musicDocument) {
         setDocument(stored.musicDocument);
         setSavedLyrics(stored.musicDocument.lyrics);
@@ -79,7 +81,7 @@ export default function MusicInspirationPage({
 
   const generate = useCallback(async (inspiration: string, provider: MusicProvider, existingId?: string) => {
     const requestId = ++activeRequest.current;
-    setBusy(true); setError(''); setReasoningSteps(['正在理解主题与创作意图']);
+    setBusy(true); setError(''); setReasoningSteps(['正在理解主题与创作意图']); setActiveReasoning('');
     const current = existingId ? sessionId : null;
     const created = current ? null : await createSession('music', musicSessionTitle(inspiration));
     const id = current ?? created!.session_id;
@@ -99,14 +101,22 @@ export default function MusicInspirationPage({
           const label = event.message || '正在组织歌曲结构与意象';
           stages.push(label); setReasoningSteps([...stages]);
         },
-        onReasoningDelta: (token) => { reasoning += token; },
-        onReasoning: (event) => { reasoning = event.reasoning; },
-        onToken: (token) => { raw += token; },
+        onReasoningDelta: (token) => { reasoning += token; setActiveReasoning(reasoning); },
+        onReasoning: (event) => { reasoning = event.reasoning; setActiveReasoning(reasoning); },
+        onToken: (token) => {
+          raw += token;
+          const partial = parseStreamingMusicDraft(raw);
+          if (partial.title || partial.lyrics) {
+            setDocument({ title: partial.title, lyrics: partial.lyrics, provider, status: 'generating' });
+          }
+        },
         onDone: (event) => { if (!raw) raw = event.answer; },
         onError: (event) => { throw new Error(event.message); },
       }, {
         sessionId: id,
         providerOverride: provider,
+        maxTokensOverride: 6_000,
+        thinkingBudgetOverride: 2_000,
         runtimeSettings: {
           responseLength: 'detailed', webSearch: 'off', deepThinking: 'on', discussionRounds: 1,
           mcpMode: 'off', mcpServerIds: [], skillMode: 'off', skillIds: [],
@@ -117,6 +127,7 @@ export default function MusicInspirationPage({
       if (requestId !== activeRequest.current) return;
       const parsed = parseMusicDraft(raw);
       const finalReasoning = reasoning.trim() || '已完成主题提炼、段落编排、意象设计与可唱性检查。';
+      setActiveReasoning(finalReasoning);
       const assistant: ChatMessage = { role: 'assistant', content: parsed.note || `已完成《${parsed.title}》的歌词初稿。`, reasoning: finalReasoning };
       const nextMessages = [...baseMessages, assistant];
       const nextSteps = [...stages, '歌词初稿已完成，可在右侧继续编辑'];
@@ -137,6 +148,8 @@ export default function MusicInspirationPage({
 
   const hasWorkspace = Boolean(sessionId || busy || messages.length);
   const lastUserPrompt = useMemo(() => [...messages].reverse().find((item) => item.role === 'user')?.content ?? '', [messages]);
+  const lastSavedReasoning = useMemo(() => [...messages].reverse().find((item) => item.role === 'assistant')?.reasoning ?? '', [messages]);
+  const displayedReasoning = activeReasoning || lastSavedReasoning;
 
   const useTemplate = (track: MusicTrack) => {
     setSuggestedInspiration(inspirationFromTrack(track));
@@ -151,10 +164,9 @@ export default function MusicInspirationPage({
         <p className="mb-8 text-sm font-semibold text-slate-900 dark:text-white">{lastUserPrompt ? `创作：${musicSessionTitle(lastUserPrompt)}` : '音乐灵感 Agent'}</p>
         <div className="space-y-6">
           {messages.map((message, index) => <div key={`${message.role}-${index}`} className={message.role === 'user' ? 'ml-auto max-w-[78%] rounded-2xl bg-slate-100 px-4 py-3 text-sm dark:bg-neutral-800' : 'max-w-2xl'}>
-            {message.role === 'assistant' && message.reasoning && <details className="mb-3 rounded-xl border border-slate-200 p-3 text-xs text-slate-500 dark:border-neutral-800 dark:text-neutral-400"><summary className="cursor-pointer font-medium">已完成思考</summary><p className="mt-2 whitespace-pre-wrap leading-6">{message.reasoning}</p></details>}
             <p className="whitespace-pre-wrap text-sm leading-7">{message.content}</p>
           </div>)}
-          {(busy || reasoningSteps.length > 0) && <div className="rounded-2xl border border-slate-200 p-4 dark:border-neutral-800"><div className="mb-3 flex items-center gap-2 text-sm font-medium"><Sparkles size={15} className="text-violet-500" />创作链路</div><ol className="space-y-2">{reasoningSteps.map((step, index) => <li key={`${step}-${index}`} className="flex items-center gap-2 text-xs text-slate-500"><Check size={13} className="text-emerald-500" />{step}</li>)}</ol>{busy && <Loader2 size={16} className="mt-3 animate-spin text-violet-500" />}</div>}
+          {(busy || reasoningSteps.length > 0) && <div className="rounded-2xl border border-slate-200 p-4 dark:border-neutral-800"><div className="mb-3 flex items-center gap-2 text-sm font-medium"><Sparkles size={15} className="text-violet-500" />创作链路</div><ol className="space-y-2">{reasoningSteps.map((step, index) => <li key={`${step}-${index}`} className="flex items-center gap-2 text-xs text-slate-500"><Check size={13} className="text-emerald-500" />{step}</li>)}</ol>{(displayedReasoning || busy) && <details className="mt-3 border-t border-slate-200 pt-3 text-xs text-slate-500 dark:border-neutral-800 dark:text-neutral-400"><summary className="cursor-pointer font-medium outline-none focus-visible:ring-2 focus-visible:ring-sky-400">{busy ? '正在思考' : '已完成思考'} · {displayedReasoning.length} 字</summary>{displayedReasoning && <p className="mt-3 whitespace-pre-wrap leading-6">{displayedReasoning}</p>}</details>}{busy && <Loader2 size={16} className="mt-3 animate-spin text-violet-500" />}</div>}
           {error && <p role="alert" className="rounded-xl bg-red-50 p-3 text-sm text-red-600 dark:bg-red-950/30">{error}</p>}
         </div>
       </div>
