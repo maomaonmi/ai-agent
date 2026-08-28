@@ -113,16 +113,20 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
   const [qwenOptions, setQwenOptions] = useState(QWEN_FALLBACK_OPTIONS);
   const [minimaxOptions, setMinimaxOptions] = useState(MINIMAX_FALLBACK_OPTIONS);
 
-  // ---- 全局联网服务 Key：搜索提供商选择 + Tavily / Firecrawl / Reranker ----
+  // ---- 全局联网服务 Key：搜索提供商选择 + Tavily / Firecrawl / Reranker / Suno ----
   // Why: 与 LLM API Key 不同，这两个是全局搜索/重排服务，不随 provider 切换。
   // GET 只返回 has_* 状态（脱敏），所以用户编辑时要么清空重填，要么我们不显示旧值（只显示"已保存 xxx 位"占位）。
   const [searchProvider, setSearchProvider] = useState<'tavily' | 'firecrawl'>('firecrawl');
   const [tavilyKey, setTavilyKey] = useState('');
   const [firecrawlKey, setFirecrawlKey] = useState('');
   const [rerankKey, setRerankKey] = useState('');
+  const [sunoKey, setSunoKey] = useState('');
+  const [sunoCallbackUrl, setSunoCallbackUrl] = useState('');
   const [svcHasTavily, setSvcHasTavily] = useState(false);
   const [svcHasFirecrawl, setSvcHasFirecrawl] = useState(false);
   const [svcHasRerank, setSvcHasRerank] = useState(false);
+  const [svcHasSuno, setSvcHasSuno] = useState(false);
+  const [svcHasSunoCallback, setSvcHasSunoCallback] = useState(false);
   const [proxyEnabled, setProxyEnabled] = useState(false);
   const [proxyUrl, setProxyUrl] = useState('');
   const [svcHasProxy, setSvcHasProxy] = useState(false);
@@ -136,6 +140,7 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
   const [showTavilyKey, setShowTavilyKey] = useState(false);
   const [showFirecrawlKey, setShowFirecrawlKey] = useState(false);
   const [showRerankKey, setShowRerankKey] = useState(false);
+  const [showSunoKey, setShowSunoKey] = useState(false);
   const [svcSaving, setSvcSaving] = useState(false);
   const [svcMessage, setSvcMessage] = useState('');
 
@@ -167,7 +172,6 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
   const [skillIsDirty, setSkillIsDirty] = useState(false);
   const [skillViewMode, setSkillViewMode] = useState<'preview' | 'source'>('preview');
   const [skillShowMenu, setSkillShowMenu] = useState(false);
-  const [skillFullscreen, setSkillFullscreen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -180,6 +184,9 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
         setSvcHasTavily(svc.has_tavily_key);
         setSvcHasFirecrawl(svc.has_firecrawl_key);
         setSvcHasRerank(svc.has_rerank_key);
+        setSvcHasSuno(Boolean(svc.has_suno_key));
+        setSvcHasSunoCallback(Boolean(svc.has_suno_callback));
+        setSunoCallbackUrl(svc.suno_callback_base_url || '');
         setProxyEnabled(Boolean(svc.proxy_enabled));
         setSvcHasProxy(Boolean(svc.has_proxy));
         setProxyHost(svc.proxy_host || '');
@@ -197,7 +204,7 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
             : 2000
         );
         setDeepResearchEngine(svc.deep_research_engine === 'native' ? 'native' : 'firecrawl');
-        setTavilyKey(''); setFirecrawlKey(''); setRerankKey(''); setSvcMessage('');
+        setTavilyKey(''); setFirecrawlKey(''); setRerankKey(''); setSunoKey(''); setSvcMessage('');
       })
       .catch(() => setSvcMessage('后端未连接，联网服务设置暂不可用'));
     getModelCatalog()
@@ -390,7 +397,7 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
   //   - tavilyKey 非空 → 传非空串 → 覆盖为新值
   //   - 点"清空"按钮 → 传 '' → 显式卸载（后端回退环境变量，若环境变量也空则彻底不可用）
   // 消除 GET 脱敏导致的"空串是保留还是清空"二义性。
-  const saveServices = async (opts?: { clearTavily?: boolean; clearFirecrawl?: boolean; clearRerank?: boolean; clearProxy?: boolean }) => {
+  const saveServices = async (opts?: { clearTavily?: boolean; clearFirecrawl?: boolean; clearRerank?: boolean; clearSuno?: boolean; clearSunoCallback?: boolean; clearProxy?: boolean }) => {
     setSvcSaving(true); setSvcMessage('');
     try {
       const payload: Parameters<typeof saveServiceSettings>[0] = {};
@@ -424,11 +431,23 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
       } else if (rerankKey.trim()) {
         payload.rerank_api_key = rerankKey.trim();
       }
+      if (opts?.clearSuno) {
+        payload.clearSuno = true;
+      } else if (sunoKey.trim()) {
+        payload.suno_api_key = sunoKey.trim();
+      }
+      if (opts?.clearSunoCallback) {
+        payload.clearSunoCallback = true;
+      } else if (sunoCallbackUrl.trim()) {
+        payload.suno_callback_base_url = sunoCallbackUrl.trim();
+      }
       const result = await saveServiceSettings(payload);
       setSearchProvider(result.search_provider || 'firecrawl');
       setSvcHasTavily(result.has_tavily_key);
       setSvcHasFirecrawl(result.has_firecrawl_key);
       setSvcHasRerank(result.has_rerank_key);
+      setSvcHasSuno(Boolean(result.has_suno_key));
+      setSvcHasSunoCallback(Boolean(result.has_suno_callback));
       setProxyEnabled(Boolean(result.proxy_enabled));
       setSvcHasProxy(Boolean(result.has_proxy));
       setProxyHost(result.proxy_host || '');
@@ -448,7 +467,7 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
           : Math.max(800, Math.min(4000, Number(fcMdMaxChars) || 2000))
       );
       setDeepResearchEngine(result.deep_research_engine === 'native' ? 'native' : 'firecrawl');
-      setTavilyKey(''); setFirecrawlKey(''); setRerankKey('');
+      setTavilyKey(''); setFirecrawlKey(''); setRerankKey(''); setSunoKey(''); setSunoCallbackUrl('');
       setSvcMessage('配置已保存并立即生效，无需重启后端');
     } catch (error) {
       setSvcMessage(error instanceof Error ? error.message : '保存失败');
@@ -756,6 +775,63 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
               </div>
             </Field>
           )}
+
+          <Field label="Suno API Key（音乐生成）" required hint={svcHasSuno ? '已保存；留空则不修改。Suno 音乐生成请求只会由后端发出' : '在 sunoapi.org 获取 Key；未配置时音乐生成页会提示配置服务'}>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <div className="relative flex-1">
+                <input
+                  type={showSunoKey ? 'text' : 'password'}
+                  autoComplete="off"
+                  spellCheck={false}
+                  placeholder={svcHasSuno ? '🔒 已保存（留空 = 不修改；如需替换请重新输入）' : 'suno-xxxxxxxxxxxxxxxx'}
+                  value={sunoKey}
+                  onChange={(e) => setSunoKey(e.target.value)}
+                  className="h-11 w-full rounded-lg border border-slate-300 bg-white pr-11 pl-3 text-sm tracking-wider dark:border-slate-700 dark:bg-slate-950"
+                />
+                <button
+                  type="button"
+                  aria-label={showSunoKey ? '隐藏 Suno Key' : '显示 Suno Key'}
+                  onClick={() => setShowSunoKey((v) => !v)}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                >
+                  {showSunoKey ? <EyeOff size={16}/> : <Eye size={16}/>}
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${svcHasSuno ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}`}>{svcHasSuno ? '已配置' : '未配置'}</span>
+                <button
+                  type="button"
+                  onClick={() => saveServices({ clearSuno: true })}
+                  disabled={svcSaving || !svcHasSuno}
+                  className="rounded-lg border border-rose-200 px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/30"
+                >清除已保存</button>
+              </div>
+            </div>
+          </Field>
+
+          <Field label="Suno 回调地址（可选）" hint={svcHasSunoCallback ? '已配置；留空则不修改。只填写公网 HTTPS 基地址，例如 https://xxxx.trycloudflare.com' : '留空时使用后台轮询；配置后 Suno 会把进度推送到 /api/suno/callback'}>
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+              <input
+                type="url"
+                autoComplete="off"
+                spellCheck={false}
+                placeholder="https://xxxx.trycloudflare.com"
+                value={sunoCallbackUrl}
+                onChange={(e) => setSunoCallbackUrl(e.target.value)}
+                className="h-11 min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
+              />
+              <div className="flex items-center gap-2">
+                <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${svcHasSunoCallback ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}`}>{svcHasSunoCallback ? '已配置' : '未配置（可选）'}</span>
+                <button
+                  type="button"
+                  onClick={() => saveServices({ clearSunoCallback: true })}
+                  disabled={svcSaving || !svcHasSunoCallback}
+                  className="rounded-lg border border-rose-200 px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/30"
+                >清除已保存</button>
+              </div>
+            </div>
+            <p className="mt-2 text-xs text-slate-500">Cloudflare Quick Tunnel 需要保持终端运行；地址变化后请在这里更新。回调失败不会阻塞轮询。</p>
+          </Field>
 
           <Field label="SiliconFlow Reranker API Key（可选 · 搜索结果重排）" hint={svcHasRerank ? '已保存；留空则不修改。缺失时联网搜索保留原始排序' : '可选；提供后会按相关性对搜索结果进行语义重排'}>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">

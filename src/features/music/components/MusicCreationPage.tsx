@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Mic,
   Music,
@@ -8,17 +8,16 @@ import {
   ChevronDown,
   Settings,
   Sparkles,
-  Upload,
-  Plus,
-  Trash2,
   GripVertical,
   Music2,
   Palette,
-  Volume2,
-  Mic2,
   ArrowUpRight,
+  Play,
+  Loader2,
+  Download,
 } from 'lucide-react';
 import MusicSidebar, { type MusicTab } from './MusicSidebar';
+import { generateSunoMusic, listSunoTasks, openSunoTaskStream, resolveSunoAssetUrl, type SunoTask } from '../api';
 
 interface MusicCreationPageProps {
   activeTab: MusicTab;
@@ -32,8 +31,54 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
   const [lyrics, setLyrics] = useState('');
   const [style, setStyle] = useState('');
   const [title, setTitle] = useState('');
-  const [count, setCount] = useState(2);
   const [activeRightTab, setActiveRightTab] = useState<'works' | 'favorites'>('works');
+  const [mode, setMode] = useState<'inspiration' | 'custom'>('custom');
+  const [instrumental, setInstrumental] = useState(false);
+  const [works, setWorks] = useState<SunoTask[]>([]);
+  const [currentTask, setCurrentTask] = useState<SunoTask | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const streamRef = useRef<EventSource | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listSunoTasks().then((tasks) => {
+      if (!cancelled) {
+        setWorks(tasks);
+        setCurrentTask(tasks.find((task) => !['SUCCESS', 'FAILED', 'TIMED_OUT'].includes(task.status)) || tasks[0] || null);
+      }
+    }).catch(() => undefined);
+    return () => { cancelled = true; streamRef.current?.close(); };
+  }, []);
+
+  useEffect(() => {
+    streamRef.current?.close();
+    if (!currentTask || ['SUCCESS', 'FAILED', 'TIMED_OUT'].includes(currentTask.status)) return;
+    streamRef.current = openSunoTaskStream(currentTask.id, (task) => {
+      setCurrentTask(task);
+      setWorks((items) => [task, ...items.filter((item) => item.id !== task.id)]);
+    }, () => undefined);
+    return () => streamRef.current?.close();
+  }, [currentTask?.id]);
+
+  const handleGenerate = async () => {
+    const prompt = mode === 'custom' ? lyrics.trim() : (style.trim() || lyrics.trim());
+    if (!prompt) { setError(mode === 'custom' ? '请先填写歌词' : '请先填写音乐创意'); return; }
+    if (mode === 'custom' && (!style.trim() || !title.trim())) { setError('自定义模式需要填写风格和歌曲名称'); return; }
+    setBusy(true); setError('');
+    try {
+      const task = await generateSunoMusic({
+        mode,
+        prompt,
+        ...(mode === 'custom' ? { style: style.trim(), title: title.trim(), instrumental } : { instrumental }),
+        model: 'V4_5ALL',
+      });
+      setCurrentTask(task);
+      setWorks((items) => [task, ...items.filter((item) => item.id !== task.id)]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Suno 任务提交失败');
+    } finally { setBusy(false); }
+  };
 
   return (
     <div className="flex h-screen w-full bg-white text-slate-800">
@@ -103,6 +148,17 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
               </div>
             </div>
 
+            <div className="mb-6 flex items-center gap-2 rounded-xl bg-slate-50 p-1">
+              {([['custom', '自定义模式'], ['inspiration', '灵感模式']] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => { setMode(value); setError(''); }}
+                  className={`flex-1 rounded-lg px-3 py-2 text-sm font-medium transition ${mode === value ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                >{label}</button>
+              ))}
+            </div>
+
             {/* 参考音乐卡片 */}
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 mb-6">
               <div className="flex items-center justify-between">
@@ -122,9 +178,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
                 <span className="text-sm font-medium text-slate-700">歌词</span>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-slate-400">上传歌词</span>
-                  <div className="flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1">
-                    <span className="text-[10px] text-slate-400">纯音乐</span>
-                  </div>
+                  <button type="button" onClick={() => setInstrumental((value) => !value)} className={`rounded-full px-2 py-1 text-[10px] ${instrumental ? 'bg-sky-100 text-sky-700' : 'bg-slate-100 text-slate-400'}`}>纯音乐{instrumental ? '：开' : ''}</button>
                 </div>
               </div>
               <textarea
@@ -136,7 +190,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
                 className="w-full h-40 rounded-xl border border-slate-200 bg-white p-4 text-sm leading-relaxed text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <div className="flex items-center justify-between mt-2">
-                <span className="text-[11px] text-slate-400">0 / 3,500 字符</span>
+                <span className="text-[11px] text-slate-400">{lyrics.length} / 5,000 字符</span>
                 <button className="text-xs text-slate-500 hover:text-slate-700">
                   <GripVertical size={14} className="inline-block mr-1" aria-hidden="true" />
                 </button>
@@ -158,7 +212,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
                 className="w-full h-24 rounded-xl border border-slate-200 bg-white p-4 text-sm leading-relaxed text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500"
               />
               <div className="flex items-center justify-between mt-2">
-                <span className="text-[11px] text-slate-400">0 / 2,000 字符</span>
+                <span className="text-[11px] text-slate-400">{style.length} / 1,000 字符</span>
               </div>
             </div>
 
@@ -167,15 +221,17 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
               {STYLE_TAGS.map((tag) => (
                 <button
                   key={tag}
+                  type="button"
+                  onClick={() => setStyle((value) => value ? `${value}, ${tag}` : tag)}
                   className="flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:border-violet-300 hover:text-violet-700"
                 >
-                  <span className="text-[12px]">✕</span>
+                  <span className="text-[12px]">＋</span>
                   {tag}
                 </button>
               ))}
             </div>
 
-            {/* 歌曲名称 + 数量 */}
+            {/* 歌曲名称 + Suno 双候选提示 */}
             <div className="grid grid-cols-2 gap-4 mb-6">
               <div>
                 <input
@@ -187,24 +243,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
                 />
               </div>
               <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm text-slate-600">数量:</span>
-                  <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1">
-                    <button
-                      onClick={() => setCount(Math.max(1, count - 1))}
-                      className="w-6 h-6 rounded bg-slate-100 text-slate-600 hover:bg-slate-200"
-                    >
-                      —
-                    </button>
-                    <span className="w-6 text-center text-sm font-medium text-slate-700">{count}</span>
-                    <button
-                      onClick={() => setCount(Math.min(10, count + 1))}
-                      className="w-6 h-6 rounded bg-slate-100 text-slate-600 hover:bg-slate-200"
-                    >
-                      +
-                    </button>
-                  </div>
-                </div>
+                <div className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-sm text-slate-600">每次生成 2 个候选</div>
                 <div className="flex items-center gap-1 rounded-full bg-sky-50 px-3 py-1">
                   <Sparkles size={12} className="text-sky-600" aria-hidden="true" />
                   <span className="text-[11px] text-sky-700 font-medium">限时免费</span>
@@ -213,8 +252,9 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
             </div>
 
             {/* 底部按钮 */}
-            <button className="w-full rounded-xl bg-sky-600 py-3 text-sm font-medium text-white shadow-md shadow-sky-500/20 hover:bg-sky-700 transition">
-              立即生成
+            {error && <p role="alert" className="mb-2 text-sm text-rose-600">{error}</p>}
+            <button onClick={() => void handleGenerate()} disabled={busy} className="flex w-full items-center justify-center gap-2 rounded-xl bg-sky-600 py-3 text-sm font-medium text-white shadow-md shadow-sky-500/20 transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60">
+              {busy ? <><Loader2 size={16} className="animate-spin"/>提交中…</> : <><Sparkles size={16}/>立即生成</>}
             </button>
           </div>
 
@@ -243,16 +283,31 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
             {/* 内容区 */}
             <div className="flex-1 overflow-y-auto p-6">
               {activeRightTab === 'works' ? (
-                <div className="flex flex-col items-center justify-center h-full text-center">
-                  <div className="w-24 h-24 mb-4 rounded-xl bg-slate-50 flex items-center justify-center">
-                    <div className="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center">
-                      <Music2 size={24} className="text-slate-300" aria-hidden="true" />
+                works.length ? <div className="space-y-4">
+                  {works.map((task) => (
+                    <div key={task.id} className={`rounded-xl border p-3 ${currentTask?.id === task.id ? 'border-sky-300 bg-sky-50/60' : 'border-slate-200'}`}>
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-slate-800">{String(task.request?.title || '未命名作品')}</p>
+                          <p className="text-xs text-slate-500">{task.status} · {task.progress}%</p>
+                        </div>
+                        {task.status === 'SUCCESS' && <span className="text-xs text-emerald-600">已完成</span>}
+                      </div>
+                      {task.clips.length ? <div className="space-y-2">
+                        {task.clips.slice(0, 2).map((clip, index) => {
+                          const audioUrl = resolveSunoAssetUrl(clip.audio_url);
+                          const imageUrl = resolveSunoAssetUrl(clip.image_url);
+                          return <div key={clip.id} className="flex items-center gap-2 rounded-lg bg-white p-2">
+                            {imageUrl ? <img src={imageUrl} alt="" className="h-10 w-10 rounded object-cover"/> : <div className="flex h-10 w-10 items-center justify-center rounded bg-slate-100"><Music2 size={16} className="text-slate-400"/></div>}
+                            <div className="min-w-0 flex-1"><p className="truncate text-xs font-medium">{clip.title || `候选 ${String.fromCharCode(65 + index)}`}</p><p className="text-[11px] text-slate-400">{clip.duration ? `${Math.round(clip.duration)} 秒` : '生成中'}</p></div>
+                            {audioUrl && <><audio controls preload="none" className="h-8 w-28" src={audioUrl}/><a href={audioUrl} download className="rounded p-1 text-slate-500 hover:bg-slate-100" aria-label="下载音频"><Download size={14}/></a></>}
+                            {!audioUrl && <Play size={15} className="text-slate-300"/>}
+                          </div>;
+                        })}
+                      </div> : <div className="h-1.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-sky-500 transition-all" style={{ width: `${Math.max(4, task.progress)}%` }}/></div>}
                     </div>
-                  </div>
-                  <p className="text-sm text-slate-500">
-                    暂时没有作品，在此次文本中输入信息进行音乐创作
-                  </p>
-                </div>
+                  ))}
+                </div> : <div className="flex h-full flex-col items-center justify-center text-center"><div className="mb-4 flex h-24 w-24 items-center justify-center rounded-xl bg-slate-50"><div className="flex h-12 w-12 items-center justify-center rounded-lg bg-slate-100"><Music2 size={24} className="text-slate-300" /></div></div><p className="text-sm text-slate-500">暂时没有作品，在此次文本中输入信息进行音乐创作</p></div>
               ) : (
                 <div className="flex flex-col items-center justify-center h-full text-center">
                   <div className="w-24 h-24 mb-4 rounded-xl bg-slate-50 flex items-center justify-center">

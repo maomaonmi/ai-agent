@@ -922,7 +922,7 @@ export async function saveModelSettings(settings: ModelSettings): Promise<ModelS
 }
 
 // ==========================================
-// 全局联网服务：搜索提供商选择 + Tavily/Firecrawl/Reranker Key
+// 全局联网服务：搜索提供商选择 + Tavily/Firecrawl/Reranker/Suno Key
 // 注意：GET 不会回传 key 明文（只传 has_*_key 状态）；PUT 才明文发送并持久化。
 // ==========================================
 export type SearchProvider = "tavily" | "firecrawl";
@@ -936,9 +936,15 @@ export interface ServiceSettings {
   tavily_api_key: string;
   firecrawl_api_key: string;
   rerank_api_key: string;
+  // GET 永远为空字符串；仅用于 PUT 类型契约，防止前端误以为可读取旧 Key。
+  suno_api_key: string;
   has_tavily_key: boolean;
   has_firecrawl_key: boolean;
   has_rerank_key: boolean;
+  has_suno_key: boolean;
+  suno_base_url: string;
+  suno_callback_base_url: string;
+  has_suno_callback: boolean;
   // Firecrawl 高级参数（非敏感，GET / PUT 都显式传输）
   firecrawl_enable_highlights: boolean;
   firecrawl_scrape_top_n: number;
@@ -960,6 +966,9 @@ export interface SaveServiceSettingsPayload
       | "tavily_api_key"
       | "firecrawl_api_key"
       | "rerank_api_key"
+      | "suno_api_key"
+      | "suno_base_url"
+      | "suno_callback_base_url"
       | "firecrawl_enable_highlights"
       | "firecrawl_scrape_top_n"
       | "firecrawl_markdown_max_chars"
@@ -972,6 +981,8 @@ export interface SaveServiceSettingsPayload
   clearTavily?: boolean;
   clearFirecrawl?: boolean;
   clearRerank?: boolean;
+  clearSuno?: boolean;
+  clearSunoCallback?: boolean;
 }
 
 export async function saveServiceSettings(settings: SaveServiceSettingsPayload): Promise<ServiceSettings> {
