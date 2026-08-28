@@ -20,6 +20,7 @@ import {
   FolderOpen,
   Heart,
   Star,
+  X,
 } from 'lucide-react';
 import MusicSidebar, { type MusicTab } from './MusicSidebar';
 import { generateSunoMusic, listSunoTasks, openSunoTaskStream, resolveSunoAssetUrl, type SunoTask } from '../api';
@@ -63,6 +64,12 @@ function formatAudioTime(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return '00:00';
   const totalSeconds = Math.floor(value);
   return `${String(Math.floor(totalSeconds / 60)).padStart(2, '0')}:${String(totalSeconds % 60).padStart(2, '0')}`;
+}
+
+function formatTaskDate(value?: number | null): string {
+  if (!value) return '暂无';
+  const timestamp = value > 10_000_000_000 ? value : value * 1000;
+  return new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(timestamp));
 }
 
 function AudioTrackPlayer({ src, duration }: { src: string; duration?: number | null }) {
@@ -150,6 +157,8 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
   const [error, setError] = useState('');
   const [assetPanelWidth, setAssetPanelWidth] = useState(DEFAULT_ASSET_PANEL_WIDTH);
   const [isResizing, setIsResizing] = useState(false);
+  const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
+  const [isDetailOpen, setIsDetailOpen] = useState(false);
   const streamRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -209,6 +218,21 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
     event.preventDefault();
     setIsResizing(true);
   };
+
+  const detailTask = detailTaskId ? works.find((task) => task.id === detailTaskId) || null : null;
+  const openTaskDetail = (task: SunoTask) => {
+    setCurrentTask(task);
+    setDetailTaskId(task.id);
+    setIsDetailOpen(false);
+    window.requestAnimationFrame(() => setIsDetailOpen(true));
+  };
+  const closeTaskDetail = () => setIsDetailOpen(false);
+
+  useEffect(() => {
+    if (isDetailOpen || !detailTaskId) return;
+    const timer = window.setTimeout(() => setDetailTaskId(null), 320);
+    return () => window.clearTimeout(timer);
+  }, [isDetailOpen, detailTaskId]);
 
   const handleGenerate = async () => {
     const prompt = mode === 'custom' ? lyrics.trim() : (style.trim() || lyrics.trim());
@@ -434,7 +458,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
           </div>
 
           {/* 右侧资产面板 */}
-          <aside className="flex min-h-0 w-80 shrink-0 flex-col bg-white lg:w-96" style={{ width: `min(${assetPanelWidth}px, 100%)` }}>
+          <aside className="relative flex min-h-0 w-80 shrink-0 flex-col bg-white lg:w-96" style={{ width: `min(${assetPanelWidth}px, 100%)` }}>
             <div className="flex overflow-x-auto border-b border-slate-200 px-4 pt-3 scrollbar-none sm:px-6">
               {([
                 ['works', '歌曲'],
@@ -458,9 +482,8 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
                 works.length ? <div className="space-y-4">
                   {works.map((task) => {
                     const taskTitle = String(task.request?.title || '未命名作品');
-                    const taskLyrics = getTaskLyrics(task);
                     return <article key={task.id} className={`rounded-xl border p-3 transition ${currentTask?.id === task.id ? 'border-sky-300 bg-sky-50/60 shadow-sm' : 'border-slate-200'}`}>
-                      <button type="button" onClick={() => setCurrentTask(task)} aria-pressed={currentTask?.id === task.id} className="mb-2 flex w-full items-start justify-between gap-2 text-left">
+                      <button type="button" onClick={() => openTaskDetail(task)} aria-pressed={currentTask?.id === task.id} className="mb-2 flex w-full items-start justify-between gap-2 text-left">
                         <span className="min-w-0"><span className="block truncate text-sm font-semibold text-slate-800">{taskTitle}</span><span className="mt-0.5 block text-xs text-slate-500">{task.status} · {task.progress}%</span></span>
                         <span className="flex shrink-0 items-center gap-1.5 text-xs">{task.status === 'SUCCESS' ? <span className="text-emerald-600">已完成</span> : <span className="text-slate-400">处理中</span>}<Star size={15} className="text-slate-300" aria-hidden="true" /></span>
                       </button>
@@ -475,7 +498,6 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
                           </div>;
                         })}
                       </div> : <div className="h-2 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-sky-500 transition-all" style={{ width: `${Math.max(4, task.progress)}%` }}/></div>}
-                      {taskLyrics && <div className="mt-3 rounded-lg bg-slate-50 px-3 py-2"><p className="mb-1 text-[11px] font-medium text-slate-500">歌词</p><p className="line-clamp-3 whitespace-pre-wrap text-xs leading-5 text-slate-600">{taskLyrics}</p></div>}
                     </article>;
                   })}
                 </div> : <EmptyRightPanel icon={<Music2 size={24} />} text="暂时没有歌曲，在左侧输入灵感后开始创作" />
@@ -502,6 +524,27 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
 
               {activeRightTab === 'favorites' && <EmptyRightPanel icon={<Heart size={24} />} text="收藏夹是空的" />}
             </div>
+
+            {detailTask && <div className={`absolute inset-0 z-20 flex flex-col bg-white shadow-2xl transition-transform duration-300 ease-out ${isDetailOpen ? 'translate-x-0' : 'translate-x-full pointer-events-none'}`} aria-hidden={!isDetailOpen}>
+              <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-4 py-4 sm:px-6">
+                <div className="min-w-0"><p className="text-xs text-slate-500">歌曲详情</p><h2 className="truncate text-lg font-semibold text-slate-900">{String(detailTask.request?.title || '未命名作品')}</h2></div>
+                <button type="button" onClick={closeTaskDetail} className="rounded-full p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700" aria-label="关闭歌曲详情"><X size={20} aria-hidden="true" /></button>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto p-4 scrollbar-none sm:p-6">
+                <div className="flex items-center gap-3">
+                  {resolveSunoAssetUrl(detailTask.clips[0]?.image_url) ? <img src={resolveSunoAssetUrl(detailTask.clips[0]?.image_url) || ''} alt="歌曲封面" className="h-20 w-20 rounded-xl object-cover" /> : <div className="flex h-20 w-20 items-center justify-center rounded-xl bg-slate-100"><Music2 size={28} className="text-slate-400" /></div>}
+                  <div className="min-w-0"><h3 className="truncate text-base font-semibold text-slate-900">{String(detailTask.request?.title || '未命名作品')}</h3><p className="mt-1 text-sm text-slate-500">{detailTask.status === 'SUCCESS' ? '已完成' : `${detailTask.status} · ${detailTask.progress}%`}</p></div>
+                </div>
+                <div className="mt-5 space-y-3">
+                  {detailTask.clips.slice(0, 2).map((clip, index) => {
+                    const audioUrl = resolveSunoAssetUrl(clip.audio_url || clip.stream_audio_url);
+                    return <div key={clip.id} className="rounded-xl bg-slate-50 p-3"><div className="mb-2 flex items-center justify-between gap-2"><p className="truncate text-sm font-medium text-slate-800">{clip.title || `候选 ${String.fromCharCode(65 + index)}`}</p><span className="shrink-0 text-xs text-slate-400">{clip.duration ? `${Math.round(clip.duration)} 秒` : '生成中'}</span></div>{audioUrl ? <div className="flex items-center gap-2"><AudioTrackPlayer src={audioUrl} duration={clip.duration}/><a href={audioUrl} download className="rounded-lg border border-slate-200 bg-white p-1.5 text-slate-500 hover:bg-slate-100" aria-label="下载音频"><Download size={14}/></a></div> : <p className="text-xs text-slate-400">音频生成中</p>}</div>;
+                  })}
+                </div>
+                <dl className="mt-6 space-y-4 text-sm"><div><dt className="text-xs font-medium text-slate-400">创建时间</dt><dd className="mt-1 text-slate-700">{formatTaskDate(detailTask.created_at)}</dd></div><div><dt className="text-xs font-medium text-slate-400">灵感来源</dt><dd className="mt-1 whitespace-pre-wrap leading-6 text-slate-700">{String(detailTask.request?.style || detailTask.request?.prompt || '暂无')}</dd></div></dl>
+                <section className="mt-6"><h3 className="text-sm font-semibold text-slate-800">歌词</h3><pre className="mt-2 max-h-[min(48vh,520px)] overflow-y-auto whitespace-pre-wrap rounded-xl bg-slate-50 p-4 font-sans text-sm leading-7 text-slate-700 scrollbar-none">{getTaskLyrics(detailTask) || '当前任务还没有返回歌词内容。'}</pre>{getTaskLyrics(detailTask) && <button type="button" onClick={() => { setLyrics(getTaskLyrics(detailTask)); setMode('custom'); }} className="mt-3 w-full rounded-lg border border-sky-200 bg-white px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50">带入左侧歌词编辑</button>}</section>
+              </div>
+            </div>}
           </aside>
         </main>
 
