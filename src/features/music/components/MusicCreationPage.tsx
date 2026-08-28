@@ -15,6 +15,10 @@ import {
   Play,
   Loader2,
   Download,
+  FileText,
+  FolderOpen,
+  Heart,
+  Star,
 } from 'lucide-react';
 import MusicSidebar, { type MusicTab } from './MusicSidebar';
 import { generateSunoMusic, listSunoTasks, openSunoTaskStream, resolveSunoAssetUrl, type SunoTask } from '../api';
@@ -26,12 +30,36 @@ interface MusicCreationPageProps {
 }
 
 const STYLE_TAGS = ['中国风', '管弦乐团', '键盘乐器', '蓝调', '古典', '世界音乐'];
+const TERMINAL_STATUSES = ['SUCCESS', 'FAILED', 'TIMED_OUT'];
+
+function extractLyrics(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (Array.isArray(value)) return value.map(extractLyrics).filter(Boolean).join('\n');
+  if (!value || typeof value !== 'object') return '';
+  const record = value as Record<string, unknown>;
+  for (const key of ['text', 'lyrics', 'content', 'line']) {
+    const text = extractLyrics(record[key]);
+    if (text) return text;
+  }
+  return '';
+}
+
+function getTaskLyrics(task: SunoTask): string {
+  const clipLyrics = task.clips.map((clip) => extractLyrics(clip.lyrics)).find(Boolean);
+  if (clipLyrics) return clipLyrics;
+  const prompt = typeof task.request?.prompt === 'string' ? task.request.prompt.trim() : '';
+  return prompt;
+}
+
+function EmptyRightPanel({ icon, text }: { icon: React.ReactNode; text: string }) {
+  return <div className="flex h-full min-h-64 flex-col items-center justify-center text-center text-slate-400"><div className="mb-4 flex h-20 w-20 items-center justify-center rounded-xl bg-slate-50"><div className="flex h-11 w-11 items-center justify-center rounded-lg bg-slate-100">{icon}</div></div><p className="text-sm">{text}</p></div>;
+}
 
 export default function MusicCreationPage({ activeTab, onTabChange, onBack }: MusicCreationPageProps) {
   const [lyrics, setLyrics] = useState('');
   const [style, setStyle] = useState('');
   const [title, setTitle] = useState('');
-  const [activeRightTab, setActiveRightTab] = useState<'works' | 'favorites'>('works');
+  const [activeRightTab, setActiveRightTab] = useState<'works' | 'lyrics' | 'assets' | 'favorites'>('works');
   const [mode, setMode] = useState<'inspiration' | 'custom'>('custom');
   const [instrumental, setInstrumental] = useState(false);
   const [works, setWorks] = useState<SunoTask[]>([]);
@@ -45,7 +73,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
     listSunoTasks().then((tasks) => {
       if (!cancelled) {
         setWorks(tasks);
-        setCurrentTask(tasks.find((task) => !['SUCCESS', 'FAILED', 'TIMED_OUT'].includes(task.status)) || tasks[0] || null);
+        setCurrentTask(tasks.find((task) => !TERMINAL_STATUSES.includes(task.status)) || tasks[0] || null);
       }
     }).catch(() => undefined);
     return () => { cancelled = true; streamRef.current?.close(); };
@@ -53,7 +81,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
 
   useEffect(() => {
     streamRef.current?.close();
-    if (!currentTask || ['SUCCESS', 'FAILED', 'TIMED_OUT'].includes(currentTask.status)) return;
+    if (!currentTask || TERMINAL_STATUSES.includes(currentTask.status)) return;
     streamRef.current = openSunoTaskStream(currentTask.id, (task) => {
       setCurrentTask(task);
       setWorks((items) => [task, ...items.filter((item) => item.id !== task.id)]);
@@ -79,6 +107,16 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
       setError(err instanceof Error ? err.message : 'Suno 任务提交失败');
     } finally { setBusy(false); }
   };
+
+  const selectedLyrics = currentTask ? getTaskLyrics(currentTask) : '';
+  const assetRows = works.flatMap((task) => task.clips.map((clip, index) => ({
+    task,
+    clip,
+    index,
+    audioUrl: resolveSunoAssetUrl(clip.audio_url),
+    imageUrl: resolveSunoAssetUrl(clip.image_url),
+    localized: Boolean(clip.audio_asset_id || clip.image_asset_id),
+  })));
 
   return (
     <div className="flex h-screen w-full bg-white text-slate-800">
@@ -258,68 +296,65 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
             </button>
           </div>
 
-          {/* 右侧面板 */}
-          <aside className="flex w-96 flex-col border-l border-slate-200 bg-white">
-            {/* 顶部标签页 */}
-            <div className="flex border-b border-slate-200 px-6 pt-3">
-              <button
-                onClick={() => setActiveRightTab('works')}
-                className={`flex-1 pb-2 text-sm font-medium transition ${
-                  activeRightTab === 'works' ? 'border-b-2 border-sky-600 text-sky-700' : 'text-slate-500 hover:text-slate-700'
-                }`}
-              >
-                作品
-              </button>
-              <button
-                onClick={() => setActiveRightTab('favorites')}
-                className={`flex-1 pb-2 text-sm font-medium transition ${
-                  activeRightTab === 'favorites' ? 'border-b-2 border-sky-600 text-sky-700' : 'text-slate-500 hover:text-slate-700'
-                }`}
-              >
-                收藏
-              </button>
+          {/* 右侧资产面板 */}
+          <aside className="flex w-full shrink-0 flex-col border-l border-slate-200 bg-white lg:w-96">
+            <div className="flex overflow-x-auto border-b border-slate-200 px-4 pt-3 sm:px-6">
+              {([
+                ['works', '歌曲'],
+                ['lyrics', '灵感歌词'],
+                ['assets', '本地素材'],
+                ['favorites', '收藏'],
+              ] as const).map(([tab, label]) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setActiveRightTab(tab)}
+                  className={`shrink-0 px-3 pb-3 text-sm font-medium transition sm:flex-1 ${activeRightTab === tab ? 'border-b-2 border-sky-600 text-sky-700' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
 
-            {/* 内容区 */}
-            <div className="flex-1 overflow-y-auto p-6">
-              {activeRightTab === 'works' ? (
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+              {activeRightTab === 'works' && (
                 works.length ? <div className="space-y-4">
-                  {works.map((task) => (
-                    <div key={task.id} className={`rounded-xl border p-3 ${currentTask?.id === task.id ? 'border-sky-300 bg-sky-50/60' : 'border-slate-200'}`}>
-                      <div className="mb-2 flex items-center justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="truncate text-sm font-semibold text-slate-800">{String(task.request?.title || '未命名作品')}</p>
-                          <p className="text-xs text-slate-500">{task.status} · {task.progress}%</p>
-                        </div>
-                        {task.status === 'SUCCESS' && <span className="text-xs text-emerald-600">已完成</span>}
-                      </div>
+                  {works.map((task) => {
+                    const taskTitle = String(task.request?.title || '未命名作品');
+                    return <article key={task.id} className={`rounded-xl border p-3 transition ${currentTask?.id === task.id ? 'border-sky-300 bg-sky-50/60 shadow-sm' : 'border-slate-200'}`}>
+                      <button type="button" onClick={() => setCurrentTask(task)} aria-pressed={currentTask?.id === task.id} className="mb-2 flex w-full items-start justify-between gap-2 text-left">
+                        <span className="min-w-0"><span className="block truncate text-sm font-semibold text-slate-800">{taskTitle}</span><span className="mt-0.5 block text-xs text-slate-500">{task.status} · {task.progress}%</span></span>
+                        <span className="flex shrink-0 items-center gap-1.5 text-xs">{task.status === 'SUCCESS' ? <span className="text-emerald-600">已完成</span> : <span className="text-slate-400">处理中</span>}<Star size={15} className="text-slate-300" aria-hidden="true" /></span>
+                      </button>
                       {task.clips.length ? <div className="space-y-2">
                         {task.clips.slice(0, 2).map((clip, index) => {
                           const audioUrl = resolveSunoAssetUrl(clip.audio_url);
                           const imageUrl = resolveSunoAssetUrl(clip.image_url);
                           return <div key={clip.id} className="flex items-center gap-2 rounded-lg bg-white p-2">
-                            {imageUrl ? <img src={imageUrl} alt="" className="h-10 w-10 rounded object-cover"/> : <div className="flex h-10 w-10 items-center justify-center rounded bg-slate-100"><Music2 size={16} className="text-slate-400"/></div>}
+                            {imageUrl ? <img src={imageUrl} alt={`${clip.title || '候选音频'} 封面`} className="h-11 w-11 rounded object-cover"/> : <div className="flex h-11 w-11 items-center justify-center rounded bg-slate-100"><Music2 size={16} className="text-slate-400"/></div>}
                             <div className="min-w-0 flex-1"><p className="truncate text-xs font-medium">{clip.title || `候选 ${String.fromCharCode(65 + index)}`}</p><p className="text-[11px] text-slate-400">{clip.duration ? `${Math.round(clip.duration)} 秒` : '生成中'}</p></div>
-                            {audioUrl && <><audio controls preload="none" className="h-8 w-28" src={audioUrl}/><a href={audioUrl} download className="rounded p-1 text-slate-500 hover:bg-slate-100" aria-label="下载音频"><Download size={14}/></a></>}
-                            {!audioUrl && <Play size={15} className="text-slate-300"/>}
+                            {audioUrl ? <><audio controls preload="none" className="h-8 w-24" src={audioUrl}/><a href={audioUrl} download className="rounded p-1 text-slate-500 hover:bg-slate-100" aria-label="下载音频"><Download size={14}/></a></> : <Play size={15} className="text-slate-300"/>}
                           </div>;
                         })}
                       </div> : <div className="h-1.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full rounded-full bg-sky-500 transition-all" style={{ width: `${Math.max(4, task.progress)}%` }}/></div>}
-                    </div>
-                  ))}
-                </div> : <div className="flex h-full flex-col items-center justify-center text-center"><div className="mb-4 flex h-24 w-24 items-center justify-center rounded-xl bg-slate-50"><div className="flex h-12 w-12 items-center justify-center rounded-lg bg-slate-100"><Music2 size={24} className="text-slate-300" /></div></div><p className="text-sm text-slate-500">暂时没有作品，在此次文本中输入信息进行音乐创作</p></div>
-              ) : (
-                <div className="flex flex-col items-center justify-center h-full text-center">
-                  <div className="w-24 h-24 mb-4 rounded-xl bg-slate-50 flex items-center justify-center">
-                    <div className="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center">
-                      <Music2 size={24} className="text-slate-300" aria-hidden="true" />
-                    </div>
-                  </div>
-                  <p className="text-sm text-slate-500">
-                    收藏夹是空的
-                  </p>
-                </div>
+                    </article>;
+                  })}
+                </div> : <EmptyRightPanel icon={<Music2 size={24} />} text="暂时没有歌曲，在左侧输入灵感后开始创作" />
               )}
+
+              {activeRightTab === 'lyrics' && (
+                currentTask ? <div className="space-y-4">
+                  <div className="flex items-center justify-between"><div><p className="text-xs text-slate-500">当前歌曲</p><h2 className="mt-1 truncate text-base font-semibold text-slate-900">{String(currentTask.request?.title || '未命名作品')}</h2></div><FileText size={18} className="text-sky-600" aria-hidden="true" /></div>
+                  <section className="rounded-xl border border-slate-200 bg-slate-50/70 p-4"><div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold text-slate-800">灵感歌词</h3><span className="text-[11px] text-slate-400">{currentTask.mode === 'inspiration' ? '灵感模式' : '自定义模式'}</span></div><pre className="max-h-[min(52vh,520px)] overflow-y-auto whitespace-pre-wrap font-sans text-sm leading-7 text-slate-700">{selectedLyrics || '当前任务还没有返回歌词内容。完成生成后，歌词会显示在这里。'}</pre></section>
+                  {selectedLyrics && <button type="button" onClick={() => { setLyrics(selectedLyrics); setMode('custom'); }} className="w-full rounded-lg border border-sky-200 bg-white px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50">带入左侧歌词编辑</button>}
+                </div> : <EmptyRightPanel icon={<FileText size={24} />} text="选择一首歌曲查看灵感歌词" />
+              )}
+
+              {activeRightTab === 'assets' && (
+                assetRows.length ? <div className="space-y-4"><div className="flex items-center justify-between"><div><h2 className="text-base font-semibold text-slate-900">本地素材</h2><p className="mt-1 text-xs text-slate-500">音频与封面会在后端转存后长期保留</p></div><FolderOpen size={18} className="text-sky-600" aria-hidden="true" /></div>{assetRows.map(({ task, clip, index, audioUrl, imageUrl, localized }) => <article key={`${task.id}-${clip.id}`} className="rounded-xl border border-slate-200 bg-white p-3"><div className="flex gap-3">{imageUrl ? <img src={imageUrl} alt={`${clip.title || '歌曲'} 封面`} className="h-16 w-16 rounded-lg object-cover"/> : <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-lg bg-slate-100"><Music2 size={22} className="text-slate-400"/></div>}<div className="min-w-0 flex-1"><div className="flex items-start justify-between gap-2"><div className="min-w-0"><h3 className="truncate text-sm font-semibold text-slate-800">{clip.title || `候选 ${String.fromCharCode(65 + index)}`}</h3><p className="mt-1 truncate text-xs text-slate-500">{String(task.request?.title || '未命名作品')}</p></div><span className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-medium ${localized ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{localized ? '已本地化' : '远程临时'}</span></div>{audioUrl && <div className="mt-2 flex items-center gap-2"><audio controls preload="none" className="h-8 min-w-0 flex-1" src={audioUrl}/><a href={audioUrl} download className="rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-50" aria-label="下载本地音频"><Download size={14}/></a></div>}</div></div></article>)}</div> : <EmptyRightPanel icon={<FolderOpen size={24} />} text="生成完成后，音频和封面会出现在这里" />
+              )}
+
+              {activeRightTab === 'favorites' && <EmptyRightPanel icon={<Heart size={24} />} text="收藏夹是空的" />}
             </div>
           </aside>
         </main>
