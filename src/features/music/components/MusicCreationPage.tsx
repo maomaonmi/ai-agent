@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import {
   Mic,
   Music,
@@ -31,6 +31,9 @@ interface MusicCreationPageProps {
 
 const STYLE_TAGS = ['中国风', '管弦乐团', '键盘乐器', '蓝调', '古典', '世界音乐'];
 const TERMINAL_STATUSES = ['SUCCESS', 'FAILED', 'TIMED_OUT'];
+const DEFAULT_ASSET_PANEL_WIDTH = 384;
+const MIN_ASSET_PANEL_WIDTH = 280;
+const MAX_ASSET_PANEL_WIDTH = 640;
 
 function extractLyrics(value: unknown): string {
   if (typeof value === 'string') return value.trim();
@@ -66,6 +69,8 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
   const [currentTask, setCurrentTask] = useState<SunoTask | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [assetPanelWidth, setAssetPanelWidth] = useState(DEFAULT_ASSET_PANEL_WIDTH);
+  const [isResizing, setIsResizing] = useState(false);
   const streamRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -88,6 +93,43 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
     }, () => undefined);
     return () => streamRef.current?.close();
   }, [currentTask?.id]);
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const nextWidth = window.innerWidth - event.clientX;
+      setAssetPanelWidth(Math.max(MIN_ASSET_PANEL_WIDTH, Math.min(MAX_ASSET_PANEL_WIDTH, nextWidth)));
+    };
+    const stopResizing = () => setIsResizing(false);
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResizing);
+    window.addEventListener('pointercancel', stopResizing);
+
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResizing);
+      window.removeEventListener('pointercancel', stopResizing);
+    };
+  }, [isResizing]);
+
+  const handleResizeKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const direction = event.key === 'ArrowLeft' ? 1 : -1;
+    setAssetPanelWidth((width) => Math.max(MIN_ASSET_PANEL_WIDTH, Math.min(MAX_ASSET_PANEL_WIDTH, width + direction * 24)));
+  };
+
+  const handleResizePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsResizing(true);
+  };
 
   const handleGenerate = async () => {
     const prompt = mode === 'custom' ? lyrics.trim() : (style.trim() || lyrics.trim());
@@ -164,9 +206,9 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
         </header>
 
         {/* 主工作区 */}
-        <main className="flex flex-1 overflow-hidden">
+        <main className="flex min-h-0 flex-1 overflow-hidden">
           {/* 左侧创作区 */}
-          <div className="flex flex-1 flex-col p-6 overflow-y-auto">
+          <div className="min-h-0 flex flex-1 flex-col overflow-y-auto p-6 scrollbar-none">
             {/* 标题 + 模型 */}
             <div className="flex items-start justify-between mb-6">
               <div>
@@ -296,9 +338,26 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
             </button>
           </div>
 
+          {/* 中间可拖拽分隔线 */}
+          <div
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="调整歌曲与资产面板宽度"
+            aria-valuemin={MIN_ASSET_PANEL_WIDTH}
+            aria-valuemax={MAX_ASSET_PANEL_WIDTH}
+            aria-valuenow={assetPanelWidth}
+            tabIndex={0}
+            onPointerDown={handleResizePointerDown}
+            onKeyDown={handleResizeKeyDown}
+            onDoubleClick={() => setAssetPanelWidth(DEFAULT_ASSET_PANEL_WIDTH)}
+            className="group relative z-10 flex w-2 shrink-0 cursor-col-resize items-center justify-center border-x border-slate-200 bg-slate-50 transition-colors hover:bg-sky-50 focus:outline-none focus:ring-2 focus:ring-sky-400"
+          >
+            <span className="h-10 w-0.5 rounded-full bg-slate-300 transition-colors group-hover:bg-sky-400" aria-hidden="true" />
+          </div>
+
           {/* 右侧资产面板 */}
-          <aside className="flex w-80 shrink-0 flex-col border-l border-slate-200 bg-white lg:w-96">
-            <div className="flex overflow-x-auto border-b border-slate-200 px-4 pt-3 sm:px-6">
+          <aside className="flex min-h-0 w-80 shrink-0 flex-col bg-white lg:w-96" style={{ width: `min(${assetPanelWidth}px, 100%)` }}>
+            <div className="flex overflow-x-auto border-b border-slate-200 px-4 pt-3 scrollbar-none sm:px-6">
               {([
                 ['works', '歌曲'],
                 ['lyrics', '灵感歌词'],
@@ -316,7 +375,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
               ))}
             </div>
 
-            <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+            <div className="min-h-0 flex-1 overflow-y-auto p-4 scrollbar-none sm:p-6">
               {activeRightTab === 'works' && (
                 works.length ? <div className="space-y-4">
                   {works.map((task) => {
@@ -345,7 +404,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
               {activeRightTab === 'lyrics' && (
                 currentTask ? <div className="space-y-4">
                   <div className="flex items-center justify-between"><div><p className="text-xs text-slate-500">当前歌曲</p><h2 className="mt-1 truncate text-base font-semibold text-slate-900">{String(currentTask.request?.title || '未命名作品')}</h2></div><FileText size={18} className="text-sky-600" aria-hidden="true" /></div>
-                  <section className="rounded-xl border border-slate-200 bg-slate-50/70 p-4"><div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold text-slate-800">灵感歌词</h3><span className="text-[11px] text-slate-400">{currentTask.mode === 'inspiration' ? '灵感模式' : '自定义模式'}</span></div><pre className="max-h-[min(52vh,520px)] overflow-y-auto whitespace-pre-wrap font-sans text-sm leading-7 text-slate-700">{selectedLyrics || '当前任务还没有返回歌词内容。完成生成后，歌词会显示在这里。'}</pre></section>
+                  <section className="rounded-xl border border-slate-200 bg-slate-50/70 p-4"><div className="mb-3 flex items-center justify-between"><h3 className="text-sm font-semibold text-slate-800">灵感歌词</h3><span className="text-[11px] text-slate-400">{currentTask.mode === 'inspiration' ? '灵感模式' : '自定义模式'}</span></div><pre className="max-h-[min(52vh,520px)] overflow-y-auto whitespace-pre-wrap font-sans text-sm leading-7 text-slate-700 scrollbar-none">{selectedLyrics || '当前任务还没有返回歌词内容。完成生成后，歌词会显示在这里。'}</pre></section>
                   {selectedLyrics && <button type="button" onClick={() => { setLyrics(selectedLyrics); setMode('custom'); }} className="w-full rounded-lg border border-sky-200 bg-white px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50">带入左侧歌词编辑</button>}
                 </div> : <EmptyRightPanel icon={<FileText size={24} />} text="选择一首歌曲查看灵感歌词" />
               )}
