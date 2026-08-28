@@ -33,6 +33,15 @@ interface MusicCreationPageProps {
 
 const STYLE_TAGS = ['中国风', '管弦乐团', '键盘乐器', '蓝调', '古典', '世界音乐'];
 const TERMINAL_STATUSES = ['SUCCESS', 'FAILED', 'TIMED_OUT'];
+const SUNO_MODELS = [
+  { value: 'V4', label: 'Suno V4' },
+  { value: 'V4_5', label: 'Suno V4.5' },
+  { value: 'V4_5PLUS', label: 'Suno V4.5+' },
+  { value: 'V4_5ALL', label: 'Suno V4.5 All' },
+  { value: 'V5', label: 'Suno V5' },
+  { value: 'V5_5', label: 'Suno V5.5' },
+] as const;
+type SunoModelId = (typeof SUNO_MODELS)[number]['value'];
 const DEFAULT_ASSET_PANEL_WIDTH = 460;
 const MIN_ASSET_PANEL_WIDTH = 320;
 const MAX_ASSET_PANEL_WIDTH = 760;
@@ -148,6 +157,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
   const [lyrics, setLyrics] = useState('');
   const [style, setStyle] = useState('');
   const [title, setTitle] = useState('');
+  const [selectedModel, setSelectedModel] = useState<SunoModelId>('V4_5ALL');
   const [activeRightTab, setActiveRightTab] = useState<'works' | 'lyrics' | 'assets' | 'favorites'>('works');
   const [mode, setMode] = useState<'inspiration' | 'custom'>('custom');
   const [instrumental, setInstrumental] = useState(false);
@@ -244,7 +254,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
         mode,
         prompt,
         ...(mode === 'custom' ? { style: style.trim(), title: title.trim(), instrumental } : { instrumental }),
-        model: 'V4_5ALL',
+        model: selectedModel,
       });
       setCurrentTask(task);
       setWorks((items) => [task, ...items.filter((item) => item.id !== task.id)]);
@@ -272,7 +282,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
         {/* 顶部导航 */}
         <header className="flex items-center justify-between border-b border-slate-200 bg-sky-600 px-6 py-3 text-white">
           <div className="flex items-center gap-8">
-            <span className="text-xl font-bold">MINIMAX</span>
+            <span className="text-xl font-bold">音乐工坊</span>
             <nav className="flex items-center gap-1">
               <button className="flex items-center gap-2 rounded-full px-4 py-1.5 text-sm font-medium text-white/80 hover:text-white">
                 <Mic size={16} aria-hidden="true" />
@@ -290,8 +300,8 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
           </div>
           <div className="flex items-center gap-4">
             <span className="text-sm">
-              <span className="font-semibold">Music 3.0</span>
-              创作者内测开启，限时免费活动继续
+              <span className="font-semibold">Suno 音乐模型</span>
+              支持多种模型自由选择
             </span>
             <button className="rounded-full bg-white px-4 py-1.5 text-sm font-medium text-sky-700 hover:bg-sky-50">
               开始创作
@@ -317,16 +327,13 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
                 <h1 className="text-2xl font-semibold text-slate-900">音乐创作</h1>
               </div>
               <div className="flex items-center gap-2">
-                <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5">
+                <label className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5 focus-within:border-sky-400 focus-within:ring-2 focus-within:ring-sky-100">
                   <span className="text-xs text-slate-500">模型</span>
-                  <button className="flex items-center gap-1 text-sm font-medium text-slate-700 hover:text-slate-900">
-                    Music 3.0
-                    <span className="ml-1 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">
-                      New
-                    </span>
-                    <ChevronDown size={12} aria-hidden="true" />
-                  </button>
-                </div>
+                  <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value as SunoModelId)} aria-label="选择 Suno 音乐模型" className="max-w-44 cursor-pointer appearance-none bg-transparent pr-5 text-sm font-medium text-slate-700 outline-none">
+                    {SUNO_MODELS.map((model) => <option key={model.value} value={model.value}>{model.label}</option>)}
+                  </select>
+                  <ChevronDown size={12} className="pointer-events-none -ml-5 text-slate-500" aria-hidden="true" />
+                </label>
               </div>
             </div>
 
@@ -558,7 +565,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
           <div className="flex items-center gap-2">
             <span className="text-[10px] text-slate-500">隐私政策</span>
             <span className="text-[10px] text-slate-400">•</span>
-            <span className="text-[10px] text-slate-400">©MinMax 2024</span>
+            <span className="text-[10px] text-slate-400">© 2024 音乐工坊</span>
           </div>
         </div>
 
