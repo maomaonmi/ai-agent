@@ -1,15 +1,16 @@
 'use client';
 
 import { useState } from 'react';
-import { Heart, Play } from 'lucide-react';
+import { Heart, Music2, Play } from 'lucide-react';
 import { MUSIC_TAG_LABELS, type MusicTrack } from '../musicCatalog';
 
 interface MusicCoverCardProps {
   readonly track: MusicTrack;
   readonly eager?: boolean;
+  readonly onUseTemplate?: (track: MusicTrack) => void;
 }
 
-export default function MusicCoverCard({ track, eager = false }: MusicCoverCardProps) {
+export default function MusicCoverCard({ track, eager = false, onUseTemplate }: MusicCoverCardProps) {
   const [failed, setFailed] = useState(false);
 
   return (
@@ -47,6 +48,19 @@ export default function MusicCoverCard({ track, eager = false }: MusicCoverCardP
               </span>
             )}
           </span>
+        )}
+        {onUseTemplate && (
+          <div className="absolute inset-x-0 bottom-0 flex justify-center bg-gradient-to-t from-black/75 via-black/35 to-transparent px-3 pb-3 pt-10 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100">
+            <button
+              type="button"
+              onClick={() => onUseTemplate(track)}
+              aria-label={`使用《${track.title}》作为创作灵感`}
+              className="flex w-full items-center justify-center gap-2 rounded-lg bg-white/95 px-3 py-2 text-xs font-semibold text-slate-900 shadow-sm transition hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+            >
+              <Music2 size={14} aria-hidden="true" />
+              做同款
+            </button>
+          </div>
         )}
       </div>
       <div className="min-w-0">

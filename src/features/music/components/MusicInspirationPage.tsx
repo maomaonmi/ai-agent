@@ -14,6 +14,8 @@ import {
 } from '../../../lib/api';
 import { buildMusicAgentPrompt, musicSessionTitle, parseMusicDraft, type MusicProvider } from '../musicInspiration';
 import MusicInspirationComposer from './MusicInspirationComposer';
+import MusicShowcaseGrid from './MusicShowcaseGrid';
+import { inspirationFromTrack, type MusicTrack } from '../musicCatalog';
 
 const EMPTY_DOCUMENT = { title: '', lyrics: '', provider: 'deepseek' as MusicProvider, status: 'generating' as const };
 type MusicDocument = NonNullable<SessionSnapshot['musicDocument']>;
@@ -45,6 +47,7 @@ export default function MusicInspirationPage({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [copied, setCopied] = useState(false);
+  const [suggestedInspiration, setSuggestedInspiration] = useState('');
   const activeRequest = useRef(0);
 
   const refreshSessions = useCallback(async (nextActive?: string) => {
@@ -135,7 +138,12 @@ export default function MusicInspirationPage({
   const hasWorkspace = Boolean(sessionId || busy || messages.length);
   const lastUserPrompt = useMemo(() => [...messages].reverse().find((item) => item.role === 'user')?.content ?? '', [messages]);
 
-  if (!hasWorkspace) return <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col gap-12 px-6 py-8"><MusicInspirationComposer onSubmit={generate} busy={busy} /><div className="text-center text-sm text-slate-400">输入一个词或一句想法，Agent 会完成主题提炼、结构规划与歌词初稿。</div></div>;
+  const useTemplate = (track: MusicTrack) => {
+    setSuggestedInspiration(inspirationFromTrack(track));
+    window.requestAnimationFrame(() => globalThis.document.querySelector<HTMLTextAreaElement>('[aria-label="创作灵感输入"]')?.focus());
+  };
+
+  if (!hasWorkspace) return <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col gap-10 px-6 py-8"><MusicInspirationComposer onSubmit={generate} busy={busy} suggestedInspiration={suggestedInspiration} /><MusicShowcaseGrid onUseTemplate={useTemplate} /></div>;
 
   return <div className="grid h-full min-h-0 grid-cols-1 xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.95fr)]">
     <section className="flex min-h-0 flex-col border-r border-slate-200 dark:border-neutral-800">

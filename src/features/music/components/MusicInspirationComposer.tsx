@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ArrowUp, Bot, ChevronDown, Cpu, Music2 } from 'lucide-react';
 import type { MusicProvider } from '../musicInspiration';
 
@@ -15,13 +15,19 @@ export default function MusicInspirationComposer({
   onSubmit,
   busy = false,
   compact = false,
+  suggestedInspiration,
 }: {
   onSubmit: (inspiration: string, provider: MusicProvider) => void;
   busy?: boolean;
   compact?: boolean;
+  suggestedInspiration?: string;
 }) {
   const [inspiration, setInspiration] = useState('');
   const [provider, setProvider] = useState<MusicProvider>('deepseek');
+
+  useEffect(() => {
+    if (suggestedInspiration) setInspiration(suggestedInspiration);
+  }, [suggestedInspiration]);
 
   const canSubmit = inspiration.trim().length > 0;
 

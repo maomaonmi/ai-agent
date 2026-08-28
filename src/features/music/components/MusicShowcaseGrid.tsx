@@ -1,16 +1,17 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { MUSIC_TAG_LABELS, filterTracks, type MusicTag } from '../musicCatalog';
+import { MUSIC_TAG_LABELS, filterTracks, type MusicTag, type MusicTrack } from '../musicCatalog';
 import MusicCoverCard from './MusicCoverCard';
 
 const TABS: readonly MusicTag[] = ['featured', 'remix', 'accompaniment'];
 
 interface MusicShowcaseGridProps {
   readonly initialTab?: MusicTag;
+  readonly onUseTemplate?: (track: MusicTrack) => void;
 }
 
-export default function MusicShowcaseGrid({ initialTab = 'featured' }: MusicShowcaseGridProps) {
+export default function MusicShowcaseGrid({ initialTab = 'featured', onUseTemplate }: MusicShowcaseGridProps) {
   const [activeTab, setActiveTab] = useState<MusicTag>(initialTab);
   const tracks = useMemo(() => filterTracks(activeTab), [activeTab]);
 
@@ -40,7 +41,7 @@ export default function MusicShowcaseGrid({ initialTab = 'featured' }: MusicShow
       ) : (
         <div className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
           {tracks.map((track, index) => (
-            <MusicCoverCard key={track.id} track={track} eager={index < 5} />
+            <MusicCoverCard key={track.id} track={track} eager={index < 5} onUseTemplate={onUseTemplate} />
           ))}
         </div>
       )}

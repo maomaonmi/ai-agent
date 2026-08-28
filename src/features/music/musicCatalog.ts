@@ -115,3 +115,7 @@ export const MUSIC_TRACKS: readonly MusicTrack[] = COVER_IDS.map((coverId, index
 export function filterTracks(tab: MusicTag, tracks: readonly MusicTrack[] = MUSIC_TRACKS): MusicTrack[] {
   return tracks.filter((track) => track.tag === tab);
 }
+
+export function inspirationFromTrack(track: MusicTrack): string {
+  return `我想创作一首名为《${track.title}》的歌曲，参考“${MUSIC_TAG_LABELS[track.tag]}”作品的同款氛围，保留自然流畅、容易传唱的感觉，请帮我完成歌词。`;
+}

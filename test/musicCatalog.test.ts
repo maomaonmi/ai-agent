@@ -3,7 +3,7 @@ import { readdirSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
-import { MUSIC_TRACKS, filterTracks, type MusicTrack } from '../src/features/music/musicCatalog.ts';
+import { MUSIC_TRACKS, filterTracks, inspirationFromTrack, type MusicTrack } from '../src/features/music/musicCatalog.ts';
 
 // Why: 清单 cover 路径必须与 public 资产逐一一致（design R6/T1.2），防止 404 破图。
 test('music catalog covers all real assets under public/music/cover', () => {
@@ -15,6 +15,14 @@ test('music catalog covers all real assets under public/music/cover', () => {
   const catalogIds = MUSIC_TRACKS.map((track) => track.id).sort();
   assert.deepEqual(catalogIds, assetIds);
   assert.equal(MUSIC_TRACKS.length, 50);
+});
+
+test('showcase cards provide a complete inspiration prompt for the composer', () => {
+  const prompt = inspirationFromTrack(MUSIC_TRACKS[0]);
+
+  assert.match(prompt, /自由自在简简单单/);
+  assert.match(prompt, /精选/);
+  assert.match(prompt, /同款氛围/);
 });
 
 test('filterTracks returns matching subset for each tag', () => {
