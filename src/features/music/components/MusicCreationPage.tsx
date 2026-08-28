@@ -297,7 +297,7 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
           </div>
 
           {/* 右侧资产面板 */}
-          <aside className="flex w-full shrink-0 flex-col border-l border-slate-200 bg-white lg:w-96">
+          <aside className="flex w-80 shrink-0 flex-col border-l border-slate-200 bg-white lg:w-96">
             <div className="flex overflow-x-auto border-b border-slate-200 px-4 pt-3 sm:px-6">
               {([
                 ['works', '歌曲'],
