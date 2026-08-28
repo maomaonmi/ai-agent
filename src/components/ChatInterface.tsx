@@ -1770,6 +1770,9 @@ export default function ChatInterface() {
   const openPptMarket = useCallback(() => {
     window.location.assign('/ppt');
   }, []);
+  const openMusicWorkspace = useCallback(() => {
+    window.location.assign('/music');
+  }, []);
   const openPptWorkspace = useCallback(() => {
     const sessionId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID()
@@ -3017,6 +3020,7 @@ export default function ChatInterface() {
         onOpenVideoStudio={() => openVideoWorkspace()}
         onOpenVisualWorkflow={openVisualWorkflow}
         onOpenPpt={openPptWorkspace}
+        onOpenMusic={openMusicWorkspace}
         pptHistory={pptHistory}
         pptHistoryLoading={pptHistoryLoading}
         onSelectPptHistory={openPptHistory}

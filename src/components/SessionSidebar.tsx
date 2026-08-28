@@ -3,7 +3,7 @@
 import { MODE_OPTIONS } from './ModeSelector';
 import { SessionSummary } from '../lib/api';
 import type { PptHistoryRun } from '../features/ppt/api';
-import { Activity, Check, ChevronDown, ChevronRight, ChevronUp, Film, Folder, FolderInput, FolderPlus, LogOut, MoreHorizontal, Pencil, Pin, Presentation, Puzzle, Settings, Share2, Trash2, UserRound, Workflow } from 'lucide-react';
+import { Activity, Check, ChevronDown, ChevronRight, ChevronUp, Film, Folder, FolderInput, FolderPlus, LogOut, MoreHorizontal, Music, Pencil, Pin, Presentation, Puzzle, Settings, Share2, Trash2, UserRound, Workflow } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { assignConversationToProject, createProject, listProjects, removeConversationFromProject, type ProjectWithConversations } from '../features/projects/api';
 import { buildProjectConversationTree } from '../features/projects/projectTree';
@@ -28,6 +28,7 @@ interface SessionSidebarProps {
   onOpenVideoStudio: () => void;
   onOpenVisualWorkflow: () => void;
   onOpenPpt: () => void;
+  onOpenMusic: () => void;
   pptHistory: PptHistoryRun[];
   pptHistoryLoading: boolean;
   onSelectPptHistory: (run: PptHistoryRun) => void;
@@ -75,6 +76,7 @@ export default function SessionSidebar({
   onOpenVideoStudio,
   onOpenVisualWorkflow,
   onOpenPpt,
+  onOpenMusic,
   pptHistory,
   pptHistoryLoading,
   onSelectPptHistory,
@@ -382,6 +384,14 @@ export default function SessionSidebar({
           </button>
           <button
             type="button"
+            onClick={onOpenMusic}
+            className="mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            <Music size={16} className="shrink-0 text-emerald-500" />
+            音乐工坊
+          </button>
+          <button
+            type="button"
             onClick={onOpenHooks}
             className="mt-2 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-800"
           >
@@ -664,6 +674,15 @@ export default function SessionSidebar({
             className="mt-3 flex h-9 w-9 items-center justify-center rounded-lg text-orange-600 hover:bg-orange-50 hover:text-orange-700"
           >
             <Presentation size={18} />
+          </button>
+          <button
+            type="button"
+            aria-label="打开音乐工坊"
+            title="音乐工坊"
+            onClick={onOpenMusic}
+            className="mt-3 flex h-9 w-9 items-center justify-center rounded-lg text-emerald-600 hover:bg-emerald-50 hover:text-emerald-700"
+          >
+            <Music size={18} />
           </button>
           <button
             type="button"
