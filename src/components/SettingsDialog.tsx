@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useRef } from 'react';
-import { ArrowLeft, Brain, Check, ChevronDown, Code, Download, Edit3, Eye, EyeOff, ExternalLink, Info, MessageSquare, Monitor, Moon, MoreVertical, Palette, Puzzle, RefreshCw, Replace, Search, Settings, ShieldCheck, Sun, Trash2, Type, X } from 'lucide-react';
+import { ArrowLeft, Brain, Check, ChevronDown, Code, Download, Edit3, Eye, EyeOff, ExternalLink, Info, MessageSquare, Monitor, Moon, MoreVertical, Music2, Palette, Puzzle, RefreshCw, Replace, Search, Settings, ShieldCheck, Sun, Trash2, Type, X } from 'lucide-react';
 import { getMemorySettings, getMemoryTracesMarkdown, getModelCatalog, getModelSettings, MemoryProfile, MemorySettings, ModelSettings, ModelVariant, saveMemorySettings, saveModelSettings, BuiltinPlugin, McpPluginItem, SkillCapsule, HookRecord, getHooks, toggleHook, getMcpMarketplace, getPlugins, getSkills, toggleMcp, togglePlugin, toggleSkill, setSkillStatus, deleteSkill, getSkillContent, updateSkillContent, downloadSkill, getServiceSettings, saveServiceSettings } from '../lib/api';
 import MarkdownMessage from './MarkdownMessage';
 
@@ -88,6 +88,110 @@ function HookSettingsPanel({ hooks, onToggle, onOpenCenter }: { hooks: HookRecor
   </div>;
 }
 
+type SunoSaveOptions = { clearSuno?: boolean; clearSunoCallback?: boolean };
+
+interface SunoSettingsPanelProps {
+  sunoKey: string;
+  onSunoKeyChange: (value: string) => void;
+  sunoCallbackUrl: string;
+  onSunoCallbackUrlChange: (value: string) => void;
+  showSunoKey: boolean;
+  onToggleSunoKey: () => void;
+  hasSuno: boolean;
+  hasSunoCallback: boolean;
+  saving: boolean;
+  message: string;
+  onSave: (options?: SunoSaveOptions) => Promise<void>;
+}
+
+function SunoSettingsPanel({
+  sunoKey,
+  onSunoKeyChange,
+  sunoCallbackUrl,
+  onSunoCallbackUrlChange,
+  showSunoKey,
+  onToggleSunoKey,
+  hasSuno,
+  hasSunoCallback,
+  saving,
+  message,
+  onSave,
+}: SunoSettingsPanelProps) {
+  return <div className="space-y-6 p-5 sm:p-7">
+    <div className="flex items-start gap-3 rounded-xl bg-violet-50 p-4 text-sm text-violet-900 dark:bg-violet-950/30 dark:text-violet-200">
+      <Music2 size={18} className="mt-0.5 shrink-0" />
+      <div className="space-y-1">
+        <p className="font-medium">Suno 音乐生成服务</p>
+        <p className="leading-5">Key 仅由后端保存并调用，前端不会回显明文。回调地址是可选项；留空时使用后台轮询，配置后可接收 Suno 的进度推送。</p>
+      </div>
+    </div>
+
+    <Field label="Suno API Key" required hint={hasSuno ? '已保存；留空则不修改。Suno 音乐生成请求只会由后端发出' : '在 sunoapi.org 获取 Key；未配置时音乐生成页会提示配置服务'}>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div className="relative flex-1">
+          <input
+            type={showSunoKey ? 'text' : 'password'}
+            autoComplete="off"
+            spellCheck={false}
+            placeholder={hasSuno ? '🔒 已保存（留空 = 不修改；如需替换请重新输入）' : 'suno-xxxxxxxxxxxxxxxx'}
+            value={sunoKey}
+            onChange={(e) => onSunoKeyChange(e.target.value)}
+            className="h-11 w-full rounded-lg border border-slate-300 bg-white pr-11 pl-3 text-sm tracking-wider dark:border-slate-700 dark:bg-slate-950"
+          />
+          <button
+            type="button"
+            aria-label={showSunoKey ? '隐藏 Suno Key' : '显示 Suno Key'}
+            onClick={onToggleSunoKey}
+            className="absolute right-1 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+          >
+            {showSunoKey ? <EyeOff size={16}/> : <Eye size={16}/>}
+          </button>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${hasSuno ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}`}>{hasSuno ? '已配置' : '未配置'}</span>
+          <button
+            type="button"
+            onClick={() => void onSave({ clearSuno: true })}
+            disabled={saving || !hasSuno}
+            className="rounded-lg border border-rose-200 px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/30"
+          >清除已保存</button>
+        </div>
+      </div>
+    </Field>
+
+    <Field label="Suno 回调地址（可选）" hint={hasSunoCallback ? '已配置；留空则不修改。只填写公网 HTTPS 基地址，例如 https://xxxx.trycloudflare.com' : '留空时使用后台轮询；配置后 Suno 会把进度推送到 /api/suno/callback'}>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <input
+          type="url"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="https://xxxx.trycloudflare.com"
+          value={sunoCallbackUrl}
+          onChange={(e) => onSunoCallbackUrlChange(e.target.value)}
+          className="h-11 min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
+        />
+        <div className="flex items-center gap-2">
+          <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${hasSunoCallback ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}`}>{hasSunoCallback ? '已配置' : '未配置（可选）'}</span>
+          <button
+            type="button"
+            onClick={() => void onSave({ clearSunoCallback: true })}
+            disabled={saving || !hasSunoCallback}
+            className="rounded-lg border border-rose-200 px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/30"
+          >清除已保存</button>
+        </div>
+      </div>
+      <p className="mt-2 text-xs text-slate-500">Cloudflare Quick Tunnel 需要保持终端运行；地址变化后请在这里更新。回调失败不会阻塞轮询。</p>
+    </Field>
+
+    <div className="sticky bottom-0 -mx-5 flex items-center justify-between border-t border-slate-200 bg-white/95 px-5 py-4 backdrop-blur dark:border-slate-700 dark:bg-slate-900/95 sm:-mx-7 sm:px-7">
+      <span role="status" className="text-sm text-slate-500">{message}</span>
+      <button type="button" onClick={() => void onSave()} disabled={saving} className="rounded-lg bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50">
+        {saving ? '保存中…' : '保存并立即生效'}
+      </button>
+    </div>
+  </div>;
+}
+
 type DirectorySubTab = 'skills' | 'connectors' | 'plugins';
 
 interface SettingsDialogProps {
@@ -101,7 +205,7 @@ interface SettingsDialogProps {
 }
 
 export default function SettingsDialog({ open, onClose, initialSection, initialSubTab, onOpenDirectory, onOpenHooks, onInsertToChat }: SettingsDialogProps) {
-  const [section, setSection] = useState<'model' | 'services' | 'appearance' | 'memory' | 'directory' | 'hooks'>('model');
+  const [section, setSection] = useState<'model' | 'services' | 'music' | 'appearance' | 'memory' | 'directory' | 'hooks'>('model');
   const [form, setForm] = useState<ModelSettings>(DEFAULTS);
   const [advanced, setAdvanced] = useState(true);
   const [showKey, setShowKey] = useState(false);
@@ -113,8 +217,8 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
   const [qwenOptions, setQwenOptions] = useState(QWEN_FALLBACK_OPTIONS);
   const [minimaxOptions, setMinimaxOptions] = useState(MINIMAX_FALLBACK_OPTIONS);
 
-  // ---- 全局联网服务 Key：搜索提供商选择 + Tavily / Firecrawl / Reranker / Suno ----
-  // Why: 与 LLM API Key 不同，这两个是全局搜索/重排服务，不随 provider 切换。
+  // ---- 全局服务 Key：搜索提供商选择 + Tavily / Firecrawl / Reranker / Suno ----
+  // Why: 与 LLM API Key 不同，这些是跨 provider 复用的外部服务配置。
   // GET 只返回 has_* 状态（脱敏），所以用户编辑时要么清空重填，要么我们不显示旧值（只显示"已保存 xxx 位"占位）。
   const [searchProvider, setSearchProvider] = useState<'tavily' | 'firecrawl'>('firecrawl');
   const [tavilyKey, setTavilyKey] = useState('');
@@ -234,6 +338,10 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
   // Why: 市场页齿轮深链——外部传入 initialSection/initialSubTab 时自动定位（计划书 §5）。
   useEffect(() => {
     if (!open || !initialSection) return;
+    if (initialSection === 'music') {
+      setSection('music');
+      return;
+    }
     if (initialSection === 'directory') {
       setSection('directory');
       if (initialSubTab === 'skills' || initialSubTab === 'connectors' || initialSubTab === 'plugins') {
@@ -476,6 +584,34 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
     }
   };
 
+  // Why: 独立的音乐模型页只提交 Suno 字段，避免保存音乐 Key 时意外覆盖搜索、代理等联网服务配置。
+  const saveSunoSettings = async (opts?: SunoSaveOptions) => {
+    setSvcSaving(true); setSvcMessage('');
+    try {
+      const payload: Parameters<typeof saveServiceSettings>[0] = {};
+      if (opts?.clearSuno) {
+        payload.clearSuno = true;
+      } else if (sunoKey.trim()) {
+        payload.suno_api_key = sunoKey.trim();
+      }
+      if (opts?.clearSunoCallback) {
+        payload.clearSunoCallback = true;
+      } else if (sunoCallbackUrl.trim()) {
+        payload.suno_callback_base_url = sunoCallbackUrl.trim();
+      }
+      const result = await saveServiceSettings(payload);
+      setSvcHasSuno(Boolean(result.has_suno_key));
+      setSvcHasSunoCallback(Boolean(result.has_suno_callback));
+      setSunoKey('');
+      setSunoCallbackUrl('');
+      setSvcMessage('音乐模型配置已保存并立即生效');
+    } catch (error) {
+      setSvcMessage(error instanceof Error ? error.message : '保存失败');
+    } finally {
+      setSvcSaving(false);
+    }
+  };
+
   // ---- 模型记忆模块交互 ----
   const refreshMemoryTrace = (mode: 'global' | 'code' = memMode) => {
     setMemTraceLoading(true);
@@ -502,15 +638,15 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
     <div role="dialog" aria-modal="true" aria-labelledby="settings-title" className="flex h-[min(820px,94vh)] w-full max-w-5xl overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900">
       <aside className="hidden w-56 shrink-0 border-r border-slate-200 bg-slate-50 p-4 dark:border-slate-700 dark:bg-slate-950 sm:block">
         <h2 id="settings-title" className="px-3 pb-5 text-lg font-semibold text-slate-900 dark:text-white">设置</h2>
-        {[['model', Settings, '模型与 API'], ['services', Search, '联网服务'], ['memory', Brain, '模型记忆'], ['directory', Puzzle, 'MCP · Skills · Plugins'], ['appearance', Palette, '外观与字体']] .map(([id, Icon, label]) => <button key={id as string} type="button" onClick={() => setSection(id as 'model' | 'services' | 'memory' | 'appearance' | 'directory')} className={`mb-1 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium ${(section === id) ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900' : 'text-slate-600 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-800'}`}><Icon size={18}/>{label as string}</button>)}
+        {[['model', Settings, '模型与 API'], ['services', Search, '联网服务'], ['music', Music2, '音乐模型 API'], ['memory', Brain, '模型记忆'], ['directory', Puzzle, 'MCP · Skills · Plugins'], ['appearance', Palette, '外观与字体']] .map(([id, Icon, label]) => <button key={id as string} type="button" onClick={() => setSection(id as 'model' | 'services' | 'music' | 'memory' | 'appearance' | 'directory')} className={`mb-1 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium ${(section === id) ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900' : 'text-slate-600 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-800'}`}><Icon size={18}/>{label as string}</button>)}
         <button type="button" onClick={() => setSection('hooks')} className={`mt-2 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium ${section === 'hooks' ? 'bg-slate-900 text-white dark:bg-white dark:text-slate-900' : 'text-slate-600 hover:bg-slate-200/70 dark:text-slate-300 dark:hover:bg-slate-800'}`}><ShieldCheck size={18}/>HOOK</button>
       </aside>
       <main className="min-w-0 flex-1 overflow-y-auto">
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white/95 px-5 py-4 backdrop-blur dark:border-slate-700 dark:bg-slate-900/95">
-          <div><h3 className="text-lg font-semibold text-slate-900 dark:text-white">{section === 'model' ? '模型与 API' : section === 'services' ? '联网服务' : section === 'memory' ? '模型记忆' : section === 'directory' ? 'MCP · Skills · Plugins' : '外观与字体'}</h3><p className="text-xs text-slate-500">{section === 'model' ? '配置用于对话和智能体任务的模型服务' : section === 'services' ? '配置 Tavily 搜索与语义重排 Key，保存后立即生效' : section === 'memory' ? '调节四层记忆的摘要/窗口/清理阈值，并预览记忆痕迹' : section === 'directory' ? '管理已安装的 MCP / Skills / Plugins' : '自定义你的阅读与使用体验'}</p></div>
+          <div><h3 className="text-lg font-semibold text-slate-900 dark:text-white">{section === 'model' ? '模型与 API' : section === 'services' ? '联网服务' : section === 'music' ? '音乐模型 API' : section === 'memory' ? '模型记忆' : section === 'directory' ? 'MCP · Skills · Plugins' : '外观与字体'}</h3><p className="text-xs text-slate-500">{section === 'model' ? '配置用于对话和智能体任务的模型服务' : section === 'services' ? '配置 Tavily 搜索与语义重排 Key，保存后立即生效' : section === 'music' ? '配置 Suno 音乐生成 Key、回调地址与任务服务' : section === 'memory' ? '调节四层记忆的摘要/窗口/清理阈值，并预览记忆痕迹' : section === 'directory' ? '管理已安装的 MCP / Skills / Plugins' : '自定义你的阅读与使用体验'}</p></div>
           <button type="button" aria-label="关闭设置" onClick={onClose} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"><X size={20}/></button>
         </div>
-        <div className="flex gap-2 border-b border-slate-200 px-5 py-3 sm:hidden dark:border-slate-700"><button onClick={() => setSection('model')} className="rounded-lg px-3 py-2 text-sm">模型</button><button onClick={() => setSection('services')} className="rounded-lg px-3 py-2 text-sm">联网</button><button onClick={() => setSection('memory')} className="rounded-lg px-3 py-2 text-sm">记忆</button><button onClick={() => setSection('directory')} className="rounded-lg px-3 py-2 text-sm">MCP·Skills</button><button onClick={() => setSection('appearance')} className="rounded-lg px-3 py-2 text-sm">外观</button></div>
+        <div className="flex gap-2 overflow-x-auto border-b border-slate-200 px-5 py-3 sm:hidden dark:border-slate-700"><button onClick={() => setSection('model')} className="shrink-0 rounded-lg px-3 py-2 text-sm">模型</button><button onClick={() => setSection('services')} className="shrink-0 rounded-lg px-3 py-2 text-sm">联网</button><button onClick={() => setSection('music')} className="shrink-0 rounded-lg px-3 py-2 text-sm">音乐 API</button><button onClick={() => setSection('memory')} className="shrink-0 rounded-lg px-3 py-2 text-sm">记忆</button><button onClick={() => setSection('directory')} className="shrink-0 rounded-lg px-3 py-2 text-sm">MCP·Skills</button><button onClick={() => setSection('appearance')} className="shrink-0 rounded-lg px-3 py-2 text-sm">外观</button></div>
         {section === 'model' ? <div className="space-y-6 p-5 sm:p-7">
           <div><label className="mb-2 block text-sm font-medium text-slate-800 dark:text-slate-200">模型服务商</label><div className="grid grid-cols-2 gap-2 sm:grid-cols-5">{(['deepseek','glm','qwen','minimax','custom'] as const).map((id) => <button type="button" key={id} onClick={() => void chooseProvider(id)} className={`rounded-xl border p-3 text-left transition ${form.provider === id ? 'border-sky-500 bg-sky-50 ring-1 ring-sky-500 dark:bg-sky-950/40' : 'border-slate-200 hover:border-slate-300 dark:border-slate-700'}`}><span className="block text-sm font-semibold text-slate-900 dark:text-white">{PROVIDER_LABELS[id]}</span><span className="mt-1 block text-xs text-slate-500">{id === 'custom' ? 'OpenAI 兼容接口' : '官方服务'}{form.provider === id && form.has_api_key ? ' · 密钥已保存' : ''}</span></button>)}</div></div>
           <div className="grid gap-5 sm:grid-cols-2">
@@ -776,63 +912,6 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
             </Field>
           )}
 
-          <Field label="Suno API Key（音乐生成）" required hint={svcHasSuno ? '已保存；留空则不修改。Suno 音乐生成请求只会由后端发出' : '在 sunoapi.org 获取 Key；未配置时音乐生成页会提示配置服务'}>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <div className="relative flex-1">
-                <input
-                  type={showSunoKey ? 'text' : 'password'}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder={svcHasSuno ? '🔒 已保存（留空 = 不修改；如需替换请重新输入）' : 'suno-xxxxxxxxxxxxxxxx'}
-                  value={sunoKey}
-                  onChange={(e) => setSunoKey(e.target.value)}
-                  className="h-11 w-full rounded-lg border border-slate-300 bg-white pr-11 pl-3 text-sm tracking-wider dark:border-slate-700 dark:bg-slate-950"
-                />
-                <button
-                  type="button"
-                  aria-label={showSunoKey ? '隐藏 Suno Key' : '显示 Suno Key'}
-                  onClick={() => setShowSunoKey((v) => !v)}
-                  className="absolute right-1 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
-                >
-                  {showSunoKey ? <EyeOff size={16}/> : <Eye size={16}/>}
-                </button>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${svcHasSuno ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}`}>{svcHasSuno ? '已配置' : '未配置'}</span>
-                <button
-                  type="button"
-                  onClick={() => saveServices({ clearSuno: true })}
-                  disabled={svcSaving || !svcHasSuno}
-                  className="rounded-lg border border-rose-200 px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/30"
-                >清除已保存</button>
-              </div>
-            </div>
-          </Field>
-
-          <Field label="Suno 回调地址（可选）" hint={svcHasSunoCallback ? '已配置；留空则不修改。只填写公网 HTTPS 基地址，例如 https://xxxx.trycloudflare.com' : '留空时使用后台轮询；配置后 Suno 会把进度推送到 /api/suno/callback'}>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-              <input
-                type="url"
-                autoComplete="off"
-                spellCheck={false}
-                placeholder="https://xxxx.trycloudflare.com"
-                value={sunoCallbackUrl}
-                onChange={(e) => setSunoCallbackUrl(e.target.value)}
-                className="h-11 min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-950"
-              />
-              <div className="flex items-center gap-2">
-                <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${svcHasSunoCallback ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}`}>{svcHasSunoCallback ? '已配置' : '未配置（可选）'}</span>
-                <button
-                  type="button"
-                  onClick={() => saveServices({ clearSunoCallback: true })}
-                  disabled={svcSaving || !svcHasSunoCallback}
-                  className="rounded-lg border border-rose-200 px-3 py-2 text-xs font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-40 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/30"
-                >清除已保存</button>
-              </div>
-            </div>
-            <p className="mt-2 text-xs text-slate-500">Cloudflare Quick Tunnel 需要保持终端运行；地址变化后请在这里更新。回调失败不会阻塞轮询。</p>
-          </Field>
-
           <Field label="SiliconFlow Reranker API Key（可选 · 搜索结果重排）" hint={svcHasRerank ? '已保存；留空则不修改。缺失时联网搜索保留原始排序' : '可选；提供后会按相关性对搜索结果进行语义重排'}>
             <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
               <div className="relative flex-1">
@@ -959,7 +1038,19 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
               className="rounded-lg bg-sky-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-sky-700 disabled:opacity-50"
             >{svcSaving ? '保存中…' : '保存并立即生效'}</button>
           </div>
-        </div> : section === 'memory' ? <div className="space-y-6 p-5 sm:p-7">
+        </div> : section === 'music' ? <SunoSettingsPanel
+          sunoKey={sunoKey}
+          onSunoKeyChange={setSunoKey}
+          sunoCallbackUrl={sunoCallbackUrl}
+          onSunoCallbackUrlChange={setSunoCallbackUrl}
+          showSunoKey={showSunoKey}
+          onToggleSunoKey={() => setShowSunoKey((value) => !value)}
+          hasSuno={svcHasSuno}
+          hasSunoCallback={svcHasSunoCallback}
+          saving={svcSaving}
+          message={svcMessage}
+          onSave={saveSunoSettings}
+        /> : section === 'memory' ? <div className="space-y-6 p-5 sm:p-7">
           {/* 模式切换：全局记忆（聊天）/ code 模式记忆（代码）两套独立画像 */}
           <div><label className="mb-2 block text-sm font-medium text-slate-800 dark:text-slate-200">记忆模式</label><div className="grid grid-cols-2 gap-2">{([['global','全局记忆','聊天/调研/多智能体等非代码模式共用'],['code','Code 模式记忆','代码任务专属，含 VFS 快照']] as const).map(([id, label, desc]) => <button type="button" key={id} onClick={() => setMemMode(id)} className={`rounded-xl border p-3 text-left transition ${memMode === id ? 'border-sky-500 bg-sky-50 ring-1 ring-sky-500 dark:bg-sky-950/40' : 'border-slate-200 hover:border-slate-300 dark:border-slate-700'}`}><span className="block text-sm font-semibold text-slate-900 dark:text-white">{label}</span><span className="mt-1 block text-xs text-slate-500">{desc}</span></button>)}</div></div>
           <div className="flex items-center gap-3 rounded-xl bg-sky-50 p-4 text-sm text-sky-900 dark:bg-sky-950/40 dark:text-sky-200"><Info size={18} className="shrink-0"/>两套画像完全独立，字段一致、默认不同。修改后保存即实时生效。</div>
