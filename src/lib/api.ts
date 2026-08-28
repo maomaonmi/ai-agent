@@ -1277,7 +1277,8 @@ export type ChatMode =
   | 'plan'
   | 'distributed_plan'
   | 'code'
-  | 'writing';
+  | 'writing'
+  | 'music';
 
 export interface CodeUpdateEvent {
   type: 'code_update';
@@ -1591,6 +1592,7 @@ export interface ChatOptions {
   runtimeSettings?: RuntimeSettings;
   attachments?: ChatAttachment[];
   omniTurnContext?: OmniTurnContext;
+  providerOverride?: 'deepseek' | 'qwen' | 'glm' | 'minimax';
 }
 
 export interface SessionSummary {
@@ -1637,6 +1639,12 @@ export interface SessionSnapshot {
   writingDraft?: import('../features/ai-writing/writingTypes').WritingDraft;
   writingDocument?: import('../features/ai-writing/writingDocumentTypes').WritingDocumentState;
   thesisOutline?: import('../features/ai-writing/thesis/thesisTypes').ThesisOutlineState;
+  musicDocument?: {
+    title: string;
+    lyrics: string;
+    provider: 'deepseek' | 'qwen' | 'glm' | 'minimax';
+    status: 'generating' | 'ready' | 'error';
+  };
 }
 
 export interface SessionHistoryResponse {
@@ -1893,6 +1901,7 @@ export async function sendChatMessage(
         : undefined,
       attachments: options.attachments,
       omni_context: options.omniTurnContext,
+      provider_override: options.providerOverride,
     }),
   });
 

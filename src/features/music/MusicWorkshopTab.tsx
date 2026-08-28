@@ -3,7 +3,6 @@
 import { useEffect, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import MusicSidebar, { type MusicTab } from './components/MusicSidebar';
-import MusicInspirationComposer from './components/MusicInspirationComposer';
 import MusicShowcaseGrid from './components/MusicShowcaseGrid';
 import VoiceSynthesisPage from './components/VoiceSynthesisPage';
 import MusicCreationPage from './components/MusicCreationPage';
@@ -11,6 +10,8 @@ import VoiceLibraryPage from './components/VoiceLibraryPage';
 import VoiceDesignPage from './components/VoiceDesignPage';
 import VoiceClonePage from './components/VoiceClonePage';
 import VoiceExtractionPage from './components/VoiceExtractionPage';
+import MusicInspirationPage from './components/MusicInspirationPage';
+import { listSessions, type SessionSummary } from '../../lib/api';
 
 const VALID_TABS: readonly MusicTab[] = [
   'compose',
@@ -35,9 +36,15 @@ export default function MusicWorkshopTab({ initialTab }: MusicWorkshopTabProps) 
   
   // 从 URL 解析当前 tab，无效则默认 compose
   const [activeTab, setActiveTab] = useState<MusicTab>(() => {
-    const tabFromUrl = pathname.split('/').pop() || 'compose';
+    const tabFromUrl = pathname.split('/').pop() || initialTab || 'compose';
     return VALID_TABS.includes(tabFromUrl as MusicTab) ? (tabFromUrl as MusicTab) : 'compose';
   });
+  const [musicSessions, setMusicSessions] = useState<SessionSummary[]>([]);
+  const [activeMusicSessionId, setActiveMusicSessionId] = useState<string | null>(null);
+
+  useEffect(() => {
+    listSessions().then((result) => setMusicSessions(result.sessions.filter((item) => item.mode === 'music'))).catch(() => undefined);
+  }, []);
 
   // Why: 同步 URL 路由与状态，确保刷新后保持当前页面
   const handleTabChange = (tab: MusicTab) => {
@@ -65,15 +72,12 @@ export default function MusicWorkshopTab({ initialTab }: MusicWorkshopTabProps) 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-50 text-slate-900 dark:bg-neutral-950 dark:text-neutral-100">
       {/* 左侧专属侧边栏 */}
-      <MusicSidebar activeTab={activeTab} onTabChange={handleTabChange} onBack={handleBack} />
+      <MusicSidebar activeTab={activeTab} onTabChange={handleTabChange} onBack={handleBack} musicSessions={musicSessions} activeMusicSessionId={activeMusicSessionId} onMusicSessionSelect={setActiveMusicSessionId} onNewMusicSession={() => setActiveMusicSessionId(null)} />
 
       {/* 主内容区 */}
       <main className="flex-1 overflow-y-auto bg-white dark:bg-neutral-900">
         {activeTab === 'compose' ? (
-          <div className="mx-auto flex w-full max-w-4xl flex-col gap-12 px-6 py-8">
-            <MusicInspirationComposer />
-            <MusicShowcaseGrid />
-          </div>
+          <MusicInspirationPage key={activeMusicSessionId ?? 'new'} activeSessionId={activeMusicSessionId} onSessionsChange={(sessions, activeId) => { setMusicSessions(sessions); if (activeId) setActiveMusicSessionId(activeId); }} />
         ) : activeTab === 'voice-design' ? (
           <VoiceDesignPage activeTab={activeTab} onTabChange={handleTabChange} onBack={handleBack} />
         ) : activeTab === 'voice-clone' ? (

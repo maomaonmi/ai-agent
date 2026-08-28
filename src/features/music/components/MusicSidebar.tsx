@@ -14,12 +14,19 @@ import {
   Wand2,
   UserPlus,
   User,
+  MessageSquare,
+  Plus,
 } from 'lucide-react';
+import type { SessionSummary } from '../../../lib/api';
 
 interface MusicSidebarProps {
   activeTab: MusicTab;
   onTabChange: (tab: MusicTab) => void;
   onBack: () => void;
+  musicSessions?: SessionSummary[];
+  activeMusicSessionId?: string | null;
+  onMusicSessionSelect?: (sessionId: string) => void;
+  onNewMusicSession?: () => void;
 }
 
 export type MusicTab = 'compose' | 'music-creation' | 'voice-synthesis' | 'voice-library' | 'accompaniment' | 'history' | 'favorites' | 'voice-design' | 'voice-clone' | 'voice-extraction';
@@ -37,7 +44,7 @@ const NAV_ITEMS: readonly { id: MusicTab; label: string; icon: typeof Music2 }[]
   { id: 'favorites', label: '我的收藏', icon: Heart },
 ];
 
-export default function MusicSidebar({ activeTab, onTabChange, onBack }: MusicSidebarProps) {
+export default function MusicSidebar({ activeTab, onTabChange, onBack, musicSessions = [], activeMusicSessionId, onMusicSessionSelect, onNewMusicSession }: MusicSidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
 
   return (
@@ -105,6 +112,18 @@ export default function MusicSidebar({ activeTab, onTabChange, onBack }: MusicSi
             );
           })}
         </ul>
+        {!collapsed && activeTab === 'compose' && (
+          <div className="mt-5 border-t border-slate-200 pt-4 dark:border-neutral-800">
+            <div className="mb-2 flex items-center justify-between px-2">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">创作对话</span>
+              <button type="button" onClick={onNewMusicSession} aria-label="新建音乐创作会话" className="rounded p-1 text-slate-400 hover:bg-slate-100 dark:hover:bg-neutral-800"><Plus size={14} /></button>
+            </div>
+            <ul className="space-y-1">
+              {musicSessions.map((session) => <li key={session.session_id}><button type="button" onClick={() => onMusicSessionSelect?.(session.session_id)} className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-xs ${activeMusicSessionId === session.session_id ? 'bg-violet-500/10 text-violet-600 dark:text-violet-300' : 'text-slate-500 hover:bg-slate-100 dark:text-neutral-400 dark:hover:bg-neutral-800'}`}><MessageSquare size={13} className="shrink-0" /><span className="truncate">{session.title}</span></button></li>)}
+              {musicSessions.length === 0 && <li className="px-2 py-2 text-[11px] text-slate-400">开始创作后会自动保存</li>}
+            </ul>
+          </div>
+        )}
       </nav>
 
       {/* Footer */}
