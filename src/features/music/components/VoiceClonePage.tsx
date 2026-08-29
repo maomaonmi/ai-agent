@@ -1,235 +1,73 @@
 'use client';
 
-import React, { useState, useRef } from 'react';
-import { UserPlus, Upload, Mic, Play, Trash2, CheckCircle2 } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Check, CheckCircle2, ChevronDown, Loader2, Mic, Pause, Play, Trash2, Upload } from 'lucide-react';
 import { type MusicTab } from './MusicSidebar';
 
-interface VoiceClonePageProps {
-  activeTab: MusicTab;
-  onTabChange: (tab: MusicTab) => void;
-  onBack: () => void;
+interface VoiceClonePageProps { activeTab: MusicTab; onTabChange: (tab: MusicTab) => void; onBack: () => void; }
+interface VoiceCloneResult { voice_id: string; target_model: string; name: string; preview_text: string; status: string; }
+interface ScenePreset { name: string; text: string; }
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024;
+const MAX_DURATION = 60;
+const MIN_RECOMMENDED_DURATION = 5;
+const DEFAULT_TEXT = '您好，很高兴为您提供配音服务。选择您感兴趣的音色，让我们一起开启声音创作的奇幻之旅。';
+const TARGET_MODEL = 'qwen3-tts-vc-realtime-2026-01-15';
+const SCENES: ScenePreset[] = [
+  { name: '随机', text: '下班路上经过一家便利店，买了一瓶水和一包零食。走出来的时候刚好看到夕阳，橙红色的，很好看。' },
+  { name: '有声读物', text: '夜深了，古屋里只有他一个人。窗外传来若有若无的脚步声，他屏住呼吸，慢慢走向那扇吱呀作响的门。' },
+  { name: '影视配音', text: '我知道这条路很难，但只要我们还站在这里，就没有人能把属于我们的明天夺走。' },
+  { name: 'Vlog独白', text: '今天带大家去逛一逛这座城市的老街，沿途有很多藏在巷子里的小店，跟我一起出发吧。' },
+  { name: '教育培训', text: '接下来我们学习一个简单的方法：先明确目标，再拆分步骤，最后用练习检验自己的理解。' },
+  { name: '电台播客', text: '这里是今晚的声音陪伴，感谢你在忙碌的一天之后，留一点时间给自己，也留一点时间听听内心。' },
+  { name: '智能客服', text: '您好，已为您查询到订单信息。如果还有其他问题，请告诉我，我会继续为您处理。' },
+];
+
+function formatTime(seconds: number): string { const safe = Math.max(0, Math.round(seconds)); return `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, '0')}`; }
+function getAudioDuration(file: File): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file); const audio = document.createElement('audio'); audio.preload = 'metadata';
+    audio.onloadedmetadata = () => { URL.revokeObjectURL(url); resolve(Number.isFinite(audio.duration) ? audio.duration : 0); };
+    audio.onerror = () => { URL.revokeObjectURL(url); reject(new Error('无法读取音频时长，请换一个 WAV、MP3 或 M4A 文件')); }; audio.src = url;
+  });
 }
 
-interface AudioFile {
-  id: string;
-  name: string;
-  duration: string;
-  status: 'uploading' | 'success' | 'error';
-}
+export default function VoiceClonePage({ onTabChange }: VoiceClonePageProps) {
+  const [voiceName, setVoiceName] = useState(''); const [previewText, setPreviewText] = useState(DEFAULT_TEXT); const [selectedScene, setSelectedScene] = useState('随机');
+  const [language, setLanguage] = useState('zh'); const [gender, setGender] = useState(''); const [audioFile, setAudioFile] = useState<File | null>(null); const [audioDuration, setAudioDuration] = useState(0); const [audioUrl, setAudioUrl] = useState<string | null>(null); const [isPlaying, setIsPlaying] = useState(false);
+  const [isRecording, setIsRecording] = useState(false); const [recordingTime, setRecordingTime] = useState(0); const [recordingError, setRecordingError] = useState<string | null>(null); const [consent, setConsent] = useState(false); const [isCloning, setIsCloning] = useState(false); const [error, setError] = useState<string | null>(null); const [result, setResult] = useState<VoiceCloneResult | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null); const audioRef = useRef<HTMLAudioElement | null>(null); const recorderRef = useRef<MediaRecorder | null>(null); const recordingChunksRef = useRef<Blob[]>([]); const recordingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-export default function VoiceClonePage({ activeTab, onTabChange, onBack }: VoiceClonePageProps) {
-  const [voiceName, setVoiceName] = useState('');
-  const [audioFiles, setAudioFiles] = useState<AudioFile[]>([]);
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingTime, setRecordingTime] = useState(0);
-  const [isCloning, setIsCloning] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const recordingTimerRef = useRef<NodeJS.Timeout | null>(null);
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
-    files.forEach(file => {
-      const newFile: AudioFile = {
-        id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
-        name: file.name,
-        duration: '0:00',
-        status: 'uploading',
-      };
-      setAudioFiles(prev => [...prev, newFile]);
-      
-      // 模拟上传
-      setTimeout(() => {
-        setAudioFiles(prev => prev.map(f => 
-          f.id === newFile.id ? { ...f, status: 'success', duration: '0:30' } : f
-        ));
-      }, 1500);
-    });
+  useEffect(() => () => { if (audioUrl) URL.revokeObjectURL(audioUrl); if (recordingTimerRef.current) clearInterval(recordingTimerRef.current); recorderRef.current?.stream.getTracks().forEach((track) => track.stop()); }, [audioUrl]);
+  const setSelectedFile = async (file: File) => {
+    setError(null); const supported = ['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/mp4', 'audio/m4a', 'audio/x-m4a'];
+    if (!supported.includes(file.type.toLowerCase())) return setError('仅支持 WAV、MP3 或 M4A 音频文件。'); if (file.size > MAX_FILE_SIZE) return setError('音频文件不能超过 10MB。');
+    try { const duration = await getAudioDuration(file); if (!duration || duration > MAX_DURATION) return setError(`音频时长需在 ${MIN_RECOMMENDED_DURATION}–${MAX_DURATION} 秒之间。`); if (audioUrl) URL.revokeObjectURL(audioUrl); setAudioFile(file); setAudioDuration(duration); setAudioUrl(URL.createObjectURL(file)); } catch (reason) { setError(reason instanceof Error ? reason.message : '无法读取音频文件。'); }
   };
-
-  const handleStartRecording = () => {
-    setIsRecording(true);
-    setRecordingTime(0);
-    recordingTimerRef.current = setInterval(() => {
-      setRecordingTime(prev => prev + 1);
-    }, 1000);
+  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (file) void setSelectedFile(file); event.target.value = ''; };
+  const removeAudio = () => { if (audioUrl) URL.revokeObjectURL(audioUrl); setAudioFile(null); setAudioDuration(0); setAudioUrl(null); setIsPlaying(false); };
+  const togglePreview = () => { if (!audioUrl) return; if (!audioRef.current || audioRef.current.src !== audioUrl) audioRef.current = new Audio(audioUrl); audioRef.current.onended = () => setIsPlaying(false); if (isPlaying) { audioRef.current.pause(); setIsPlaying(false); } else { void audioRef.current.play(); setIsPlaying(true); } };
+  const stopRecording = () => { recorderRef.current?.stop(); recorderRef.current?.stream.getTracks().forEach((track) => track.stop()); recorderRef.current = null; setIsRecording(false); if (recordingTimerRef.current) clearInterval(recordingTimerRef.current); };
+  const startRecording = async () => {
+    setRecordingError(null); if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') return setRecordingError('当前浏览器不支持录音，请直接上传 WAV、MP3 或 M4A。');
+    const mimeType = ['audio/mp4', 'audio/wav'].find((type) => MediaRecorder.isTypeSupported(type)); if (!mimeType) return setRecordingError('当前浏览器录音格式不符合千问要求，请直接上传 WAV、MP3 或 M4A。');
+    try { const stream = await navigator.mediaDevices.getUserMedia({ audio: true }); const recorder = new MediaRecorder(stream, { mimeType }); recordingChunksRef.current = [];
+      recorder.ondataavailable = (event) => { if (event.data.size) recordingChunksRef.current.push(event.data); }; recorder.onstop = () => { const blob = new Blob(recordingChunksRef.current, { type: mimeType }); const ext = mimeType === 'audio/wav' ? 'wav' : 'mp4'; void setSelectedFile(new File([blob], `录音-${new Date().toISOString().slice(0, 19).replaceAll(':', '-')}.${ext}`, { type: mimeType })); setRecordingTime(0); };
+      recorder.start(); recorderRef.current = recorder; setIsRecording(true); setRecordingTime(0); recordingTimerRef.current = setInterval(() => setRecordingTime((current) => { if (current >= MAX_DURATION) { stopRecording(); return MAX_DURATION; } return current + 1; }), 1000);
+    } catch { setRecordingError('无法访问麦克风，请检查浏览器权限，或改用上传音频。'); }
   };
-
-  const handleStopRecording = () => {
-    setIsRecording(false);
-    if (recordingTimerRef.current) {
-      clearInterval(recordingTimerRef.current);
-    }
-    // 添加录音文件
-    const newFile: AudioFile = {
-      id: Date.now().toString(),
-      name: '录音_' + new Date().toLocaleString(),
-      duration: formatTime(recordingTime),
-      status: 'success',
-    };
-    setAudioFiles(prev => [...prev, newFile]);
-    setRecordingTime(0);
-  };
-
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  const handleDeleteFile = (id: string) => {
-    setAudioFiles(prev => prev.filter(f => f.id !== id));
-  };
-
-  const handlePlayFile = (file: AudioFile) => {
-    // 模拟播放
-    console.log('播放:', file.name);
-  };
-
   const handleClone = async () => {
-    if (!voiceName.trim() || audioFiles.length === 0) return;
-    
-    setIsCloning(true);
-    try {
-      // 模拟克隆过程
-      await new Promise(resolve => setTimeout(resolve, 3000));
-      // 克隆成功后跳转到音色库或合成页面
-      onTabChange('voice-library');
-    } catch (error) {
-      console.error('克隆失败:', error);
-    } finally {
-      setIsCloning(false);
-    }
+    setError(null); if (!voiceName.trim()) return setError('请先填写音色名称。'); if (!audioFile) return setError('请上传一段音频样本。'); if (audioDuration < MIN_RECOMMENDED_DURATION || audioDuration > MAX_DURATION) return setError(`音频时长需在 ${MIN_RECOMMENDED_DURATION}–${MAX_DURATION} 秒之间。`); if (!consent) return setError('请先阅读并同意声音克隆使用规则。');
+    setIsCloning(true); try { const form = new FormData(); form.append('file', audioFile); form.append('name', voiceName.trim()); form.append('previewText', previewText.trim()); form.append('targetModel', TARGET_MODEL); form.append('language', language); if (gender) form.append('gender', gender); const response = await fetch('/api/music/voice-clone', { method: 'POST', body: form }); const body = await response.json().catch(() => ({})); if (!response.ok) throw new Error(body.detail || '音色克隆失败，请稍后重试。'); setResult(body as VoiceCloneResult); } catch (reason) { setError(reason instanceof Error ? reason.message : '音色克隆失败，请稍后重试。'); } finally { setIsCloning(false); }
   };
 
-  const totalDuration = audioFiles.length * 30;
-  const isValid = voiceName.trim() && audioFiles.length > 0 && totalDuration >= 30;
-
-  return (
-    <div className="mx-auto w-full max-w-4xl px-8 py-10">
-      {/* 页面标题 */}
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-slate-900 dark:text-white mb-2">音色克隆</h1>
-        <p className="text-slate-500 dark:text-slate-400">上传音频或录制声音，克隆属于你的专属音色</p>
-      </div>
-
-      {/* 音色名称 */}
-      <div className="mb-8">
-        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-          音色名称
-        </label>
-        <input
-          type="text"
-          value={voiceName}
-          onChange={(e) => setVoiceName(e.target.value)}
-          placeholder="为你的音色起个名字..."
-          className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 dark:bg-neutral-800 dark:border-neutral-700 dark:text-white"
-        />
-      </div>
-
-      {/* 上传区域 */}
-      <div className="mb-8">
-        <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
-          音频素材
-          <span className="text-slate-400 ml-2">（至少30秒，支持WAV、MP3格式）</span>
-        </label>
-        
-        {/* 上传按钮 */}
-        <div className="flex gap-4 mb-6">
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-2 px-6 py-3 border-2 border-dashed border-slate-300 hover:border-emerald-500 rounded-xl text-slate-600 hover:text-emerald-600 transition-colors dark:border-neutral-600 dark:text-slate-400 dark:hover:border-emerald-400 dark:hover:text-emerald-400"
-          >
-            <Upload size={20} />
-            <span>上传音频</span>
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="audio/*"
-            multiple
-            onChange={handleFileSelect}
-            className="hidden"
-          />
-          
-          <button
-            onClick={isRecording ? handleStopRecording : handleStartRecording}
-            className={`flex items-center gap-2 px-6 py-3 rounded-xl transition-colors ${
-              isRecording
-                ? 'bg-red-500 hover:bg-red-600 text-white animate-pulse'
-                : 'border-2 border-slate-300 hover:border-red-500 text-slate-600 hover:text-red-600 dark:border-neutral-600 dark:text-slate-400'
-            }`}
-          >
-            <Mic size={20} />
-            <span>{isRecording ? '停止录音 (' + formatTime(recordingTime) + ')' : '开始录制'}</span>
-          </button>
-        </div>
-
-        {/* 文件列表 */}
-        {audioFiles.length > 0 && (
-          <div className="space-y-3">
-            {audioFiles.map(file => (
-              <div key={file.id} className="flex items-center gap-4 p-4 bg-slate-50 dark:bg-neutral-800 rounded-xl">
-                {file.status === 'uploading' ? (
-                  <div className="w-10 h-10 rounded-full border-2 border-slate-300 border-t-emerald-500 animate-spin" />
-                ) : file.status === 'success' ? (
-                  <div className="w-10 h-10 rounded-full bg-emerald-100 dark:bg-emerald-900/30 flex items-center justify-center">
-                    <CheckCircle2 size={20} className="text-emerald-600 dark:text-emerald-400" />
-                  </div>
-                ) : (
-                  <div className="w-10 h-10 rounded-full bg-red-100 dark:bg-red-900/30 flex items-center justify-center">
-                    <Trash2 size={20} className="text-red-600 dark:text-red-400" />
-                  </div>
-                )}
-                <div className="flex-1">
-                  <h3 className="font-medium text-slate-900 dark:text-white truncate">{file.name}</h3>
-                  <p className="text-sm text-slate-500 dark:text-slate-400">{file.duration}</p>
-                </div>
-                {file.status === 'success' && (
-                  <button
-                    onClick={() => handlePlayFile(file)}
-                    className="p-2 text-slate-500 hover:text-emerald-600 dark:text-slate-400 dark:hover:text-emerald-400 transition-colors"
-                  >
-                    <Play size={18} />
-                  </button>
-                )}
-                <button
-                  onClick={() => handleDeleteFile(file.id)}
-                  className="p-2 text-slate-500 hover:text-red-600 dark:text-slate-400 dark:hover:text-red-400 transition-colors"
-                >
-                  <Trash2 size={18} />
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* 时长统计 */}
-        <div className="mt-4 flex items-center gap-2 text-sm text-slate-500 dark:text-slate-400">
-          <div className={`w-2 h-2 rounded-full ${totalDuration >= 30 ? 'bg-emerald-500' : 'bg-amber-500'}`} />
-          <span>已收集 {totalDuration} 秒 {totalDuration >= 30 ? '✓' : '(还需 ' + (30 - totalDuration) + ' 秒)'}</span>
-        </div>
-      </div>
-
-      {/* 克隆按钮 */}
-      <div className="flex items-center justify-end">
-        <button
-          onClick={handleClone}
-          disabled={!isValid || isCloning}
-          className="flex items-center gap-2 px-8 py-3 bg-gradient-to-r from-emerald-500 to-teal-500 text-white rounded-full font-medium hover:from-emerald-600 hover:to-teal-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-emerald-500/30"
-        >
-          {isCloning ? (
-            <>
-              <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-              <span>克隆中...</span>
-            </>
-          ) : (
-            <>
-              <UserPlus size={18} />
-              <span>开始克隆</span>
-            </>
-          )}
-        </button>
-      </div>
-    </div>
-  );
+  return <div className="mx-auto w-full max-w-5xl px-6 py-10 md:px-10"><div className="mx-auto max-w-4xl">
+    <div className="mb-10"><div className="mb-3 flex items-center gap-3"><h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">声音克隆</h1><span className="rounded-full bg-violet-100 px-3 py-1 text-xs font-medium text-violet-700 dark:bg-violet-500/15 dark:text-violet-300">Qwen3-TTS-VC</span></div><p className="text-slate-500 dark:text-slate-400">朗读一段文字，即可克隆你的专属声音</p></div>
+    <section className="mb-10"><h2 className="mb-4 text-xl font-semibold text-slate-900 dark:text-white">选择场景并朗读</h2><div className="mb-4 flex flex-wrap gap-2">{SCENES.map((scene) => <button key={scene.name} type="button" onClick={() => { setSelectedScene(scene.name); setPreviewText(scene.text); }} className={`rounded-full border px-4 py-2 text-sm transition ${selectedScene === scene.name ? 'border-violet-500 bg-violet-50 text-violet-700 dark:bg-violet-500/15 dark:text-violet-300' : 'border-slate-200 text-slate-600 hover:border-violet-300 dark:border-slate-700 dark:text-slate-300'}`}>{scene.name}</button>)}</div><div className="rounded-2xl border border-slate-200 bg-slate-50/60 p-5 dark:border-slate-700 dark:bg-slate-900/40"><textarea value={previewText} onChange={(event) => setPreviewText(event.target.value)} maxLength={300} className="min-h-28 w-full resize-y bg-transparent text-base leading-7 text-slate-800 outline-none dark:text-slate-100" aria-label="试听文本" /><div className="mt-3 flex items-center justify-between text-sm text-slate-400"><span>{previewText.length} / 300 字符</span><span>建议使用 10–20 秒清晰人声</span></div></div></section>
+    <section className="mb-10"><h2 className="mb-4 text-xl font-semibold text-slate-900 dark:text-white">上传声音样本</h2><div className="grid gap-4 md:grid-cols-2"><button type="button" onClick={() => fileInputRef.current?.click()} className="flex min-h-32 flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-white px-5 py-6 text-slate-600 transition hover:border-violet-400 hover:bg-violet-50/40 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-300"><Upload className="mb-2 text-violet-500" size={26} /><span className="font-medium">上传音频文件</span><span className="mt-1 text-xs text-slate-400">WAV / MP3 / M4A，最大 10MB</span></button><button type="button" onClick={isRecording ? stopRecording : startRecording} className={`flex min-h-32 flex-col items-center justify-center rounded-2xl border px-5 py-6 transition ${isRecording ? 'border-red-400 bg-red-50 text-red-600 dark:bg-red-500/10' : 'border-slate-200 bg-white text-slate-600 hover:border-violet-400 dark:border-slate-700 dark:bg-slate-900/30 dark:text-slate-300'}`}><Mic className={`mb-2 ${isRecording ? 'animate-pulse' : 'text-violet-500'}`} size={26} /><span className="font-medium">{isRecording ? `停止录音 ${formatTime(recordingTime)}` : '开始录音'}</span><span className="mt-1 text-xs text-slate-400">浏览器支持时可直接录制</span></button></div><input ref={fileInputRef} type="file" accept="audio/mpeg,audio/mp3,audio/wav,audio/x-wav,audio/mp4,audio/m4a,audio/x-m4a" onChange={handleFileSelect} className="hidden" />{recordingError && <p className="mt-3 text-sm text-amber-600">{recordingError}</p>}{audioFile && <div className="mt-4 flex items-center gap-3 rounded-2xl border border-violet-200 bg-violet-50/60 p-4 dark:border-violet-500/30 dark:bg-violet-500/10"><button type="button" onClick={togglePreview} className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-violet-600 text-white" aria-label={isPlaying ? '暂停试听' : '试听音频'}>{isPlaying ? <Pause size={18} /> : <Play size={18} />}</button><div className="min-w-0 flex-1"><p className="truncate font-medium text-slate-800 dark:text-slate-100">{audioFile.name}</p><p className="text-sm text-slate-500">{formatTime(audioDuration)} · {(audioFile.size / 1024 / 1024).toFixed(2)} MB</p></div><button type="button" onClick={removeAudio} className="rounded-full p-2 text-slate-400 hover:bg-white hover:text-red-500 dark:hover:bg-slate-800" aria-label="删除音频"><Trash2 size={18} /></button></div>}</section>
+    <section className="mb-8 grid gap-4 md:grid-cols-3"><label><span className="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300">音色名称</span><input value={voiceName} onChange={(event) => setVoiceName(event.target.value)} placeholder="例如：我的旁白" maxLength={64} className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-violet-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-white" /></label><label><span className="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300">性别（可选）</span><span className="relative block"><select value={gender} onChange={(event) => setGender(event.target.value)} className="w-full appearance-none rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-violet-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-white"><option value="">未设置</option><option value="男">男声</option><option value="女">女声</option></select><ChevronDown className="pointer-events-none absolute right-3 top-3.5 text-slate-400" size={18} /></span></label><label><span className="mb-2 block text-sm font-medium text-slate-700 dark:text-slate-300">语言</span><span className="relative block"><select value={language} onChange={(event) => setLanguage(event.target.value)} className="w-full appearance-none rounded-xl border border-slate-200 bg-white px-4 py-3 outline-none focus:border-violet-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-white"><option value="zh">中文</option><option value="en">English</option></select><ChevronDown className="pointer-events-none absolute right-3 top-3.5 text-slate-400" size={18} /></span></label></section>
+    <label className="mb-6 flex items-start gap-3 text-sm text-slate-500 dark:text-slate-400"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} className="mt-0.5 h-4 w-4 accent-violet-600" /><span>我已阅读并同意《声音克隆功能使用规则》，确认对所上传的声音样本具有充分、合法、必要的权利和授权。</span></label><p className="mb-5 text-xs leading-5 text-slate-400">克隆音色会绑定到 {TARGET_MODEL}，后续合成时请继续使用同一模型；音色 ID 会自动保存到“我的音色”。</p>
+    {error && <div role="alert" className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-300">{error}</div>}{result && <div className="mb-5 flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 dark:border-emerald-500/30 dark:bg-emerald-500/10"><CheckCircle2 className="mt-0.5 shrink-0 text-emerald-600" size={20} /><div className="flex-1 text-sm text-emerald-800 dark:text-emerald-200"><p className="font-semibold">音色克隆完成，已保存到我的音色</p><p className="mt-1 break-all text-xs opacity-80">Voice ID：{result.voice_id}</p></div><button type="button" onClick={() => onTabChange('voice-library')} className="rounded-lg bg-emerald-600 px-3 py-2 text-xs font-medium text-white hover:bg-emerald-700">查看音色库</button></div>}
+    <button type="button" onClick={handleClone} disabled={isCloning || Boolean(result)} className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-5 py-3.5 font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:bg-violet-700 disabled:cursor-not-allowed disabled:opacity-50">{isCloning ? <><Loader2 className="animate-spin" size={20} /> 克隆中，请稍候...</> : <><Check size={20} /> 开始克隆</>}</button>
+  </div></div>;
 }
