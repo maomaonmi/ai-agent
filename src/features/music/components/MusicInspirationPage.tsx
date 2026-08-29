@@ -16,6 +16,7 @@ import { buildMusicAgentPrompt, musicSessionTitle, parseMusicDraft, parseStreami
 import MusicInspirationComposer from './MusicInspirationComposer';
 import MusicShowcaseGrid from './MusicShowcaseGrid';
 import { inspirationFromTrack, type MusicTrack } from '../musicCatalog';
+import { musicCreationDraftUrl } from '../musicNavigation';
 
 const EMPTY_DOCUMENT = { title: '', lyrics: '', provider: 'deepseek' as MusicProvider, status: 'generating' as const };
 type MusicDocument = NonNullable<SessionSnapshot['musicDocument']>;
@@ -181,7 +182,7 @@ export default function MusicInspirationPage({
         <button type="button" onClick={save} disabled={!sessionId || busy} className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-2 text-xs font-medium text-white disabled:opacity-50"><Save size={14} />保存</button>
       </header>
       <textarea value={document.lyrics} onChange={(event) => setDocument((old) => ({ ...old, lyrics: event.target.value }))} aria-label="可编辑歌词" placeholder={busy ? 'Agent 正在创作歌词…' : '歌词会显示在这里'} className="min-h-0 flex-1 resize-none bg-transparent px-6 py-5 font-sans text-sm leading-8 outline-none lg:px-10" />
-      <footer className="flex items-center justify-between border-t border-slate-200 px-5 py-3 text-xs text-slate-400 dark:border-neutral-800"><span>{document.lyrics.length} 字符</span><button type="button" onClick={() => window.location.assign('/music/music-creation')} disabled={!document.lyrics} className="rounded-full bg-rose-500 px-5 py-2 font-medium text-white disabled:opacity-40">去作歌</button></footer>
+      <footer className="flex items-center justify-between border-t border-slate-200 px-5 py-3 text-xs text-slate-400 dark:border-neutral-800"><span>{document.lyrics.length} 字符</span><button type="button" onClick={async () => { if (!sessionId) return; await save(); window.location.assign(musicCreationDraftUrl(sessionId)); }} disabled={!document.lyrics || !sessionId} className="rounded-full bg-rose-500 px-5 py-2 font-medium text-white disabled:opacity-40">去作歌</button></footer>
     </section>
   </div>;
 }

@@ -24,6 +24,8 @@ import {
 } from 'lucide-react';
 import MusicSidebar, { type MusicTab } from './MusicSidebar';
 import { generateSunoMusic, listSunoTasks, openSunoTaskStream, resolveSunoAssetUrl, type SunoTask } from '../api';
+import { getSessionHistory } from '../../../lib/api';
+import { useSearchParams } from 'next/navigation';
 
 interface MusicCreationPageProps {
   activeTab: MusicTab;
@@ -154,6 +156,8 @@ function AudioTrackPlayer({ src, duration }: { src: string; duration?: number | 
 }
 
 export default function MusicCreationPage({ activeTab, onTabChange, onBack }: MusicCreationPageProps) {
+  const searchParams = useSearchParams();
+  const lyricsSessionId = searchParams.get('lyricsSession');
   const [lyrics, setLyrics] = useState('');
   const [style, setStyle] = useState('');
   const [title, setTitle] = useState('');
@@ -170,6 +174,21 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
   const streamRef = useRef<EventSource | null>(null);
+
+  useEffect(() => {
+    if (!lyricsSessionId) return;
+    let live = true;
+    getSessionHistory(lyricsSessionId).then(({ snapshot }) => {
+      if (!live || !snapshot.musicDocument) return;
+      setLyrics(snapshot.musicDocument.lyrics);
+      setTitle(snapshot.musicDocument.title);
+      setMode('custom');
+      setError('');
+    }).catch((reason) => {
+      if (live) setError(reason instanceof Error ? reason.message : '无法载入歌词草稿');
+    });
+    return () => { live = false; };
+  }, [lyricsSessionId]);
 
   useEffect(() => {
     let cancelled = false;

@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter, usePathname } from 'next/navigation';
+import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import MusicSidebar, { type MusicTab } from './components/MusicSidebar';
 import MusicShowcaseGrid from './components/MusicShowcaseGrid';
 import VoiceSynthesisPage from './components/VoiceSynthesisPage';
@@ -33,6 +33,7 @@ interface MusicWorkshopTabProps {
 export default function MusicWorkshopTab({ initialTab }: MusicWorkshopTabProps) {
   const router = useRouter();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   
   // 从 URL 解析当前 tab，无效则默认 compose
   const [activeTab, setActiveTab] = useState<MusicTab>(() => {
@@ -40,7 +41,12 @@ export default function MusicWorkshopTab({ initialTab }: MusicWorkshopTabProps) 
     return VALID_TABS.includes(tabFromUrl as MusicTab) ? (tabFromUrl as MusicTab) : 'compose';
   });
   const [musicSessions, setMusicSessions] = useState<SessionSummary[]>([]);
-  const [activeMusicSessionId, setActiveMusicSessionId] = useState<string | null>(null);
+  const [activeMusicSessionId, setActiveMusicSessionId] = useState<string | null>(() => searchParams.get('session'));
+
+  useEffect(() => {
+    const sessionId = searchParams.get('session');
+    if (sessionId) setActiveMusicSessionId(sessionId);
+  }, [searchParams]);
 
   useEffect(() => {
     listSessions().then((result) => setMusicSessions(result.sessions.filter((item) => item.mode === 'music'))).catch(() => undefined);
