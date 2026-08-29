@@ -5,18 +5,12 @@ import {
   Play, 
   Pause, 
   Heart, 
-  Check, 
   MoreHorizontal, 
   Search, 
   Filter,
-  Sparkles,
-  ArrowRight,
   Loader2,
   Volume2,
   VolumeX,
-  SkipBack,
-  SkipForward,
-  RotateCcw,
   X
 } from 'lucide-react';
 import { normalizeVoices, type VoiceApiModel, type VoiceModel } from '../voiceCatalog';
@@ -87,11 +81,7 @@ export default function VoiceLibraryModal({ isOpen, onClose, onSelectVoice }: Vo
   });
   
   // 播放控制器状态
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
   const [isMuted, setIsMuted] = useState(false);
-  const [isDragging, setIsDragging] = useState(false);
   const [isActuallyPlaying, setIsActuallyPlaying] = useState(false); // 独立的播放状态
 
   // 获取筛选选项（组件加载时）
@@ -117,17 +107,20 @@ export default function VoiceLibraryModal({ isOpen, onClose, onSelectVoice }: Vo
     try {
       setLoading(true);
       
-      // 构建查询参数
+      // “我的音色/收藏音色”需要完整列表；模型和数据库筛选只作用于音色库，
+      // 否则用户从音色库切换标签时，先前选中的 Plus/CosyVoice 筛选会把自定义音色隐藏。
       const params = new URLSearchParams();
-      if (selectedModel && selectedModel !== 'all') params.append('model', selectedModel);
-      if (selectedScenario) params.append('scenario', selectedScenario);
-      if (selectedTrait) params.append('trait', selectedTrait);
-      if (selectedGender && selectedGender !== '全部') params.append('gender', selectedGender);
-      if (selectedAge) {
-        const ageRange = filterOptions.age_ranges.find(r => r.label === selectedAge);
-        if (ageRange) {
-          params.append('age_min', ageRange.min.toString());
-          params.append('age_max', ageRange.max.toString());
+      if (activeSubTab === '音色库') {
+        if (selectedModel && selectedModel !== 'all') params.append('model', selectedModel);
+        if (selectedScenario) params.append('scenario', selectedScenario);
+        if (selectedTrait) params.append('trait', selectedTrait);
+        if (selectedGender && selectedGender !== '全部') params.append('gender', selectedGender);
+        if (selectedAge) {
+          const ageRange = filterOptions.age_ranges.find(r => r.label === selectedAge);
+          if (ageRange) {
+            params.append('age_min', ageRange.min.toString());
+            params.append('age_max', ageRange.max.toString());
+          }
         }
       }
       if (searchQuery) params.append('search', searchQuery);
@@ -144,7 +137,7 @@ export default function VoiceLibraryModal({ isOpen, onClose, onSelectVoice }: Vo
     } finally {
       setLoading(false);
     }
-  }, [selectedModel, selectedScenario, selectedTrait, selectedGender, selectedAge, searchQuery, filterOptions]);
+  }, [activeSubTab, selectedModel, selectedScenario, selectedTrait, selectedGender, selectedAge, searchQuery, filterOptions]);
 
   useEffect(() => {
     if (isOpen) {
@@ -165,11 +158,22 @@ export default function VoiceLibraryModal({ isOpen, onClose, onSelectVoice }: Vo
     });
   }, [voices, searchQuery]);
 
+  // 标签切换必须改变真正渲染的数据集合。此前 activeSubTab 只更新了
+  // 下划线样式，列表始终使用全部 voices，因此“我的音色/收藏音色”看起来无法切换。
+  const visibleVoices = useMemo(() => {
+    if (activeSubTab === '我的音色') {
+      return filteredVoices.filter((voice) => voice.isCustom);
+    }
+    if (activeSubTab === '收藏音色') {
+      return filteredVoices.filter((voice) => (
+        voice.isCustom ? Boolean(voice.isFavorite) : favorites.includes(voice.voiceId)
+      ));
+    }
+    return filteredVoices.filter((voice) => !voice.isCustom);
+  }, [activeSubTab, favorites, filteredVoices]);
+
   // Separate voices into categories
-  const recommendedVoices = useMemo(() => filteredVoices.filter(v => v.isHot), [filteredVoices]);
-  const premiumVoices = useMemo(() => filteredVoices.filter(v => v.isPremium), [filteredVoices]);
-  const flashVoices = useMemo(() => filteredVoices.filter(v => !v.isPremium && v.model?.includes('flash')), [filteredVoices]);
-  const cosyVoices = useMemo(() => filteredVoices.filter(v => v.model?.includes('cosyvoice')), [filteredVoices]);
+  const recommendedVoices = useMemo(() => visibleVoices.filter(v => v.isHot), [visibleVoices]);
 
   // Check if any filters are active
   const hasActiveFilters = useMemo(() => {
@@ -187,11 +191,35 @@ export default function VoiceLibraryModal({ isOpen, onClose, onSelectVoice }: Vo
   };
 
   // Toggle favorite
-  const toggleFavorite = useCallback((voiceId: string) => {
-    setFavorites(prev => 
-      prev.includes(voiceId) ? prev.filter(id => id !== voiceId) : [...prev, voiceId]
+  const toggleFavorite = useCallback(async (voice: VoiceModel) => {
+    const nextFavorite = voice.isCustom
+      ? !Boolean(voice.isFavorite)
+      : !favorites.includes(voice.voiceId);
+
+    if (voice.isCustom) {
+      try {
+        const response = await fetch(`/api/music/my-voices/${encodeURIComponent(voice.voiceId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ is_favorite: nextFavorite }),
+        });
+        if (!response.ok) throw new Error('收藏状态更新失败');
+        const updated = await response.json() as VoiceApiModel;
+        setVoices(prev => prev.map(item => item.voiceId === voice.voiceId
+          ? { ...item, isFavorite: Boolean(updated.is_favorite) }
+          : item
+        ));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '收藏状态更新失败');
+      }
+      return;
+    }
+
+    setFavorites(prev => prev.includes(voice.voiceId)
+      ? prev.filter(id => id !== voice.voiceId)
+      : [...prev, voice.voiceId]
     );
-  }, []);
+  }, [favorites]);
 
   // Play voice preview
   const playVoicePreview = useCallback((voice: VoiceModel) => {
@@ -593,18 +621,22 @@ export default function VoiceLibraryModal({ isOpen, onClose, onSelectVoice }: Vo
           )}
 
           {/* Empty State */}
-          {!loading && !error && filteredVoices.length === 0 && (
+          {!loading && !error && visibleVoices.length === 0 && (
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <div className="w-16 h-16 bg-slate-100 rounded-full flex items-center justify-center mb-4">
                 <Search size={32} className="text-slate-400" />
               </div>
-              <p className="text-lg font-medium text-slate-700">未找到匹配的音色</p>
-              <p className="text-slate-500 mt-2">尝试使用其他关键词搜索</p>
+              <p className="text-lg font-medium text-slate-700">
+                {activeSubTab === '我的音色' ? '还没有自定义音色' : activeSubTab === '收藏音色' ? '还没有收藏音色' : '未找到匹配的音色'}
+              </p>
+              <p className="text-slate-500 mt-2">
+                {activeSubTab === '音色库' ? '尝试使用其他关键词搜索' : '可先在音色卡片上点击心形按钮收藏'}
+              </p>
             </div>
           )}
 
           {/* Voice List */}
-          {!loading && !error && filteredVoices.length > 0 && (
+          {!loading && !error && visibleVoices.length > 0 && (
             <>
               {/* Recommended */}
               {recommendedVoices.length > 0 && (
@@ -616,7 +648,7 @@ export default function VoiceLibraryModal({ isOpen, onClose, onSelectVoice }: Vo
                         key={`${voice.model}-${voice.voiceId}`}
                         voice={voice}
                         isSelected={selectedVoice === voice.voiceId}
-                        isFavorite={favorites.includes(voice.voiceId)}
+                        isFavorite={voice.isCustom ? Boolean(voice.isFavorite) : favorites.includes(voice.voiceId)}
                         isPlaying={playingVoice === voice.voiceId}
                         onSelect={() => {
                           setSelectedVoice(voice.voiceId);
@@ -625,7 +657,7 @@ export default function VoiceLibraryModal({ isOpen, onClose, onSelectVoice }: Vo
                             onClose();
                           }
                         }}
-                        onToggleFavorite={() => toggleFavorite(voice.voiceId)}
+                        onToggleFavorite={() => { void toggleFavorite(voice); }}
                         onPlay={() => playVoicePreview(voice)}
                       />
                     ))}
@@ -637,12 +669,12 @@ export default function VoiceLibraryModal({ isOpen, onClose, onSelectVoice }: Vo
               <section>
                 <h4 className="text-sm font-medium text-slate-700 mb-3">全部音色</h4>
                 <div className="space-y-4">
-                  {filteredVoices.map(voice => (
+                  {visibleVoices.map(voice => (
                     <VoiceCard
                       key={`${voice.model}-${voice.voiceId}`}
                       voice={voice}
                       isSelected={selectedVoice === voice.voiceId}
-                      isFavorite={favorites.includes(voice.voiceId)}
+                      isFavorite={voice.isCustom ? Boolean(voice.isFavorite) : favorites.includes(voice.voiceId)}
                       isPlaying={playingVoice === voice.voiceId}
                       onSelect={() => {
                         setSelectedVoice(voice.voiceId);
@@ -651,7 +683,7 @@ export default function VoiceLibraryModal({ isOpen, onClose, onSelectVoice }: Vo
                           onClose();
                         }
                       }}
-                      onToggleFavorite={() => toggleFavorite(voice.voiceId)}
+                      onToggleFavorite={() => { void toggleFavorite(voice); }}
                       onPlay={() => playVoicePreview(voice)}
                     />
                   ))}
