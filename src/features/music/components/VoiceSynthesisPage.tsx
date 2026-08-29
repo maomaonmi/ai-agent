@@ -65,6 +65,7 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
     state: ttsState,
     error: ttsError,
     warnings: ttsWarnings,
+    meta: ttsMeta,
     totalBytes,
     droppedChunks,
     audioUrl,
@@ -934,7 +935,7 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
                       </button>
                       <a
                         href={audioUrl}
-                        download={`tts-${selectedVoiceModel?.name ?? 'audio'}.mp3`}
+                        download={`tts-${selectedVoiceModel?.name ?? 'audio'}.${ttsMeta?.mimeType === 'audio/wav' || ttsMeta?.mimeType === 'audio/pcm' ? 'wav' : 'mp3'}`}
                         className="p-1 text-slate-500 hover:text-slate-800"
                         title="下载音频"
                       >
