@@ -32,6 +32,29 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 // 单个片段上限（远低于后端 20000 字符上限，留足余量）
 const MAX_CHUNK_CHARS = 2000;
 
+function pcm24MonoToWav(pcm: ArrayBuffer, sampleRate = 24000): Blob {
+  const header = new ArrayBuffer(44);
+  const view = new DataView(header);
+  const writeAscii = (offset: number, value: string) => {
+    for (let i = 0; i < value.length; i += 1) view.setUint8(offset + i, value.charCodeAt(i));
+  };
+  const dataLength = pcm.byteLength;
+  writeAscii(0, 'RIFF');
+  view.setUint32(4, 36 + dataLength, true);
+  writeAscii(8, 'WAVE');
+  writeAscii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, 'data');
+  view.setUint32(40, dataLength, true);
+  return new Blob([header, pcm], { type: 'audio/wav' });
+}
+
 // 服务端 JSON 控制帧（与 music_api.py handle_tts_stream_websocket 协议一一对应）
 interface ServerMessage {
   type: string;
@@ -101,6 +124,7 @@ export function useTtsStream(): TtsStreamControls {
   const wsRef = useRef<WebSocket | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const mimeTypeRef = useRef<string>('audio/mpeg');
+  const sampleRateRef = useRef(24000);
   const objectUrlRef = useRef<string | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -135,6 +159,7 @@ export function useTtsStream(): TtsStreamControls {
     revokeAudioUrl();
     chunksRef.current = [];
     mimeTypeRef.current = 'audio/mpeg';
+    sampleRateRef.current = 24000;
     setState('idle');
     setError(null);
     setWarnings([]);
@@ -148,11 +173,14 @@ export function useTtsStream(): TtsStreamControls {
   }, [closeSocket, revokeAudioUrl]);
 
   // 把累积的音频块合并为可播放的 ObjectURL
-  const finalizeAudio = useCallback(() => {
+  const finalizeAudio = useCallback(async () => {
     const mimeType = mimeTypeRef.current;
     const blob = new Blob(chunksRef.current, { type: mimeType });
+    const playableBlob = mimeType === 'audio/pcm'
+      ? pcm24MonoToWav(await blob.arrayBuffer(), sampleRateRef.current)
+      : blob;
     revokeAudioUrl();
-    const url = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(playableBlob);
     objectUrlRef.current = url;
     setAudioUrl(url);
   }, [revokeAudioUrl]);
@@ -231,6 +259,7 @@ export function useTtsStream(): TtsStreamControls {
                 break;
               case 'meta':
                 if (msg.mime_type) mimeTypeRef.current = msg.mime_type;
+                if (msg.sample_rate) sampleRateRef.current = msg.sample_rate;
                 setMeta((prev) => ({
                   sessionId: prev?.sessionId ?? '',
                   mimeType: msg.mime_type ?? prev?.mimeType ?? mimeTypeRef.current,
@@ -245,10 +274,15 @@ export function useTtsStream(): TtsStreamControls {
                   msg.total_bytes ?? chunksRef.current.reduce((s, b) => s + b.size, 0),
                 );
                 setDroppedChunks(msg.dropped_chunks ?? 0);
-                finalizeAudio();
-                setState('completed');
-                closeSocket(ws);
-                finishOk();
+                void finalizeAudio()
+                  .then(() => {
+                    setState('completed');
+                    closeSocket(ws);
+                    finishOk();
+                  })
+                  .catch((reason: unknown) => {
+                    finishErr(reason instanceof Error ? reason : new Error('音频封装失败'));
+                  });
                 break;
               case 'error':
                 finishErr(new Error(msg.message ?? msg.code ?? '语音合成失败'));

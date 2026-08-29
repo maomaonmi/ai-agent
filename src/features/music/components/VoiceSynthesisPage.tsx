@@ -26,6 +26,7 @@ import MusicSidebar, { type MusicTab } from './MusicSidebar';
 import VoiceLibraryModal from './VoiceLibraryModal';
 import { useTtsStream } from '../hooks/useTtsStream';
 import type { VoiceModel } from '../voiceCatalog';
+import { extractVoiceSynthesisText } from '../voiceSynthesisText';
 
 interface SelectedVoice {
   id: string;
@@ -84,6 +85,7 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
   // Why：SSML/LaTeX 公式朗读仅 CosyVoice 系列模型支持（与后端 is_cosyvoice_model 判定一致）
   const activeModel = selectedVoiceModel?.model ?? '';
   const isCosyVoice = activeModel.startsWith('cosyvoice');
+  const isQwenRealtime = /^qwen3-tts-(?:vc|vd)-realtime-/.test(activeModel);
 
   const handleSelectVoice = (voice: VoiceModel) => {
     setSelectedVoiceModel(voice);
@@ -111,26 +113,11 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
   // Why：UI 参数与 DashScope 参数语义不同（前端视觉沿用 MiniMax 风格坐标），
   // 提交前必须映射，否则 pitch 默认 0 会被后端 clamp 成 0.5（本应为 1.0）。
   const handleGenerate = useCallback(async () => {
-    // 获取包含情绪标签真实值的文本
-    const textarea = document.getElementById('voice-textarea');
-    let finalText = text;
-    
-    if (textarea) {
-      // 克隆节点以避免修改原始内容
-      const clone = textarea.cloneNode(true) as HTMLElement;
-      
-      // 用隐藏的真实值替换标签显示
-      const tags = clone.querySelectorAll('.emotion-tag');
-      tags.forEach((tag) => {
-        const valueSpan = tag.querySelector('.emotion-value');
-        if (valueSpan && valueSpan.textContent) {
-          const textNode = document.createTextNode(valueSpan.textContent);
-          tag.parentNode?.replaceChild(textNode, tag);
-        }
-      });
-      
-      finalText = clone.innerText || text;
-    }
+    // 情绪/语气/停顿是编辑器控制元数据，不能作为正文传给 TTS。
+    const finalText = extractVoiceSynthesisText(
+      document.getElementById('voice-textarea'),
+      text,
+    );
     
     const trimmed = finalText.trim();
     if (!trimmed || !selectedVoiceModel) return;
@@ -1297,7 +1284,9 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
                         step="0.1"
                         value={speed}
                         onChange={(e) => setSpeed(parseFloat(e.target.value))}
-                        className="mt-2 w-full"
+                        disabled={isQwenRealtime}
+                        title={isQwenRealtime ? 'Qwen realtime 音色不支持语速调节' : undefined}
+                        className="mt-2 w-full disabled:cursor-not-allowed disabled:opacity-40"
                       />
                     </div>
 
@@ -1313,7 +1302,9 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
                         step="0.1"
                         value={pitch}
                         onChange={(e) => setPitch(parseFloat(e.target.value))}
-                        className="mt-2 w-full"
+                        disabled={isQwenRealtime}
+                        title={isQwenRealtime ? 'Qwen realtime 音色不支持声调调节' : undefined}
+                        className="mt-2 w-full disabled:cursor-not-allowed disabled:opacity-40"
                       />
                     </div>
 
@@ -1329,7 +1320,9 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
                         step="0.1"
                         value={volume}
                         onChange={(e) => setVolume(parseFloat(e.target.value))}
-                        className="mt-2 w-full"
+                        disabled={isQwenRealtime}
+                        title={isQwenRealtime ? 'Qwen realtime 音色不支持音量调节' : undefined}
+                        className="mt-2 w-full disabled:cursor-not-allowed disabled:opacity-40"
                       />
                     </div>
                   </div>
@@ -1342,6 +1335,12 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
                         {instruction.length}/100
                       </span>
                     </div>
+
+                    {isQwenRealtime && (
+                      <p className="mt-2 rounded-lg bg-amber-50 p-2 text-[10px] leading-relaxed text-amber-700">
+                        当前克隆音色使用 Qwen realtime 模型，仅支持纯文本合成；语速、声调、音量和指令不会传给上游。
+                      </p>
+                    )}
 
                     {/* 预设快捷选项 */}
                     <div className="mt-3 space-y-3">
@@ -1361,6 +1360,7 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
                           ].map((emotion) => (
                             <button
                               key={emotion}
+                              disabled={isQwenRealtime}
                               onClick={() => {
                                 setInstruction((prev) =>
                                   prev ? `${prev} ${emotion}地` : `请${emotion}地说`,
@@ -1389,6 +1389,7 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
                           ].map((style) => (
                             <button
                               key={style}
+                              disabled={isQwenRealtime}
                               onClick={() => {
                                 setInstruction((prev) =>
                                   prev ? `${prev} 用${style}的方式` : `请用${style}的方式`,
@@ -1415,6 +1416,7 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
                           ].map((dialect) => (
                             <button
                               key={dialect}
+                              disabled={isQwenRealtime}
                               onClick={() => {
                                 setInstruction((prev) =>
                                   prev ? `${prev} 用${dialect}` : `请用${dialect}`,
@@ -1436,11 +1438,13 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
                         onChange={(e) => setInstruction(e.target.value)}
                         placeholder="例如：请开心地用新闻播报的方式..."
                         maxLength={100}
-                        className="h-20 w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs text-slate-700 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
+                        disabled={isQwenRealtime}
+                        className="h-20 w-full resize-none rounded-xl border border-slate-200 bg-slate-50 p-2.5 text-xs text-slate-700 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500 disabled:cursor-not-allowed disabled:opacity-50"
                       />
                       <button
                         onClick={() => setInstruction('')}
-                        className="mt-2 text-[10px] text-slate-500 hover:text-slate-700 transition"
+                        disabled={isQwenRealtime}
+                        className="mt-2 text-[10px] text-slate-500 hover:text-slate-700 transition disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         清空
                       </button>
