@@ -58,6 +58,16 @@ export interface SunoGenerateInput {
   negativeTags?: string;
   vocalGender?: "m" | "f";
   clientRequestId?: string;
+  referenceAudioUrl?: string;
+}
+
+export interface SunoReferenceAudio {
+  url: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  expiresInDays: number;
+  durationSeconds?: number;
 }
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -80,6 +90,15 @@ export function generateSunoMusic(input: SunoGenerateInput): Promise<SunoTask> {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+export async function uploadSunoReferenceAudio(file: File): Promise<SunoReferenceAudio> {
+  const form = new FormData();
+  form.append('file', file);
+  const response = await fetch(`${API_BASE_URL}/api/suno/reference-audio`, { method: 'POST', body: form });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body?.error?.message || '参考音乐上传失败');
+  return body as SunoReferenceAudio;
 }
 
 export function getSunoTask(taskId: string): Promise<SunoTask> {

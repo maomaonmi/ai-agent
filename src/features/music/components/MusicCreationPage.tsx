@@ -21,11 +21,15 @@ import {
   Heart,
   Star,
   X,
+  UploadCloud,
+  WandSparkles,
+  Trash2,
 } from 'lucide-react';
 import MusicSidebar, { type MusicTab } from './MusicSidebar';
-import { generateSunoMusic, listSunoTasks, openSunoTaskStream, resolveSunoAssetUrl, type SunoTask } from '../api';
-import { getSessionHistory } from '../../../lib/api';
+import { generateSunoMusic, listSunoTasks, openSunoTaskStream, resolveSunoAssetUrl, uploadSunoReferenceAudio, type SunoReferenceAudio, type SunoTask } from '../api';
+import { getSessionHistory, sendChatMessage } from '../../../lib/api';
 import { useSearchParams } from 'next/navigation';
+import { composeMusicStyle, INSTRUMENT_PRESETS, referenceAudioLimitSeconds, STYLE_PRESETS } from '../musicCreationPresets';
 
 interface MusicCreationPageProps {
   activeTab: MusicTab;
@@ -33,7 +37,6 @@ interface MusicCreationPageProps {
   onBack: () => void;
 }
 
-const STYLE_TAGS = ['中国风', '管弦乐团', '键盘乐器', '蓝调', '古典', '世界音乐'];
 const TERMINAL_STATUSES = ['SUCCESS', 'FAILED', 'TIMED_OUT'];
 const SUNO_MODELS = [
   { value: 'V4', label: 'Suno V4' },
@@ -173,7 +176,16 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
   const [isResizing, setIsResizing] = useState(false);
   const [detailTaskId, setDetailTaskId] = useState<string | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
+  const [selectedStyles, setSelectedStyles] = useState<string[]>([]);
+  const [selectedInstruments, setSelectedInstruments] = useState<string[]>([]);
+  const [referenceAudio, setReferenceAudio] = useState<SunoReferenceAudio | null>(null);
+  const [uploadingReference, setUploadingReference] = useState(false);
+  const [polishingLyrics, setPolishingLyrics] = useState(false);
+  const [lyricSelection, setLyricSelection] = useState<{ start: number; end: number; text: string } | null>(null);
+  const [polishedSnippet, setPolishedSnippet] = useState('');
   const streamRef = useRef<EventSource | null>(null);
+  const lyricsRef = useRef<HTMLTextAreaElement | null>(null);
+  const referenceInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!lyricsSessionId) return;
@@ -264,22 +276,85 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
   }, [isDetailOpen, detailTaskId]);
 
   const handleGenerate = async () => {
-    const prompt = mode === 'custom' ? lyrics.trim() : (style.trim() || lyrics.trim());
+    const finalStyle = composeMusicStyle(style, selectedStyles, selectedInstruments);
+    const prompt = mode === 'custom' ? lyrics.trim() : [lyrics.trim(), finalStyle && `风格与乐器：${finalStyle}`].filter(Boolean).join('\n\n');
     if (!prompt) { setError(mode === 'custom' ? '请先填写歌词' : '请先填写音乐创意'); return; }
-    if (mode === 'custom' && (!style.trim() || !title.trim())) { setError('自定义模式需要填写风格和歌曲名称'); return; }
+    if (mode === 'custom' && (!finalStyle || !title.trim())) { setError('自定义模式需要填写风格和歌曲名称'); return; }
+    if (referenceAudio?.durationSeconds && referenceAudio.durationSeconds > referenceAudioLimitSeconds(selectedModel)) {
+      setError(selectedModel === 'V4_5ALL' ? 'V4.5 All 的参考音频不能超过 1 分钟，请更换音频或模型' : '参考音频不能超过 8 分钟');
+      return;
+    }
     setBusy(true); setError('');
     try {
       const task = await generateSunoMusic({
         mode,
         prompt,
-        ...(mode === 'custom' ? { style: style.trim(), title: title.trim(), instrumental } : { instrumental }),
+        ...(mode === 'custom' ? { style: finalStyle, title: title.trim(), instrumental } : { instrumental }),
         model: selectedModel,
+        referenceAudioUrl: referenceAudio?.url,
       });
       setCurrentTask(task);
       setWorks((items) => [task, ...items.filter((item) => item.id !== task.id)]);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Suno 任务提交失败');
     } finally { setBusy(false); }
+  };
+
+  const togglePreset = (value: string, setter: React.Dispatch<React.SetStateAction<string[]>>) => {
+    setter((items) => items.includes(value) ? items.filter((item) => item !== value) : [...items, value]);
+  };
+
+  const captureLyricSelection = () => {
+    const input = lyricsRef.current;
+    if (!input || input.selectionStart === input.selectionEnd) { setLyricSelection(null); return; }
+    setLyricSelection({ start: input.selectionStart, end: input.selectionEnd, text: input.value.slice(input.selectionStart, input.selectionEnd) });
+  };
+
+  const polishSelectedLyrics = async () => {
+    if (!lyricSelection || polishingLyrics) return;
+    setPolishingLyrics(true); setError('');
+    let polished = '';
+    try {
+      await sendChatMessage(`请润色下面这段歌词，保留原意、行数和歌曲可唱性，只输出润色后的歌词，不要解释：\n\n${lyricSelection.text}`, 'standard', {
+        onToken: (token) => { polished += token; },
+        onDone: (event) => { if (!polished) polished = event.answer; },
+        onError: (event) => { throw new Error(event.message); },
+      }, {
+        maxTokensOverride: 2_048,
+        runtimeSettings: {
+          responseLength: 'brief', webSearch: 'off', deepThinking: 'off', discussionRounds: 1,
+          mcpMode: 'off', mcpServerIds: [], skillMode: 'off', skillIds: [],
+          webSearchOptions: { limit: 5, timeRange: '', location: '', scrapeTopN: 0, highlights: false },
+          qwenNativeSearchOptions: { searchStrategy: 'turbo', forcedSearch: false, enableSearchExtension: false, freshness: 0, assignedSiteList: [], promptIntervene: '' },
+        },
+      });
+      polished = polished.trim();
+      if (!polished) throw new Error('模型没有返回润色结果');
+      setLyrics((value) => value.slice(0, lyricSelection.start) + polished + value.slice(lyricSelection.end));
+      setPolishedSnippet(polished);
+      setLyricSelection(null);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : '歌词润色失败');
+    } finally { setPolishingLyrics(false); }
+  };
+
+  const uploadReference = async (file: File) => {
+    setUploadingReference(true); setError('');
+    try {
+      const durationSeconds = await new Promise<number>((resolve, reject) => {
+        const audio = document.createElement('audio');
+        const objectUrl = URL.createObjectURL(file);
+        audio.preload = 'metadata';
+        audio.onloadedmetadata = () => { URL.revokeObjectURL(objectUrl); resolve(audio.duration); };
+        audio.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error('无法读取参考音乐，请确认音频文件有效')); };
+        audio.src = objectUrl;
+      });
+      const limit = referenceAudioLimitSeconds(selectedModel);
+      if (durationSeconds > limit) throw new Error(selectedModel === 'V4_5ALL' ? 'V4.5 All 的参考音频不能超过 1 分钟' : '参考音频不能超过 8 分钟');
+      setReferenceAudio({ ...await uploadSunoReferenceAudio(file), durationSeconds });
+    }
+    catch (reason) { setError(reason instanceof Error ? reason.message : '参考音乐上传失败'); }
+    finally { setUploadingReference(false); }
   };
 
   const assetRows = works.flatMap((task) => task.clips.map((clip, index) => ({
@@ -368,16 +443,44 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
             </div>
 
             {/* 参考音乐卡片 */}
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 mb-6">
-              <div className="flex items-center justify-between">
+            <div className="mb-6 rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <input
+                ref={referenceInputRef}
+                type="file"
+                accept="audio/mpeg,audio/wav,audio/mp4,audio/ogg,audio/flac,.mp3,.wav,.m4a,.ogg,.flac"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void uploadReference(file);
+                  event.currentTarget.value = '';
+                }}
+              />
+              <div className="flex items-center justify-between gap-4">
                 <div className="flex items-center gap-2">
                   <div className="flex h-6 w-6 items-center justify-center rounded bg-sky-100">
                     <Music2 size={14} className="text-sky-700" aria-hidden="true" />
                   </div>
-                  <span className="text-sm font-medium text-slate-700">参考音乐（可选）</span>
+                  <div>
+                    <p className="text-sm font-medium text-slate-700">参考音乐（可选）</p>
+                    <p className="mt-0.5 text-[11px] text-slate-500">上传后将使用参考音频生成路径；支持 MP3、WAV、M4A、OGG、FLAC，最大 25 MB</p>
+                  </div>
                 </div>
-                <span className="text-[11px] text-slate-500">点击添加参考上传，生成音乐更像（上传参考音服务量）</span>
+                <button
+                  type="button"
+                  disabled={uploadingReference}
+                  onClick={() => referenceInputRef.current?.click()}
+                  className="flex shrink-0 items-center gap-2 rounded-lg border border-sky-200 bg-white px-3 py-2 text-xs font-medium text-sky-700 transition hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {uploadingReference ? <Loader2 size={14} className="animate-spin" /> : <UploadCloud size={14} />}
+                  {uploadingReference ? '上传中…' : referenceAudio ? '更换音频' : '上传音频'}
+                </button>
               </div>
+              {referenceAudio && (
+                <div className="mt-3 flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
+                  <div className="min-w-0"><p className="truncate font-medium">{referenceAudio.filename}</p><p className="mt-0.5 text-emerald-700/75">{(referenceAudio.size / 1024 / 1024).toFixed(2)} MB{referenceAudio.durationSeconds ? ` · ${Math.round(referenceAudio.durationSeconds)} 秒` : ''} · 临时链接约 3 天有效</p></div>
+                  <button type="button" aria-label="移除参考音乐" onClick={() => setReferenceAudio(null)} className="ml-3 rounded p-1 hover:bg-emerald-100"><Trash2 size={14} /></button>
+                </div>
+              )}
             </div>
 
             {/* 歌词输入 */}
@@ -385,18 +488,42 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm font-medium text-slate-700">歌词</span>
                 <div className="flex items-center gap-2">
+                  {mode === 'inspiration' && (
+                    <button
+                      type="button"
+                      disabled={!lyricSelection || polishingLyrics}
+                      onClick={() => void polishSelectedLyrics()}
+                      className="flex items-center gap-1 rounded-full bg-fuchsia-50 px-2.5 py-1 text-xs font-medium text-fuchsia-700 transition hover:bg-fuchsia-100 disabled:cursor-not-allowed disabled:opacity-45"
+                      title={lyricSelection ? `润色已选中的 ${lyricSelection.text.length} 个字` : '请先在歌词框中选中文字'}
+                    >
+                      {polishingLyrics ? <Loader2 size={12} className="animate-spin" /> : <WandSparkles size={12} />}
+                      {polishingLyrics ? '润色中…' : '润色选中'}
+                    </button>
+                  )}
                   <span className="text-xs text-slate-400">上传歌词</span>
                   <button type="button" onClick={() => setInstrumental((value) => !value)} className={`rounded-full px-2 py-1 text-[10px] ${instrumental ? 'bg-sky-100 text-sky-700' : 'bg-slate-100 text-slate-400'}`}>纯音乐{instrumental ? '：开' : ''}</button>
                 </div>
               </div>
-              <textarea
-                value={lyrics}
-                onChange={(e) => setLyrics(e.target.value)}
-                placeholder="在此添加你的歌词，也可以输入 / 查看快捷输入规则结构
+              <div className="overflow-hidden rounded-xl border border-slate-200 bg-white focus-within:border-sky-500 focus-within:ring-2 focus-within:ring-sky-100">
+                {(lyricSelection || polishedSnippet) && (
+                  <div className="flex flex-wrap gap-2 border-b border-slate-100 bg-slate-50/80 px-3 py-2">
+                    {lyricSelection && <span className="max-w-full truncate rounded-md bg-sky-100 px-2 py-1 text-[11px] font-medium text-sky-700">已选中：{lyricSelection.text}</span>}
+                    {polishedSnippet && <span className="max-w-full truncate rounded-md bg-fuchsia-100 px-2 py-1 text-[11px] font-medium text-fuchsia-700">已润色：{polishedSnippet}</span>}
+                  </div>
+                )}
+                <textarea
+                  ref={lyricsRef}
+                  value={lyrics}
+                  onChange={(event) => { setLyrics(event.target.value); setPolishedSnippet(''); }}
+                  onSelect={captureLyricSelection}
+                  onKeyUp={captureLyricSelection}
+                  onClick={captureLyricSelection}
+                  placeholder="在此添加你的歌词，也可以输入 / 查看快捷输入规则结构
 你可以在 [Intro]、[Verse]、[Chorus] 等标签后补充人声、人声、情绪等说明
 如果未填写歌词，我们将根据风格为你自动生成"
-                className="w-full h-40 rounded-xl border border-slate-200 bg-white p-4 text-sm leading-relaxed text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-sky-500"
-              />
+                  className="h-40 w-full resize-y bg-white p-4 text-sm leading-relaxed text-slate-700 placeholder:text-slate-400 focus:outline-none"
+                />
+              </div>
               <div className="flex items-center justify-between mt-2">
                 <span className="text-[11px] text-slate-400">{lyrics.length} / 5,000 字符</span>
                 <button className="text-xs text-slate-500 hover:text-slate-700">
@@ -424,19 +551,26 @@ export default function MusicCreationPage({ activeTab, onTabChange, onBack }: Mu
               </div>
             </div>
 
-            {/* 风格标签 */}
-            <div className="flex flex-wrap gap-2 mb-6">
-              {STYLE_TAGS.map((tag) => (
-                <button
-                  key={tag}
-                  type="button"
-                  onClick={() => setStyle((value) => value ? `${value}, ${tag}` : tag)}
-                  className="flex items-center gap-1 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:border-violet-300 hover:text-violet-700"
-                >
-                  <span className="text-[12px]">＋</span>
-                  {tag}
-                </button>
-              ))}
+            {/* 风格与乐器预设 */}
+            <div className="mb-6 space-y-4">
+              <div>
+                <p className="mb-2 text-xs font-medium text-slate-500">风格预设 · 可多选</p>
+                <div className="flex flex-wrap gap-2">
+                  {STYLE_PRESETS.map((tag) => {
+                    const selected = selectedStyles.includes(tag);
+                    return <button key={tag} type="button" aria-pressed={selected} onClick={() => togglePreset(tag, setSelectedStyles)} className={`flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-medium transition ${selected ? 'border-violet-300 bg-violet-50 text-violet-700 shadow-sm' : 'border-slate-200 bg-white text-slate-600 hover:border-violet-300 hover:text-violet-700'}`}><span>{selected ? '✓' : '＋'}</span>{tag}</button>;
+                  })}
+                </div>
+              </div>
+              <div>
+                <p className="mb-2 text-xs font-medium text-slate-500">乐器预设 · 可多选</p>
+                <div className="flex flex-wrap gap-2">
+                  {INSTRUMENT_PRESETS.map((instrument) => {
+                    const selected = selectedInstruments.includes(instrument);
+                    return <button key={instrument} type="button" aria-pressed={selected} onClick={() => togglePreset(instrument, setSelectedInstruments)} className={`flex items-center gap-1 rounded-full border px-3 py-1 text-xs font-medium transition ${selected ? 'border-sky-300 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 bg-white text-slate-600 hover:border-sky-300 hover:text-sky-700'}`}><Music2 size={11} />{selected ? '✓ ' : '＋ '}{instrument}</button>;
+                  })}
+                </div>
+              </div>
             </div>
 
             {/* 歌曲名称 + Suno 双候选提示 */}
