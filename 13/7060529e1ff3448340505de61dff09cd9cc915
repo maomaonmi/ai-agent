@@ -1,0 +1,36 @@
+main.py
+  s_79dedb0803a2b7::t_2f300e83d46fae 25,94-95,2729-2731,2755,2858,2864-2866,2881-2882,2886,4514-4516,4557,4561,4570,4625,4642-4644
+  s_79dedb0803a2b7::t_0a65231337fdd8 4512-4513,4526-4531,4533-4534,4536-4542,4546,4548-4556,4558-4560,4562-4569,4571-4574,4576-4613,4615-4620,4622-4624,4626-4641
+  s_79dedb0803a2b7::t_266b863ce0c417 2824-2857,2859-2860,2862-2863,2883
+  s_79dedb0803a2b7::t_e21d65df6cabf4 2713-2722,2727-2728
+  s_79dedb0803a2b7::t_1c9a5e845e9182 4543-4545,4547
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.2",
+  "base_commit_sha": "137060529e1ff3448340505de61dff09cd9cc915",
+  "prompts": {},
+  "sessions": {
+    "s_79dedb0803a2b7": {
+      "agent_id": {
+        "tool": "trae",
+        "id": "6a841a8f53e0d819419a2845",
+        "model": "qwen3.8-max"
+      },
+      "human_author": "maomaonmi <xueyuanshi@qq.com>",
+      "custom_attributes": {
+        "tool_type": "builtin",
+        "client_type": "ide",
+        "operation_id": "6a842d9953e0d819419a2a87",
+        "dedupe_key": "6a841a8f53e0d819419a2845:6a842d9953e0d819419a2a87:afterEdit:387b9e7b",
+        "external_session_id": "6a841a8f53e0d819419a2845",
+        "source_scene": "agent",
+        "tool_id": "icube:applyChatSnapshotPatch",
+        "runtime_client": "trae-tob-git-ai",
+        "tool_use_id": "6a842d9953e0d819419a2a87",
+        "edit_kind": "file_edit",
+        "session_id": "6a841a8f53e0d819419a2845"
+      }
+    }
+  }
+}
