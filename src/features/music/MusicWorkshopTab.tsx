@@ -11,11 +11,13 @@ import VoiceDesignPage from './components/VoiceDesignPage';
 import VoiceClonePage from './components/VoiceClonePage';
 import VoiceExtractionPage from './components/VoiceExtractionPage';
 import MusicInspirationPage from './components/MusicInspirationPage';
+import MusicEditorPage from './components/MusicEditorPage';
 import { listSessions, type SessionSummary } from '../../lib/api';
 
 const VALID_TABS: readonly MusicTab[] = [
   'compose',
   'music-creation',
+  'music-editor',
   'voice-synthesis',
   'voice-library',
   'accompaniment',
@@ -81,15 +83,25 @@ export default function MusicWorkshopTab({ initialTab }: MusicWorkshopTabProps) 
       <MusicSidebar activeTab={activeTab} onTabChange={handleTabChange} onBack={handleBack} musicSessions={musicSessions} activeMusicSessionId={activeMusicSessionId} onMusicSessionSelect={setActiveMusicSessionId} onNewMusicSession={() => setActiveMusicSessionId(null)} />
 
       {/* 主内容区 */}
-      <main className="flex-1 overflow-y-auto bg-white dark:bg-neutral-900">
+      <main className="flex-1 overflow-y-auto bg-slate-50 dark:bg-neutral-950">
         {activeTab === 'compose' ? (
           <MusicInspirationPage key={activeMusicSessionId ?? 'new'} activeSessionId={activeMusicSessionId} onSessionsChange={(sessions, activeId) => { setMusicSessions(sessions); if (activeId) setActiveMusicSessionId(activeId); }} />
+        ) : activeTab === 'music-editor' ? (
+          <div className="h-full p-2">
+            <MusicEditorPage activeTab={activeTab} onTabChange={handleTabChange} onBack={handleBack} />
+          </div>
         ) : activeTab === 'voice-design' ? (
-          <VoiceDesignPage activeTab={activeTab} onTabChange={handleTabChange} onBack={handleBack} />
+          <div className="h-full overflow-y-auto">
+            <VoiceDesignPage activeTab={activeTab} onTabChange={handleTabChange} onBack={handleBack} />
+          </div>
         ) : activeTab === 'voice-clone' ? (
-          <VoiceClonePage activeTab={activeTab} onTabChange={handleTabChange} onBack={handleBack} />
+          <div className="h-full overflow-y-auto">
+            <VoiceClonePage activeTab={activeTab} onTabChange={handleTabChange} onBack={handleBack} />
+          </div>
         ) : activeTab === 'voice-extraction' ? (
-          <VoiceExtractionPage activeTab={activeTab} onTabChange={handleTabChange} onBack={handleBack} />
+          <div className="h-full overflow-y-auto">
+            <VoiceExtractionPage activeTab={activeTab} onTabChange={handleTabChange} onBack={handleBack} />
+          </div>
         ) : (
           <div className="mx-auto w-full max-w-6xl px-6 py-8">
             <MusicShowcaseGrid 

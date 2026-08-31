@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
-  Play, 
+  Play, Music2, Download,
   Pause, 
   Heart, 
   Check, 
@@ -31,8 +31,42 @@ interface VoiceLibraryPageProps {
   onBack: () => void;
 }
 
-const TAB_OPTIONS = ['音色库', '我的音色', '收藏音色'] as const;
+const TAB_OPTIONS = ['音乐库', '我的音色', '收藏音色', '音乐生成', '音轨分离'] as const;
 type TabOption = typeof TAB_OPTIONS[number];
+
+interface MusicClipAsset {
+  id: string;
+  title?: string;
+  audio_url?: string | null;
+  image_url?: string | null;
+  duration?: number | null;
+  status?: string;
+}
+
+interface MusicGenerationTask {
+  id: string;
+  status: string;
+  created_at?: number;
+  clips: MusicClipAsset[];
+}
+
+interface SeparationStemAsset {
+  key: string;
+  label: string;
+  url: string | null;
+  assetId?: string | null;
+}
+
+interface SeparationTaskAsset {
+  id: string;
+  originalName: string;
+  type: string;
+  status: string;
+  progress: number;
+  createdAt: number;
+  stems: SeparationStemAsset[];
+  error?: { message?: string } | null;
+}
 
 // 模型选项（包含CosyVoice多版本）
 const MODEL_OPTIONS = [
@@ -59,7 +93,7 @@ interface FilterOptions {
 }
 
 export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: VoiceLibraryPageProps) {
-  const [activeSubTab, setActiveSubTab] = useState<TabOption>('音色库');
+  const [activeSubTab, setActiveSubTab] = useState<TabOption>('音乐库');
   const [voices, setVoices] = useState<VoiceModel[]>([]);
   const [myVoices, setMyVoices] = useState<VoiceModel[]>([]);
   const [myVoicesLoading, setMyVoicesLoading] = useState(false);
@@ -99,6 +133,10 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
   const [isMuted, setIsMuted] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isActuallyPlaying, setIsActuallyPlaying] = useState(false); // 独立的播放状态
+  const [musicTasks, setMusicTasks] = useState<MusicGenerationTask[]>([]);
+  const [separationTasks, setSeparationTasks] = useState<SeparationTaskAsset[]>([]);
+  const [separationFilter, setSeparationFilter] = useState<'vocals' | 'instrumental'>('vocals');
+  const [assetLoading, setAssetLoading] = useState(false);
 
   // 获取筛选选项（组件加载时）
   useEffect(() => {
@@ -168,6 +206,28 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
     }
   }, []);
 
+  const fetchMusicAssets = useCallback(async () => {
+    setAssetLoading(true);
+    try {
+      const [musicResponse, separationResponse] = await Promise.all([
+        fetch('/api/suno/tasks?pageSize=100'),
+        fetch('/api/suno/vocal-separations?pageSize=100'),
+      ]);
+      if (musicResponse.ok) {
+        const body = await musicResponse.json() as { tasks?: MusicGenerationTask[] };
+        setMusicTasks((body.tasks || []).filter(task => task.status === 'SUCCESS' && task.clips?.length));
+      }
+      if (separationResponse.ok) {
+        const body = await separationResponse.json() as { tasks?: SeparationTaskAsset[] };
+        setSeparationTasks(body.tasks || []);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '加载音乐资产失败');
+    } finally {
+      setAssetLoading(false);
+    }
+  }, []);
+
   // 初始加载 + 筛选条件变化时重新请求
   useEffect(() => {
     fetchVoices();
@@ -183,6 +243,10 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
   useEffect(() => {
     fetchMyVoices();
   }, [fetchMyVoices]);
+
+  useEffect(() => {
+    fetchMusicAssets();
+  }, [fetchMusicAssets]);
 
   // Filter voices - 后端已处理筛选，前端直接使用（保留作为展示层）
   const filteredVoices = useMemo(() => {
@@ -512,7 +576,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
         {/* Top Header */}
         <header className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-3 dark:border-neutral-800 dark:bg-neutral-900">
           <div className="flex items-center gap-8">
-            <span className="text-xl font-bold">千问语音</span>
+            <span className="text-xl font-bold">音乐库</span>
             <nav className="flex items-center gap-1">
               <button className="flex items-center gap-2 rounded-full bg-sky-100 px-4 py-1.5 text-sm font-medium text-sky-700 dark:bg-sky-900/30 dark:text-sky-300">
                 <Sparkles size={16} />
@@ -635,7 +699,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
                 <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
                   type="text"
-                  placeholder="搜索音色库"
+                  placeholder={activeSubTab === '音乐库' || activeSubTab === '音乐生成' ? '搜索歌曲或文件名' : '搜索音色库'}
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full pl-9 pr-4 py-2 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-500/20 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
@@ -643,7 +707,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
               </div>
               
               {/* Model Switcher */}
-              <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5 dark:bg-neutral-800">
+              <div className={`${activeSubTab === '音乐生成' || activeSubTab === '音轨分离' ? 'hidden' : 'flex'} items-center gap-1 bg-slate-100 rounded-lg p-0.5 dark:bg-neutral-800`}>
                 {MODEL_OPTIONS.map((model) => (
                   <button
                     key={model.value}
@@ -661,6 +725,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
 
               {/* Filter Button */}
               <button 
+                hidden={activeSubTab === '音乐生成' || activeSubTab === '音轨分离'}
                 onClick={() => setShowFilterModal(true)}
                 className={`flex items-center gap-2 px-3 py-1.5 text-sm rounded-full transition-colors ${
                   hasActiveFilters
@@ -678,6 +743,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
               {/* Reset Filters (only show when filters active) */}
               {hasActiveFilters && (
                 <button 
+                  hidden={activeSubTab === '音乐生成' || activeSubTab === '音轨分离'}
                   onClick={resetFilters}
                   className="text-xs text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
                 >
@@ -686,8 +752,29 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
               )}
             </div>
 
+            {assetLoading && (activeSubTab === '音乐库' || activeSubTab === '音乐生成' || activeSubTab === '音轨分离') && (
+              <div className="flex items-center justify-center py-8">
+                <Loader2 size={22} className="animate-spin text-violet-500" />
+                <span className="ml-3 text-slate-500 dark:text-slate-400">加载音乐资产...</span>
+              </div>
+            )}
+
+            {activeSubTab === '音轨分离' && (
+              <SeparationHistoryPanel
+                tasks={separationTasks}
+                filter={separationFilter}
+                onFilterChange={setSeparationFilter}
+                searchQuery={searchQuery}
+                onRefresh={() => void fetchMusicAssets()}
+              />
+            )}
+
+            {(activeSubTab === '音乐库' || activeSubTab === '音乐生成') && (
+              <MusicAssetPanel tasks={musicTasks} searchQuery={searchQuery} />
+            )}
+
             {/* Loading State */}
-            {loading && (
+            {loading && activeSubTab !== '音乐库' && activeSubTab !== '音乐生成' && activeSubTab !== '音轨分离' && (
               <div className="flex items-center justify-center py-12">
                 <Loader2 size={24} className="animate-spin text-slate-400" />
                 <span className="ml-3 text-slate-500 dark:text-slate-400">加载音色库...</span>
@@ -697,7 +784,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
             {/* Voice Cards */}
             {!loading && (
               <div className="px-6 pb-6 space-y-6">
-                {activeSubTab !== '音色库' && (
+                {activeSubTab !== '音乐库' && activeSubTab !== '音乐生成' && activeSubTab !== '音轨分离' && (
                   <section>
                     <div className="mb-3 flex items-center justify-between">
                       <h4 className="text-sm font-medium text-slate-700 dark:text-slate-300">
@@ -731,7 +818,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
                 )}
 
                 {/* Recommended */}
-                {activeSubTab === '音色库' && recommendedVoices.length > 0 && (
+                {activeSubTab === '音乐库' && recommendedVoices.length > 0 && (
                   <section>
                     <h4 className="text-sm font-medium text-slate-700 mb-3 dark:text-slate-300">推荐音色</h4>
                     <div className="space-y-4">
@@ -752,7 +839,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
                 )}
 
                 {/* Premium */}
-                {activeSubTab === '音色库' && premiumVoices.length > 0 && (
+                {activeSubTab === '音乐库' && premiumVoices.length > 0 && (
                   <section>
                     <h4 className="text-sm font-medium text-slate-700 mb-3 dark:text-slate-300">旗舰音色</h4>
                     <div className="space-y-4">
@@ -773,7 +860,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
                 )}
 
                 {/* Flash */}
-                {activeSubTab === '音色库' && flashVoices.length > 0 && (
+                {activeSubTab === '音乐库' && flashVoices.length > 0 && (
                   <section>
                     <h4 className="text-sm font-medium text-slate-700 mb-3 dark:text-slate-300">精品音色</h4>
                     <div className="space-y-4">
@@ -794,7 +881,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
                 )}
 
                 {/* CosyVoice */}
-                {activeSubTab === '音色库' && cosyVoices.length > 0 && (
+                {activeSubTab === '音乐库' && cosyVoices.length > 0 && (
                   <section>
                     <h4 className="text-sm font-medium text-slate-700 mb-3 dark:text-slate-300">CosyVoice</h4>
                     <div className="space-y-4">
@@ -815,7 +902,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
                 )}
 
                 {/* No Results */}
-                {visibleVoices.length === 0 && (
+                {activeSubTab !== '音乐库' && activeSubTab !== '音乐生成' && activeSubTab !== '音轨分离' && visibleVoices.length === 0 && (
                   <div className="flex flex-col items-center justify-center py-12 text-center">
                     <Search size={48} className="text-slate-300 mb-4" />
                     <h5 className="text-slate-700 font-medium mb-1 dark:text-slate-300">未找到匹配的音色</h5>
@@ -863,6 +950,85 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
         )}
       </div>
     </div>
+  );
+}
+
+function MusicAssetPanel({ tasks, searchQuery }: { tasks: MusicGenerationTask[]; searchQuery: string }) {
+  const query = searchQuery.trim().toLowerCase();
+  const clips = tasks.flatMap(task => task.clips.map(clip => ({ ...clip, taskId: task.id, createdAt: task.created_at })));
+  const visible = clips.filter(clip => !query || `${clip.title || ''} ${clip.id}`.toLowerCase().includes(query));
+  if (!visible.length) {
+    return <div className="mx-6 mb-6 rounded-xl border border-dashed border-slate-200 p-10 text-center text-sm text-slate-500 dark:border-neutral-700">音乐生成完成后，歌曲和封面会自动出现在这里。</div>;
+  }
+  return (
+    <section className="mx-6 mb-6">
+      <div className="mb-3 flex items-center justify-between">
+        <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-200">音乐生成结果</h4>
+        <span className="text-xs text-slate-500">{visible.length} 首</span>
+      </div>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        {visible.map(clip => (
+          <article key={clip.id} className="flex gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 dark:border-neutral-700 dark:bg-neutral-800/60">
+            {clip.image_url ? <img src={clip.image_url} alt="" className="h-16 w-16 rounded-lg object-cover" /> : <div className="flex h-16 w-16 items-center justify-center rounded-lg bg-violet-100 text-violet-600 dark:bg-violet-900/30"><Music2 size={22} /></div>}
+            <div className="min-w-0 flex-1">
+              <h5 className="truncate text-sm font-semibold text-slate-800 dark:text-slate-100">{clip.title || '未命名歌曲'}</h5>
+              <p className="mt-0.5 truncate text-[10px] font-mono text-slate-500">task: {clip.taskId}</p>
+              {clip.audio_url ? <audio controls preload="none" className="mt-2 h-8 w-full" src={clip.audio_url} /> : <p className="mt-2 text-xs text-amber-600">音频资产尚未就绪</p>}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SeparationHistoryPanel({
+  tasks,
+  filter,
+  onFilterChange,
+  searchQuery,
+  onRefresh,
+}: {
+  tasks: SeparationTaskAsset[];
+  filter: 'vocals' | 'instrumental';
+  onFilterChange: (value: 'vocals' | 'instrumental') => void;
+  searchQuery: string;
+  onRefresh: () => void;
+}) {
+  const query = searchQuery.trim().toLowerCase();
+  const visible = tasks.filter(task => {
+    if (query && !task.originalName.toLowerCase().includes(query)) return false;
+    return task.status !== 'SUCCESS' || task.stems.some(stem => filter === 'vocals' ? stem.key === 'vocals' : stem.key === 'instrumental');
+  });
+  return (
+    <section className="mx-6 mb-6">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-200">音轨分离结果历史</h4>
+          <p className="mt-1 text-xs text-slate-500">分离完成后自动保存到音乐库，音频链接已本地化保存。</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {(['vocals', 'instrumental'] as const).map(value => (
+            <button key={value} onClick={() => onFilterChange(value)} className={`rounded-lg px-3 py-1.5 text-xs font-medium ${filter === value ? 'bg-violet-100 text-violet-700 dark:bg-violet-900/30 dark:text-violet-300' : 'border border-slate-200 text-slate-500 dark:border-neutral-700'}`}>
+              {value === 'vocals' ? '人声提取历史' : '伴奏提取历史'}
+            </button>
+          ))}
+          <button onClick={onRefresh} className="rounded-lg border border-slate-200 p-1.5 text-slate-500 hover:bg-slate-100 dark:border-neutral-700 dark:hover:bg-neutral-800" title="刷新"><RotateCcw size={14} /></button>
+        </div>
+      </div>
+      {!visible.length ? <div className="rounded-xl border border-dashed border-slate-200 p-10 text-center text-sm text-slate-500 dark:border-neutral-700">暂无{filter === 'vocals' ? '人声' : '伴奏'}提取记录。</div> : (
+        <div className="space-y-3">
+          {visible.map(task => {
+            const stem = task.stems.find(item => item.key === filter);
+            return <article key={task.id} className="flex items-center gap-3 rounded-xl border border-slate-200 p-3 dark:border-neutral-700">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-violet-100 text-violet-600 dark:bg-violet-900/30"><Music2 size={18} /></div>
+              <div className="min-w-0 flex-1"><h5 className="truncate text-sm font-medium text-slate-800 dark:text-slate-100">{task.originalName}</h5><p className="text-[10px] text-slate-500">{task.status} · {new Date(task.createdAt * 1000).toLocaleString('zh-CN')}</p></div>
+              {stem?.url ? <><audio controls preload="none" className="h-8 max-w-[260px]" src={stem.url} /><a href={stem.url} target="_blank" rel="noreferrer" className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-neutral-800" title="下载"><Download size={16} /></a></> : <span className="text-xs text-amber-600">处理中</span>}
+            </article>;
+          })}
+        </div>
+      )}
+    </section>
   );
 }
 
