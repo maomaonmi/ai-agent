@@ -856,8 +856,8 @@ export interface ModelSettings {
   model_id: string;
   api_key?: string;
   has_api_key?: boolean;
-  minimax_video_api_key?: string;
-  has_minimax_video_key?: boolean;
+  minimax_plan_api_key?: string;
+  has_minimax_plan_key?: boolean;
   display_name: string;
   model_family: string;
   input_context: number;

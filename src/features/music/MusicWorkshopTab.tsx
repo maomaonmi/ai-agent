@@ -12,6 +12,7 @@ import VoiceClonePage from './components/VoiceClonePage';
 import VoiceExtractionPage from './components/VoiceExtractionPage';
 import MusicInspirationPage from './components/MusicInspirationPage';
 import MusicEditorPage from './components/MusicEditorPage';
+import MusicASR from './components/MusicASR';
 import { listSessions, type SessionSummary } from '../../lib/api';
 
 const VALID_TABS: readonly MusicTab[] = [
@@ -19,6 +20,7 @@ const VALID_TABS: readonly MusicTab[] = [
   'music-creation',
   'music-editor',
   'voice-synthesis',
+  'speech-recognition',
   'voice-library',
   'accompaniment',
   'voice-design',
@@ -100,7 +102,11 @@ export default function MusicWorkshopTab({ initialTab }: MusicWorkshopTabProps) 
           </div>
         ) : activeTab === 'voice-extraction' ? (
           <div className="h-full overflow-y-auto">
-            <VoiceExtractionPage activeTab={activeTab} onTabChange={handleTabChange} onBack={handleBack} />
+            <VoiceExtractionPage activeTab={activeTab} onTabChange={(tab) => handleTabChange(tab as MusicTab)} onBack={handleBack} />
+          </div>
+        ) : activeTab === 'speech-recognition' ? (
+          <div className="h-full overflow-y-auto">
+            <MusicASR />
           </div>
         ) : (
           <div className="mx-auto w-full max-w-6xl px-6 py-8">

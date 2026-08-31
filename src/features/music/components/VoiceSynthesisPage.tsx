@@ -41,10 +41,29 @@ interface VoiceSynthesisPageProps {
   onBack: () => void;
 }
 
+const QWEN_TTS_MODEL_OPTIONS = [
+  { id: 'qwen-audio-3.0-tts-plus', label: '千问 Audio 3.0 Plus' },
+  { id: 'qwen-audio-3.0-tts-flash', label: '千问 Audio 3.0 Flash' },
+  { id: 'cosyvoice-v3-plus', label: 'CosyVoice V3 Plus' },
+  { id: 'cosyvoice-v3-flash', label: 'CosyVoice V3 Flash' },
+] as const;
+
+const MINIMAX_TTS_MODEL_OPTIONS = [
+  { id: 'speech-2.8-hd', label: 'MiniMax Speech 2.8 HD' },
+  { id: 'speech-2.8-turbo', label: 'MiniMax Speech 2.8 Turbo' },
+  { id: 'speech-2.6-hd', label: 'MiniMax Speech 2.6 HD' },
+  { id: 'speech-2.6-turbo', label: 'MiniMax Speech 2.6 Turbo' },
+  { id: 'speech-02-hd', label: 'MiniMax Speech 02 HD' },
+  { id: 'speech-02-turbo', label: 'MiniMax Speech 02 Turbo' },
+  { id: 'speech-01-hd', label: 'MiniMax Speech 01 HD' },
+  { id: 'speech-01-turbo', label: 'MiniMax Speech 01 Turbo' },
+] as const;
+
 export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: VoiceSynthesisPageProps) {
   const [text, setText] = useState('');
   const [selectedVoice, setSelectedVoice] = useState<SelectedVoice | null>(null);
   const [selectedVoiceModel, setSelectedVoiceModel] = useState<VoiceModel | null>(null);
+  const [showModelMenu, setShowModelMenu] = useState(false);
   const [showVoiceLibrary, setShowVoiceLibrary] = useState(false);
   const [speed, setSpeed] = useState(1);
   const [pitch, setPitch] = useState(0);
@@ -85,8 +104,17 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
 
   // Why：SSML/LaTeX 公式朗读仅 CosyVoice 系列模型支持（与后端 is_cosyvoice_model 判定一致）
   const activeModel = selectedVoiceModel?.model ?? '';
+  const isMiniMax = selectedVoiceModel?.provider === 'minimax' || activeModel.startsWith('speech-');
   const isCosyVoice = activeModel.startsWith('cosyvoice');
   const isQwenRealtime = /^qwen3-tts-(?:vc|vd)-realtime-/.test(activeModel);
+  const modelOptions = selectedVoiceModel?.provider === 'minimax' || activeModel.startsWith('speech-')
+    ? MINIMAX_TTS_MODEL_OPTIONS
+    : QWEN_TTS_MODEL_OPTIONS;
+
+  const handleModelChange = (model: string) => {
+    setSelectedVoiceModel((current) => current ? { ...current, model } : current);
+    setShowModelMenu(false);
+  };
 
   const handleSelectVoice = (voice: VoiceModel) => {
     setSelectedVoiceModel(voice);
@@ -123,8 +151,10 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
     const trimmed = finalText.trim();
     if (!trimmed || !selectedVoiceModel) return;
 
-    // pitch：UI -1..1 → DashScope 0.5..1.5（中心 0 → 1.0）
+    // MiniMax 要求整数 pitch [-12, 12]，UI 的 -1..1 映射为该范围；
+    // Qwen/DashScope 仍沿用原来的 0.5..1.5 比例。
     const pitchRate = 1 + pitch * 0.5;
+    const providerPitch = isMiniMax ? Math.round(pitch * 12) : pitchRate;
     // volume：UI 0..2 → DashScope 0..100（中心 1 → 50）
     const volumePercent = Math.round(volume * 50);
 
@@ -132,10 +162,11 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
       await synthesize(
         {
           voiceId: selectedVoiceModel.voiceId,
+          provider: selectedVoiceModel.provider,
           model: selectedVoiceModel.model,
           format: 'mp3',
           speed,
-          pitch: pitchRate,
+          pitch: providerPitch,
           volume: volumePercent,
           ssml: ssmlEnabled,
           latex: latexEnabled,
@@ -146,7 +177,7 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
     } catch {
       // 错误已由 hook 写入 ttsError，此处无需二次处理
     }
-  }, [text, selectedVoiceModel, speed, pitch, volume, ssmlEnabled, latexEnabled, instruction, synthesize]);
+  }, [text, selectedVoiceModel, speed, pitch, volume, ssmlEnabled, latexEnabled, instruction, synthesize, isMiniMax]);
 
   const cyclePlayRate = () => {
     const rates = [0.5, 1.0, 1.5, 2.0];
@@ -804,15 +835,21 @@ export default function VoiceSynthesisPage({ activeTab, onTabChange, onBack }: V
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5">
+                <div className="relative flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-1.5">
                   <span className="text-xs text-slate-500">模型</span>
-                  <button className="flex items-center gap-1 text-sm font-medium text-slate-700 hover:text-slate-900">
+                  <button type="button" onClick={() => setShowModelMenu((open) => !open)} className="flex items-center gap-1 text-sm font-medium text-slate-700 hover:text-slate-900" aria-haspopup="listbox" aria-expanded={showModelMenu}>
                     {activeModel || '请选择音色'}
-                    <span className="ml-1 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">
-                      New
-                    </span>
                     <ChevronDown size={12} aria-hidden="true" />
                   </button>
+                  {showModelMenu && selectedVoiceModel && (
+                    <div role="listbox" aria-label="语音模型" className="absolute right-0 top-full z-30 mt-2 min-w-56 rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl">
+                      {modelOptions.map((option) => (
+                        <button type="button" role="option" aria-selected={option.id === activeModel} key={option.id} onClick={() => handleModelChange(option.id)} className={`block w-full rounded-lg px-3 py-2 text-left text-xs transition ${option.id === activeModel ? 'bg-sky-50 font-semibold text-sky-700' : 'text-slate-600 hover:bg-slate-50'}`}>
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

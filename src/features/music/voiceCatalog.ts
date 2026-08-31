@@ -1,5 +1,6 @@
 export interface VoiceApiModel {
   voice_id: string;
+  provider?: 'qwen' | 'minimax' | string;
   model: string;
   name: string;
   description: string;
@@ -27,6 +28,7 @@ export interface VoiceApiModel {
 
 export interface VoiceModel {
   voiceId: string;
+  provider?: 'qwen' | 'minimax' | string;
   model: string;
   name: string;
   description: string;
@@ -126,9 +128,14 @@ export const VOICE_AVATAR_FILES = [
   'voice-model-2.png',
 ] as const;
 
+export function isMiniMaxVoice(voice: Pick<VoiceModel, 'provider' | 'model'>): boolean {
+  return voice.provider === 'minimax' || voice.model.toLowerCase().startsWith('speech-');
+}
+
 export function normalizeVoices(voices: VoiceApiModel[]): VoiceModel[] {
   return voices.map((voice, index) => ({
     voiceId: voice.voice_id,
+    provider: voice.provider,
     model: voice.model,
     name: voice.name,
     description: voice.description,
@@ -161,6 +168,7 @@ export function normalizeVoices(voices: VoiceApiModel[]): VoiceModel[] {
 export function normalizeCustomVoices(voices: VoiceApiModel[]): VoiceModel[] {
   return voices.map((voice) => ({
     voiceId: voice.voice_id,
+    provider: voice.provider,
     model: voice.model,
     name: voice.name,
     description: voice.description,

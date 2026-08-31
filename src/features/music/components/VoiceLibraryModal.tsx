@@ -27,6 +27,7 @@ const MODEL_OPTIONS = [
   { value: 'cosyvoice-v2', label: 'CV2' },
   { value: 'cosyvoice-v3-plus', label: 'CV3 Plus' },
   { value: 'cosyvoice-v3-flash', label: 'CV3 Flash' },
+  { value: 'minimax', label: 'MiniMax' },
 ] as const;
 
 type ModelOption = typeof MODEL_OPTIONS[number]['value'];
@@ -543,9 +544,9 @@ export default function VoiceLibraryModal({ isOpen, onClose, onSelectVoice }: Vo
         </div>
 
         {/* Search, Model Switcher and Filter */}
-        <div className="px-6 py-4 flex items-center gap-4">
+        <div className="px-6 py-4 flex flex-wrap items-center gap-4">
           {/* Search */}
-          <div className="flex-1 max-w-sm relative">
+          <div className="order-1 w-64 flex-none relative">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <input
               type="text"
@@ -557,7 +558,7 @@ export default function VoiceLibraryModal({ isOpen, onClose, onSelectVoice }: Vo
           </div>
           
           {/* Model Switcher */}
-          <div className="flex items-center gap-1 bg-slate-100 rounded-lg p-0.5 overflow-x-auto max-w-full scrollbar-none">
+          <div className="order-2 min-w-0 max-w-full flex items-center gap-1 bg-slate-100 rounded-lg p-0.5 overflow-x-auto scrollbar-none">
             {MODEL_OPTIONS.map((model) => (
               <button
                 key={model.value}

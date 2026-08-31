@@ -23,7 +23,7 @@ import {
   User,
 } from 'lucide-react';
 import MusicSidebar, { type MusicTab } from './MusicSidebar';
-import { normalizeCustomVoices, normalizeVoices, type VoiceApiModel, type VoiceModel } from '../voiceCatalog';
+import { isMiniMaxVoice, normalizeCustomVoices, normalizeVoices, type VoiceApiModel, type VoiceModel } from '../voiceCatalog';
 
 interface VoiceLibraryPageProps {
   activeTab: MusicTab;
@@ -77,6 +77,7 @@ const MODEL_OPTIONS = [
   { value: 'cosyvoice-v2', label: 'CV2' },
   { value: 'cosyvoice-v3-plus', label: 'CV3 Plus' },
   { value: 'cosyvoice-v3-flash', label: 'CV3 Flash' },
+  { value: 'minimax', label: 'MiniMax' },
 ] as const;
 
 type ModelOption = typeof MODEL_OPTIONS[number]['value'];
@@ -567,6 +568,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
   const premiumVoices = visibleVoices.filter(v => v.isPremium);
   const flashVoices = visibleVoices.filter(v => !v.isPremium && v.model.includes('qwen'));
   const cosyVoices = visibleVoices.filter(v => v.model.includes('cosy'));
+  const minimaxVoices = visibleVoices.filter(isMiniMaxVoice);
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-50 text-slate-900 dark:bg-neutral-950 dark:text-neutral-100">
@@ -693,13 +695,13 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
             </div>
 
             {/* Search, Model Switcher and Filter */}
-            <div className="px-6 py-4 flex items-center gap-4">
+            <div className="px-6 py-4 flex flex-wrap items-center gap-4">
               {/* Search */}
-              <div className="flex-1 max-w-sm relative">
+              <div className="order-1 w-64 flex-none relative">
                 <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
                   type="text"
-                  placeholder={activeSubTab === '音乐库' || activeSubTab === '音乐生成' ? '搜索歌曲或文件名' : '搜索音色库'}
+                  placeholder={activeSubTab === '音乐生成' ? '搜索歌曲或文件名' : '搜索音色库'}
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="w-full pl-9 pr-4 py-2 text-sm border border-slate-200 rounded-xl bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-500/20 dark:border-neutral-700 dark:bg-neutral-800 dark:text-slate-200"
@@ -707,7 +709,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
               </div>
               
               {/* Model Switcher */}
-              <div className={`${activeSubTab === '音乐生成' || activeSubTab === '音轨分离' ? 'hidden' : 'flex'} items-center gap-1 bg-slate-100 rounded-lg p-0.5 dark:bg-neutral-800`}>
+              <div className={`${activeSubTab === '音乐生成' || activeSubTab === '音轨分离' ? 'hidden' : 'flex'} order-2 min-w-0 max-w-full items-center gap-1 overflow-x-auto bg-slate-100 rounded-lg p-0.5 scrollbar-none dark:bg-neutral-800`}>
                 {MODEL_OPTIONS.map((model) => (
                   <button
                     key={model.value}
@@ -769,7 +771,7 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
               />
             )}
 
-            {(activeSubTab === '音乐库' || activeSubTab === '音乐生成') && (
+            {(activeSubTab === '音乐生成' || (activeSubTab === '音乐库' && !hasActiveFilters)) && (
               <MusicAssetPanel tasks={musicTasks} searchQuery={searchQuery} />
             )}
 
@@ -901,8 +903,29 @@ export default function VoiceLibraryPage({ activeTab, onTabChange, onBack }: Voi
                   </section>
                 )}
 
+                {activeSubTab === '音乐库' && minimaxVoices.length > 0 && (
+                  <section>
+                    <h4 className="mb-3 text-sm font-medium text-slate-700 dark:text-slate-300">MiniMax</h4>
+                    <div className="space-y-4">
+                      {minimaxVoices.map(voice => (
+                        <VoiceCard
+                          key={`${voice.model}-${voice.voiceId}`}
+                          voice={voice}
+                          isSelected={selectedVoice === voice.voiceId}
+                          isFavorite={favorites.includes(voice.voiceId)}
+                          isPlaying={playingVoice === voice.voiceId}
+                          onSelect={() => setSelectedVoice(voice.voiceId)}
+                          onToggleFavorite={() => void toggleFavorite(voice)}
+                          onPlay={() => void playVoicePreview(voice)}
+                        />
+                      ))}
+                    </div>
+                  </section>
+                )}
+
                 {/* No Results */}
-                {activeSubTab !== '音乐库' && activeSubTab !== '音乐生成' && activeSubTab !== '音轨分离' && visibleVoices.length === 0 && (
+                {((activeSubTab !== '音乐库' && activeSubTab !== '音乐生成' && activeSubTab !== '音轨分离')
+                  || (activeSubTab === '音乐库' && hasActiveFilters)) && visibleVoices.length === 0 && (
                   <div className="flex flex-col items-center justify-center py-12 text-center">
                     <Search size={48} className="text-slate-300 mb-4" />
                     <h5 className="text-slate-700 font-medium mb-1 dark:text-slate-300">未找到匹配的音色</h5>

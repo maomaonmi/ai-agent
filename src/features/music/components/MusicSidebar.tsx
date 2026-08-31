@@ -15,6 +15,7 @@ import {
   UserPlus,
   User,
   MessageSquare,
+  AudioWaveform,
   Plus,
   Sliders,
 } from 'lucide-react';
@@ -31,13 +32,14 @@ interface MusicSidebarProps {
   onNewMusicSession?: () => void;
 }
 
-export type MusicTab = 'compose' | 'music-creation' | 'music-editor' | 'voice-synthesis' | 'voice-library' | 'accompaniment' | 'history' | 'favorites' | 'voice-design' | 'voice-clone' | 'voice-extraction';
+export type MusicTab = 'compose' | 'music-creation' | 'music-editor' | 'voice-synthesis' | 'speech-recognition' | 'voice-library' | 'accompaniment' | 'history' | 'favorites' | 'voice-design' | 'voice-clone' | 'voice-extraction';
 
 const NAV_ITEMS: readonly { id: MusicTab; label: string; icon: typeof Music2 }[] = [
   { id: 'compose', label: '灵感创作', icon: Sparkles },
   { id: 'music-creation', label: '音乐创作', icon: Music2 },
   { id: 'music-editor', label: '音乐编辑器', icon: Sliders },
   { id: 'voice-synthesis', label: '语音合成', icon: Mic },
+  { id: 'speech-recognition', label: '语音识别', icon: AudioWaveform },
   { id: 'voice-library', label: '音乐库', icon: Radio },
   { id: 'accompaniment', label: '伴奏', icon: ScrollText },
   { id: 'voice-design', label: '音色设计', icon: Wand2 },

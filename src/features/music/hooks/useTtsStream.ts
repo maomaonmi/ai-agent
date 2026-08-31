@@ -11,6 +11,7 @@ export type TtsStreamState =
 
 export interface TtsStartParams {
   voiceId: string;
+  provider?: 'qwen' | 'minimax' | string;
   model?: string;
   format?: 'wav' | 'mp3' | 'pcm';
   speed?: number;
@@ -220,6 +221,7 @@ export function useTtsStream(): TtsStreamControls {
             JSON.stringify({
               type: 'start',
               voice_id: params.voiceId,
+              provider: params.provider,
               model: params.model,
               format: params.format || 'mp3',
               speed: params.speed,

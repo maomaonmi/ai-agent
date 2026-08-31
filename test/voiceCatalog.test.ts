@@ -3,7 +3,7 @@ import { readdirSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
-import { normalizeVoices, VOICE_AVATAR_FILES } from '../src/features/music/voiceCatalog.ts';
+import { isMiniMaxVoice, normalizeVoices, VOICE_AVATAR_FILES } from '../src/features/music/voiceCatalog.ts';
 
 test('normalizes API snake_case fields and assigns avatar files by response order', () => {
   const voices = normalizeVoices([
@@ -31,4 +31,10 @@ test('voice avatar manifest follows the image folder filename order', () => {
     .sort((left, right) => left.localeCompare(right, 'en'));
 
   assert.deepEqual(VOICE_AVATAR_FILES, folderImages);
+});
+
+test('recognizes imported MiniMax voices even when the table carries its default model', () => {
+  assert.equal(isMiniMaxVoice({ provider: 'minimax', model: 'speech-2.8-turbo' }), true);
+  assert.equal(isMiniMaxVoice({ provider: undefined, model: 'speech-2.8-turbo' }), true);
+  assert.equal(isMiniMaxVoice({ provider: 'qwen', model: 'qwen-audio-3.0-tts-flash' }), false);
 });
