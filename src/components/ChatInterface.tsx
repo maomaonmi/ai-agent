@@ -11,6 +11,7 @@ import {
   ResearchFigure,
   PlanFigure,
   AgentTalkEvent,
+  AgentDeltaEvent,
   PlanProgressEvent,
   PlanRuntimeEvent,
   DiscussionLength,
@@ -428,6 +429,7 @@ export default function ChatInterface() {
   // 多智能体协同树
   const [agentTalks, setAgentTalks] = useState<AgentTalkEvent[]>([]);
   const [agentStatus, setAgentStatus] = useState<string>('');
+  const [agentStreaming, setAgentStreaming] = useState<AgentDeltaEvent | null>(null);
   const [planProgress, setPlanProgress] = useState<PlanProgressEvent | null>(null);
   const [discussionLength, setDiscussionLength] = useState<DiscussionLength>('balanced');
   const [discussionAgentIds, setDiscussionAgentIds] = useState<string[]>([]);
@@ -986,6 +988,7 @@ export default function ChatInterface() {
     setResearchChunks([]);
     setResearchProgress(null);
     setAgentTalks([]);
+    setAgentStreaming(null);
     setAgentStatus('');
     setPlanProgress(null);
     setSelectedElement(null);
@@ -1894,6 +1897,7 @@ export default function ChatInterface() {
     setResearchChunks([]);
     setResearchProgress(null);
     setAgentTalks([]);
+    setAgentStreaming(null);
     setAgentStatus('');
     setPlanProgress(null);
 
@@ -2065,6 +2069,7 @@ export default function ChatInterface() {
     setResearchChunks([]);
     setResearchProgress(null);
     setAgentTalks([]);
+    setAgentStreaming(null);
     setAgentStatus('');
     setPlanProgress(null);
 
@@ -2338,6 +2343,7 @@ export default function ChatInterface() {
     } else if (mode === 'research' || preferredCapability === 'research') {
       // 深度调研模式
       try {
+        let streamedResearchReasoning = '';
         await sendDeepResearch(userMessage, {
           onNode: handleNodeEvent,
           onUsage: (usage) => {
@@ -2351,6 +2357,11 @@ export default function ChatInterface() {
           //   现接入 pacing 实现报告真流式打字机。
           onToken: (token) => {
             answerPacing.push(token);
+          },
+          onReasoningDelta: (token) => {
+            streamedResearchReasoning += token;
+            reasoningPacing.push(token);
+            setReasoningSteps([streamedResearchReasoning]);
           },
           onWebDocs: handleResearchWebDocs,
           onResearchDone: (event) => {
@@ -2377,6 +2388,11 @@ export default function ChatInterface() {
           },
           onResearchReasonDone: (event) => {
               answerPacing.commit(event.report);
+              if (event.reasoning) {
+                streamedResearchReasoning = event.reasoning;
+                reasoningPacing.commit(event.reasoning);
+                setReasoningSteps([event.reasoning]);
+              }
               const updated = [...messagesRef.current];
               const last = updated[updated.length - 1];
               if (last && last.role === 'assistant') {
@@ -2458,6 +2474,7 @@ export default function ChatInterface() {
       }
     } else if (mode === 'plan' || mode === 'distributed_plan') {
       try {
+        let streamedPlanReasoning = '';
         await sendChatMessage(userMessage, mode, {
           onNode: handleNodeEvent,
           onSystemStatus: (event) => {
@@ -2595,6 +2612,14 @@ export default function ChatInterface() {
               setMessages(nextMessages);
             }
           },
+          // Planner/executor reasoning uses the same pacing channel as the
+          // ordinary chat path, so the chain panel can render it immediately
+          // instead of waiting for the final plan snapshot.
+          onReasoningDelta: (token) => {
+            streamedPlanReasoning += token;
+            reasoningPacing.push(token);
+            setReasoningSteps([streamedPlanReasoning]);
+          },
           onSkillMatched: (event) => {
             setMatchedSkills((prev) => [...prev, event]);
           },
@@ -2607,11 +2632,18 @@ export default function ChatInterface() {
               ? current.map((message, index) => index === existingIndex ? {
                 ...message,
                 content: event.answer,
+                reasoning: streamedPlanReasoning || message.reasoning,
                 streamingReport: undefined,
                 planProgress: perRoundPlanProgressRef.current ?? message.planProgress,
               } : message)
-              : [...current, { role: 'assistant' as const, content: event.answer, planProgress: perRoundPlanProgressRef.current ?? undefined }];
+              : [...current, {
+                role: 'assistant' as const,
+                content: event.answer,
+                reasoning: streamedPlanReasoning || undefined,
+                planProgress: perRoundPlanProgressRef.current ?? undefined,
+              }];
             persistPlanMessages(requestSessionId, nextMessages);
+            reasoningPacing.flush();
             setAgentStatus('');
           },
           onError: (event) => {
@@ -2638,6 +2670,16 @@ export default function ChatInterface() {
           },
           onAgentTalk: (event) => {
             setAgentTalks((prev) => [...prev, event]);
+            setAgentStreaming(null);
+          },
+          onAgentDelta: (event) => {
+            setAgentStreaming((previous) => {
+              if (!previous || previous.stream_id !== event.stream_id) return { ...event };
+              return { ...previous, kind: event.kind, delta: `${previous.delta}${event.delta}` };
+            });
+          },
+          onAgentPhase: (event) => {
+            setAgentStatus(event.status === 'started' ? `【${event.actor}】正在输出…` : '正在准备下一位讨论成员…');
           },
           onAgentFinalAnswer: (event) => {
             answerPacing.commit(event.answer);
@@ -2648,6 +2690,7 @@ export default function ChatInterface() {
           },
           onDone: () => {
             setAgentStatus('');
+            setAgentStreaming(null);
           },
           onUsage: (usage) => {
             perRoundTokenUsageRef.current = usage;
@@ -3746,6 +3789,10 @@ export default function ChatInterface() {
                       onToggle={() => { perRoundPanelOpenRef.current = !perRoundPanelOpenRef.current; setMsgPanelOpenKeys({}); }}
                       webDocs={perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : undefined}
                       researchChunks={perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : undefined}
+                      reasoningText={(() => {
+                        const live = reasoningSteps.join('\n\n');
+                        return (reasonPacingActive || reasonPacedLength > 0) ? live.slice(0, reasonPacedLength) : live;
+                      })()}
                     />
                   </div>
                 </div>
@@ -3848,11 +3895,32 @@ export default function ChatInterface() {
                     </div>
                   </div>
                 ))}
+                {agentStreaming && (
+                  <div className="flex items-start gap-3 rounded-xl border border-sky-100 bg-sky-50/70 px-4 py-3 shadow-sm">
+                    <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-sky-100 text-sm">✍️</div>
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex items-center gap-2 text-xs text-sky-700">
+                        <span className="font-semibold">{agentStreaming.actor || '智能体'}</span>
+                        <span className="animate-pulse">实时输出中…</span>
+                        {agentStreaming.kind === 'reasoning' && <span className="text-sky-500">· 思考</span>}
+                      </div>
+                      <div className="whitespace-pre-wrap text-sm leading-relaxed text-gray-700">
+                        {agentStreaming.delta}
+                        <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-sky-500 align-middle" aria-hidden="true" />
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 
             {isPlanMode && (isLoading || planProgress) && (
-              <PlanChainTimeline progress={planProgress} status={agentStatus} />
+              <PlanChainTimeline
+                progress={planProgress}
+                status={agentStatus}
+                reasoningText={reasoningSteps.join('\n\n')}
+                reasoningDisplayedLength={reasonPacingActive || reasonPacedLength > 0 ? reasonPacedLength : undefined}
+              />
             )}
 
             {agentFinalMessages.map((msg, index) => (

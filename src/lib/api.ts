@@ -1295,7 +1295,7 @@ export interface CodeErrorEvent {
 export interface CodeAgentActivityEvent {
   type: 'agent_activity';
   channel: 'status' | 'output' | 'answer';
-  phase: 'analyzing' | 'diagnosing' | 'generating' | 'patching' | 'validating';
+  phase: 'analyzing' | 'diagnosing' | 'thinking' | 'generating' | 'patching' | 'validating';
   content: string;
   done: boolean;
 }
@@ -1407,7 +1407,8 @@ export type PlanRuntimeEvent =
   | { type: 'task_started'; task_id: number; title?: string; requires_web?: boolean }
   | { type: 'task_delta'; task_id: number; delta: string }
   | { type: 'task_completed'; task_id: number; status: PlanTaskStatus; result?: string | null; error?: string | null }
-  | { type: 'report_delta'; delta: string };
+  | { type: 'report_delta'; delta: string }
+  | { type: 'reasoning_delta'; delta: string; task_id?: number };
 
 export interface PlanProgressEvent {
   phase: 'planning' | 'executing' | 'replanning' | 'completed';
@@ -1425,6 +1426,14 @@ export interface AgentTalkEvent {
   action: string;
   content?: string;
   timestamp: number;
+}
+
+export interface AgentDeltaEvent {
+  stream_id: string;
+  actor: string;
+  kind: 'reasoning' | 'token';
+  delta: string;
+  status?: 'started' | 'completed';
 }
 
 export interface AgentFinalAnswerEvent {
@@ -1520,6 +1529,8 @@ export interface RuntimeSettings {
 export interface CodeAgentTrace {
   steps: string[];
   output: string;
+  // 思考增量与可执行模型输出分栏保存，避免 reasoning 混入代码/JSON 黑框。
+  reasoning?: string;
   phase: string;
   isRunning: boolean;
   fileChanges?: CodeFileChange[];
@@ -1817,6 +1828,7 @@ export async function retryResearchFigure(figureId: string): Promise<ResearchFig
 // ==========================================
 
 type ChatHandlers = {
+  onStreamStarted?: (event: { mode?: string; message?: string }) => void;
   onNode?: (event: NodeEvent) => void;
   onReasoning?: (event: ReasoningEvent) => void;
   onWebDocs?: (event: WebDocsEvent) => void;
@@ -1825,6 +1837,8 @@ type ChatHandlers = {
   onError?: (event: ErrorEvent) => void;
   // 多智能体专用
   onAgentTalk?: (event: AgentTalkEvent) => void;
+  onAgentDelta?: (event: AgentDeltaEvent) => void;
+  onAgentPhase?: (event: { stream_id: string; actor: string; status: 'started' | 'completed' }) => void;
   onAgentFinalAnswer?: (event: AgentFinalAnswerEvent) => void;
   onSystemStatus?: (event: SystemStatusEvent) => void;
   onPlanProgress?: (event: PlanProgressEvent) => void;
@@ -1841,6 +1855,9 @@ type ResearchHandlers = {
   onUsage?: (usage: TokenUsage) => void;
   // Why: 千问原生调研 answer 阶段后端逐 chunk 推 token，此前解析层无分支静默丢弃。
   onToken?: (token: string) => void;
+  // All research engines may expose reasoning before the final report. Keep
+  // it on the same live pacing channel as ordinary chat.
+  onReasoningDelta?: (token: string) => void;
   onResearchProcess?: (event: ResearchProcessEvent) => void;
   onResearchReasonDone?: (event: ResearchReasonDoneEvent) => void;
   onResearchDone?: (event: ResearchDoneEvent) => void;
@@ -1958,6 +1975,43 @@ export async function sendChatMessage(
                 : [],
               done: true,
             });
+            continue;
+          }
+
+          if (currentEventName === 'stream_started' || parsed.type === 'stream_started') {
+            handlers.onStreamStarted?.({
+              mode: parsed.mode != null ? String(parsed.mode) : undefined,
+              message: parsed.message != null ? String(parsed.message) : undefined,
+            });
+            continue;
+          }
+
+          if (currentEventName === 'reasoning_delta' || parsed.type === 'reasoning_delta') {
+            const delta = parsed.reasoning_delta ?? parsed.delta;
+            if (delta !== undefined) handlers.onReasoningDelta?.(String(delta));
+            continue;
+          }
+
+          if (currentEventName === 'agent_delta' || parsed.type === 'agent_delta') {
+            if (parsed.stream_id != null && parsed.delta != null) {
+              handlers.onAgentDelta?.({
+                stream_id: String(parsed.stream_id),
+                actor: String(parsed.actor ?? ''),
+                kind: parsed.kind === 'reasoning' ? 'reasoning' : 'token',
+                delta: String(parsed.delta),
+              });
+            }
+            continue;
+          }
+
+          if (currentEventName === 'agent_phase' || parsed.type === 'agent_phase') {
+            if (parsed.stream_id != null) {
+              handlers.onAgentPhase?.({
+                stream_id: String(parsed.stream_id),
+                actor: String(parsed.actor ?? ''),
+                status: parsed.status === 'completed' ? 'completed' : 'started',
+              });
+            }
             continue;
           }
 
@@ -2115,10 +2169,13 @@ export async function sendChatMessage(
               mode: 'agent',
               usage: parsed.usage as TokenUsage | undefined,
             });
-          } else if (parsed.message && !parsed.error) {
-            handlers.onSystemStatus?.({ message: String(parsed.message) });
+          } else if (currentEventName === 'error' || parsed.error) {
+            // Provider failures use `event: error` with a top-level
+            // message/code payload. Check the SSE event name before the
+            // generic status branch so a 401 cannot be silently ignored.
+            handlers.onError?.({ message: String(parsed.message || parsed.error || '请求失败') });
           } else if (parsed.message) {
-            handlers.onError?.({ message: String(parsed.message) });
+            handlers.onSystemStatus?.({ message: String(parsed.message) });
           }
         } catch (e) {
           console.error('Failed to parse SSE data:', e);
@@ -2326,6 +2383,11 @@ export async function sendDeepResearch(
               docs: parsed.docs as WebDoc[],
               count: parsed.count !== undefined ? Number(parsed.count) : parsed.docs.length,
             });
+          }
+          // Agent Loop / self-built engines expose reasoning as independent
+          // SSE deltas while the final report is still being generated.
+          else if (parsed.reasoning_delta !== undefined) {
+            handlers.onReasoningDelta?.(String(parsed.reasoning_delta));
           }
           // 千问原生调研报告流式 token（answer 阶段逐 chunk）。
           else if (typeof parsed.token === 'string') {

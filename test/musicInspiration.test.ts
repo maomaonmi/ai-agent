@@ -17,6 +17,18 @@ test('extracts partial lyrics before the closing tag arrives', () => {
   assert.equal(partial.complete, false);
 });
 
+test('does not expose truncated metadata tags as lyrics', () => {
+  const partial = parseMusicDraft('<title>雨停之后</title><note>治愈系抒情</note>');
+  assert.equal(partial.title, '雨停之后');
+  assert.equal(partial.note, '治愈系抒情');
+  assert.equal(partial.lyrics, '');
+});
+
+test('extracts lyrics body when the closing tag is still missing', () => {
+  const partial = parseMusicDraft('<title>雨停之后</title><lyrics>[Verse 1]\n雨落在窗边');
+  assert.equal(partial.lyrics, '[Verse 1]\n雨落在窗边');
+});
+
 test('music prompt forbids web tools and keeps a stable output contract', () => {
   const prompt = buildMusicAgentPrompt('时间');
   assert.match(prompt, /不要联网/);

@@ -95,6 +95,11 @@ export default function MusicInspirationPage({
     let raw = '';
     let reasoning = '';
     const stages = ['正在理解主题与创作意图'];
+    // sendChatMessage deliberately keeps consuming the SSE stream after an
+    // `error` event. Keep the provider error outside the callback so a thrown
+    // error cannot be swallowed by its JSON-line parser and turn an empty
+    // response into a false “歌词初稿已完成” state.
+    let streamError = '';
     try {
       await sendChatMessage(buildMusicAgentPrompt(inspiration), 'deep', {
         onNode: (event) => {
@@ -112,7 +117,7 @@ export default function MusicInspirationPage({
           }
         },
         onDone: (event) => { if (!raw) raw = event.answer; },
-        onError: (event) => { throw new Error(event.message); },
+        onError: (event) => { streamError = event.message; },
       }, {
         sessionId: id,
         providerOverride: provider,
@@ -126,7 +131,9 @@ export default function MusicInspirationPage({
         },
       });
       if (requestId !== activeRequest.current) return;
+      if (streamError) throw new Error(streamError);
       const parsed = parseMusicDraft(raw);
+      if (!parsed.lyrics.trim()) throw new Error('歌词模型没有返回有效内容，请检查模型、套餐 Key 和额度后重试。');
       const finalReasoning = reasoning.trim() || '已完成主题提炼、段落编排、意象设计与可唱性检查。';
       setActiveReasoning(finalReasoning);
       const assistant: ChatMessage = { role: 'assistant', content: parsed.note || `已完成《${parsed.title}》的歌词初稿。`, reasoning: finalReasoning };

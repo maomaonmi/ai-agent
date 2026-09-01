@@ -21,9 +21,24 @@ export function parseMusicDraft(value: string): ParsedMusicDraft {
   const note = tagValue(value, 'note');
   if (lyrics) return { title: title || '未命名歌词', lyrics, note };
 
+  // If the provider was cut off after opening <lyrics>, never expose the
+  // control tags as user-visible lyrics.  The backend retries these tagged
+  // drafts with thinking disabled, but this defensive path keeps the editor
+  // clean while a partial stream is being displayed.
+  const lyricsStart = value.search(/<lyrics>/i);
+  if (lyricsStart >= 0) {
+    const partialLyrics = value.slice(lyricsStart)
+      .replace(/^<lyrics>/i, '')
+      .split(/<\/lyrics>/i)[0]
+      .trim();
+    return { title: title || '未命名歌词', lyrics: partialLyrics, note };
+  }
+
   return {
     title: title || '未命名歌词',
-    lyrics: value.trim(),
+    // A truncated metadata-only response should be treated as empty so the
+    // caller can retry, rather than showing <title>/<note> in the textarea.
+    lyrics: title || note ? '' : value.trim(),
     note,
   };
 }

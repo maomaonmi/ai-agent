@@ -1,9 +1,14 @@
-import { Check, Circle, LoaderCircle, Search, Sparkles } from 'lucide-react';
+import { Check, Circle, ChevronDown, ChevronRight, LoaderCircle, Search, Sparkles } from 'lucide-react';
+import { useState } from 'react';
 import type { PlanProgressEvent, PlanTaskStatus } from '../../lib/api';
 
 interface PlanChainTimelineProps {
   progress?: PlanProgressEvent | null;
   status?: string;
+  /** Live reasoning text from planner/executor model deltas. */
+  reasoningText?: string;
+  /** Pacing length used by the parent typewriter hook while a request is live. */
+  reasoningDisplayedLength?: number;
 }
 
 const statusText: Record<PlanTaskStatus, string> = {
@@ -13,7 +18,8 @@ const statusText: Record<PlanTaskStatus, string> = {
   failed: '需重试',
 };
 
-export default function PlanChainTimeline({ progress, status }: PlanChainTimelineProps) {
+export default function PlanChainTimeline({ progress, status, reasoningText = '', reasoningDisplayedLength }: PlanChainTimelineProps) {
+  const [reasoningOpen, setReasoningOpen] = useState(true);
   if (!progress && !status) return null;
   const phaseLabel = progress?.phase === 'planning'
     ? '正在拆解任务'
@@ -22,6 +28,10 @@ export default function PlanChainTimeline({ progress, status }: PlanChainTimelin
       : progress?.phase === 'completed'
         ? '任务链路已完成'
         : '正在执行任务';
+  const visibleReasoning = reasoningDisplayedLength == null
+    ? reasoningText
+    : reasoningText.slice(0, reasoningDisplayedLength);
+  const reasoningCount = reasoningText.replace(/\s/g, '').length;
   return (
     <section data-plan-chain className="mt-4 rounded-2xl border border-indigo-100 bg-white/90 p-4 shadow-sm" aria-live="polite">
       <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
@@ -33,6 +43,27 @@ export default function PlanChainTimeline({ progress, status }: PlanChainTimelin
       </div>
       {status && !progress?.message && <p className="mt-2 text-xs text-slate-500">{status}</p>}
       {progress?.message && <p className="mt-2 text-xs text-slate-500">{progress.message}</p>}
+      {reasoningCount > 0 && (
+        <div className="mt-3 border-t border-indigo-100 pt-2">
+          <button
+            type="button"
+            className="flex items-center gap-1.5 text-xs font-semibold text-indigo-700"
+            onClick={() => setReasoningOpen((open) => !open)}
+            aria-expanded={reasoningOpen}
+          >
+            {reasoningOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <span>深度思考过程 · {reasoningCount} 字</span>
+          </button>
+          {reasoningOpen && (
+            <div className="mt-1 max-h-56 overflow-y-auto whitespace-pre-wrap text-[13px] leading-6 text-slate-600">
+              {visibleReasoning}
+              {reasoningDisplayedLength != null && reasoningDisplayedLength < reasoningText.length && (
+                <span className="ml-0.5 inline-block h-3.5 w-0.5 animate-pulse bg-indigo-500 align-middle" aria-hidden="true" />
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {progress?.tasks?.length ? (
         <ol className="mt-3 space-y-2">
           {progress.tasks.map((task) => {

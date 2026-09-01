@@ -39,6 +39,7 @@ export interface McpRequestContext {
 const EMPTY_AGENT_TRACE: CodeAgentTrace = {
   steps: [],
   output: '',
+  reasoning: '',
   phase: '',
   isRunning: false,
   summary: '',
@@ -239,7 +240,7 @@ export default function useCodeAutoRepair() {
 
   const beginAgentTrace = useCallback((message: string, request = '', projectKind: 'frontend' | 'fullstack' = 'frontend') => {
     hasAgentOutputRef.current = false;
-    const trace = { steps: [message], output: '', phase: 'analyzing', isRunning: true };
+    const trace = { steps: [message], output: '', reasoning: '', phase: 'analyzing', isRunning: true };
     const id = `agent-run-${Date.now()}-${sequenceRef.current + 1}`;
     currentAgentRunIdRef.current = id;
     agentTraceRef.current = trace;
@@ -264,6 +265,7 @@ export default function useCodeAutoRepair() {
       ...previous,
       steps: [...previous.steps, message],
       output: `${previous.output}${previous.output ? '\n\n' : ''}--- ${message} ---\n`,
+      reasoning: '',
       phase: 'diagnosing',
       isRunning: true,
     }));
@@ -382,7 +384,8 @@ export default function useCodeAutoRepair() {
       return true;
     }
     if (event.type !== 'agent_activity') return false;
-    if (event.channel === 'output') hasAgentOutputRef.current = true;
+    // 思考增量只进入 reasoning，不应阻止随后真正的代码/JSON 输出更新。
+    if (event.channel === 'output' && event.phase !== 'thinking') hasAgentOutputRef.current = true;
     if (event.channel === 'answer') {
       commitAgentTrace((previous) => {
         const rawNextAnswer = event.done
@@ -403,6 +406,17 @@ export default function useCodeAutoRepair() {
           isRunning: !event.done,
         };
       });
+      return true;
+    }
+    // Code Agent 的部分兼容网关仍用 channel=output 携带 phase=thinking；按 phase
+    // 归一化，保证旧后端和新后端都不会把思考内容混入“完整模型输出”。
+    if (event.channel === 'output' && event.phase === 'thinking') {
+      commitAgentTrace((previous) => ({
+        ...previous,
+        reasoning: `${previous.reasoning ?? ''}${event.content}`,
+        phase: event.phase,
+        isRunning: !event.done,
+      }));
       return true;
     }
     commitAgentTrace((previous) => {
@@ -773,7 +787,7 @@ export default function useCodeAutoRepair() {
       const handleEvent = (event: CodeGenerationEvent) => {
         if (event.type === 'agent_activity' || event.type === 'hook_event' || event.type === 'token_usage' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update' || event.type === 'file_written' || event.type === 'memory_update' || event.type === 'skill_matched') {
             consumeAgentEvent(event);
-            if (event.type === 'agent_activity' && event.channel === 'output') {
+            if (event.type === 'agent_activity' && event.channel === 'output' && event.phase !== 'thinking') {
               repairModelOutput += event.content;
               setRepairLogs((previous) => previous.map((log) =>
                 log.attempt === attempt ? { ...log, modelOutput: repairModelOutput } : log

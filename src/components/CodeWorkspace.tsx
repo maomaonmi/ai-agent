@@ -1507,6 +1507,17 @@ export default function CodeWorkspace({
                             </li>
                           ))}
                         </ol>
+                        {run.trace.reasoning && (
+                          <details className="mb-3 rounded border border-slate-700 bg-slate-950/70" open>
+                            <summary className="cursor-pointer select-none px-2.5 py-2 text-[10px] font-medium uppercase tracking-wide text-slate-400">
+                              深度思考过程 · {run.trace.reasoning.length} 字
+                            </summary>
+                            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words border-t border-slate-700 px-2.5 py-2 font-mono text-[10px] leading-4 text-slate-300">
+                              {run.trace.reasoning}
+                              {run.trace.isRunning && <span className="ml-1 animate-pulse text-cyan-400">▌</span>}
+                            </pre>
+                          </details>
+                        )}
                         {run.trace.fileChanges && run.trace.fileChanges.length > 0 && (
                           <div className="mb-3 border-t border-slate-700 pt-2">
                             <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-500">
