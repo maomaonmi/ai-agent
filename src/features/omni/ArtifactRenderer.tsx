@@ -1,4 +1,4 @@
-import { FileText, Image as ImageIcon, Presentation, Search, Video } from 'lucide-react';
+import { FileText, Image as ImageIcon, Music2, Presentation, Search, Video } from 'lucide-react';
 import MarkdownMessage from '../../components/MarkdownMessage';
 import { stripWritingPreamble } from '../ai-writing/writingDocumentTypes';
 import { artifactKindLabel } from './artifactPresentation';
@@ -8,6 +8,7 @@ import { readPptArtifactPayload } from './pptArtifactAdapter';
 import { readResearchArtifactPayload } from './researchArtifactAdapter';
 import { readThesisArtifactPayload } from './thesisArtifactAdapter';
 import { readVideoArtifactPayload } from './videoArtifactAdapter';
+import MusicOmniWorkspace from './MusicOmniWorkspace';
 
 function safeExternalUrl(value: string): string | null {
   try {
@@ -29,7 +30,8 @@ export default function ArtifactRenderer({ artifact, version }: { artifact: Arti
   const researchPayload = artifact.kind === 'research_report' ? readResearchArtifactPayload(version.payload) : null;
   const videoPayload = artifact.kind === 'video' ? readVideoArtifactPayload(version.payload) : null;
   const pptPayload = artifact.kind === 'presentation' ? readPptArtifactPayload(version.payload) : null;
-  const Icon = artifact.kind === 'image' ? ImageIcon : artifact.kind === 'video' ? Video : artifact.kind === 'presentation' ? Presentation : artifact.kind === 'research_report' ? Search : FileText;
+  const Icon = artifact.kind === 'image' ? ImageIcon : artifact.kind === 'video' ? Video : artifact.kind === 'music' ? Music2 : artifact.kind === 'presentation' ? Presentation : artifact.kind === 'research_report' ? Search : FileText;
+  if (artifact.kind === 'music') return <MusicOmniWorkspace artifact={artifact} version={version} />;
   if (artifact.kind === 'image' && (imagePayload?.images.length || previewUrl)) {
     const images = imagePayload?.images.length ? imagePayload.images : [{ id: 'preview', url: previewUrl! }];
     return <div className="h-full overflow-y-auto bg-slate-100 p-4 sm:p-6"><div className="grid grid-cols-1 gap-4 sm:grid-cols-2">{images.map((item) => (

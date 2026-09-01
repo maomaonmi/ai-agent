@@ -7,6 +7,7 @@ const KIND_LABELS: Record<ArtifactKind, string> = {
   thesis: '论文',
   research_report: '研究报告',
   presentation: 'PPT',
+  music: '音乐',
 };
 
 const STATUS_LABELS: Record<Artifact['status'], string> = {

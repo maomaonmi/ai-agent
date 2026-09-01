@@ -54,7 +54,7 @@ import {
   getVideoTaskStatus,
   type VideoTask,
 } from '../lib/api';
-import { Image as ImageIcon, Paperclip, X, Bot, ArrowUp, Sparkles, SlidersHorizontal, Plus, FileText, Video, Menu, Code2, Languages, WandSparkles, Telescope, Presentation } from 'lucide-react';
+import { Image as ImageIcon, Paperclip, X, Bot, ArrowUp, Sparkles, SlidersHorizontal, Plus, FileText, Video, Menu, Code2, Languages, WandSparkles, Telescope, Presentation, Mic, Square } from 'lucide-react';
 import ResearchProgressPanel from './ResearchProgressPanel';
 import MarkdownMessage from './MarkdownMessage';
 import NodeProgressPanel from './NodeProgressPanel';
@@ -97,6 +97,10 @@ import { artifactPanelReducer } from '../features/omni/panelState';
 import { ARTIFACT_PANEL_DEFAULT_WIDTH, clampArtifactPanelWidth } from '../features/omni/artifactResize';
 import OmniComposerToolbar from '../features/omni/OmniComposerToolbar';
 import OmniModeShowcase from '../features/omni/OmniModeShowcase';
+import { useRealtimeASR } from '../features/music/hooks/useRealtimeASR';
+import { buildMusicAgentPrompt, parseMusicDraft } from '../features/music/musicInspiration';
+import { generateSunoMusic } from '../features/music/api';
+import { composeMusicStyle } from '../features/music/musicCreationPresets';
 import { capabilityUsesTaskRoute, nextCapabilityMode, selectPreferredCapability, type OmniComposerCapability } from '../features/omni/composerCapabilities';
 import { createOmniTurnContext } from '../features/omni/turnContext';
 import { createWritingArtifactInput, writingDocumentToMarkdown } from '../features/omni/writingArtifactAdapter';
@@ -105,6 +109,7 @@ import { createResearchArtifactInput } from '../features/omni/researchArtifactAd
 import { createThesisArtifactInput, readThesisArtifactPayload } from '../features/omni/thesisArtifactAdapter';
 import { createVideoArtifactInput, matchesVideoArtifactTask, readVideoArtifactPayload } from '../features/omni/videoArtifactAdapter';
 import { createPptArtifactInput, readPptArtifactPayload } from '../features/omni/pptArtifactAdapter';
+import { createMusicArtifactInput, isMusicGenerationCommand, readMusicArtifactPayload } from '../features/omni/musicArtifactAdapter';
 import type { Artifact, ArtifactSummary, ArtifactVersion, MessageArtifactLink } from '../features/omni/types';
 import { documentFromV1Result } from '../features/ai-writing/writingDocumentTypes';
 import useCodeAutoRepair from '../hooks/useCodeAutoRepair';
@@ -264,6 +269,8 @@ export default function ChatInterface() {
     (window as unknown as { __debugMessages?: ChatMessage[] }).__debugMessages = messages;
   }
   const [input, setInput] = useState('');
+  const handleInputChangeFromASR = useCallback((text: string) => setInput(text), []);
+  const mainAsr = useRealtimeASR({ baseText: input, onText: handleInputChangeFromASR });
   const [allSkills, setAllSkills] = useState<SkillCapsule[]>([]);
   const [showSkillPicker, setShowSkillPicker] = useState(false);
   const [skillPickerQuery, setSkillPickerQuery] = useState('');
@@ -2053,7 +2060,89 @@ export default function ChatInterface() {
     // 截断后重写索引失效，下一轮提交按普通发送处理
     setRewritingIndex(null);
 
-    if (preferredCapability === 'ppt' && capabilityUsesTaskRoute(preferredCapability, mode)) {
+    if (preferredCapability === 'music' && capabilityUsesTaskRoute(preferredCapability, mode)) {
+      let rawLyrics = '';
+      try {
+        const activeMusicVersion = artifactPanelState.status !== 'closed'
+          ? await getArtifactVersion(artifactPanelState.artifactId, artifactPanelState.versionId)
+          : null;
+        const activeMusic = readMusicArtifactPayload(activeMusicVersion?.payload);
+        if (activeMusic && artifactPanelState.status !== 'closed') {
+          const nextInstruction = [activeMusic.instruction, userMessage].filter(Boolean).join('；');
+          const shouldGenerate = isMusicGenerationCommand(userMessage);
+          const task = shouldGenerate ? await generateSunoMusic({
+            mode: 'custom',
+            prompt: activeMusic.lyrics,
+            style: composeMusicStyle(nextInstruction, activeMusic.style.split(',').map((item) => item.trim()).filter(Boolean), []),
+            title: activeMusic.title,
+            model: 'V4_5ALL',
+          }) : null;
+          const created = await createArtifactVersion(artifactPanelState.artifactId, {
+            conversationId: requestSessionId,
+            messageId: assistantMessageId,
+            summary: task ? '音乐任务已提交，正在生成。' : '已更新音乐情感与乐器指令。',
+            sourceRef: task ? { type: 'music_task', musicTaskId: task.id } : activeMusicVersion!.sourceRef,
+            payload: { ...activeMusic, instruction: nextInstruction, stage: task ? 'music' : 'lyrics', task },
+            status: task ? 'generating' : 'draft',
+          });
+          const assistantMessage: ChatMessage = {
+            id: assistantMessageId,
+            role: 'assistant',
+            content: task ? '音乐任务已提交，右侧会实时更新生成结果。' : '已把新的情感与乐器要求加入右侧歌词工作台。需要生成时可以说“开始生成音乐”。',
+          };
+          const nextMessages = [...messagesRef.current, assistantMessage];
+          messagesRef.current = nextMessages; setMessages(nextMessages);
+          const updated = await saveSessionSnapshot(requestSessionId, { ...buildSnapshot(), messages: nextMessages }, false);
+          setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+          setConversationArtifactLinks((previous) => [...previous, created.link]);
+          openArtifactPanel(created.artifact, created.version);
+          return;
+        }
+        await sendChatMessage(buildMusicAgentPrompt(userMessage), 'deep', {
+          onToken: (token) => { rawLyrics += token; },
+          onDone: (event) => { if (!rawLyrics) rawLyrics = event.answer; },
+          onError: (event) => { throw new Error(event.message); },
+        }, {
+          sessionId: requestSessionId,
+          providerOverride: 'deepseek',
+          maxTokensOverride: 6_000,
+          thinkingBudgetOverride: 2_000,
+          runtimeSettings: {
+            ...runtimeSettings,
+            webSearch: 'off',
+            deepThinking: 'on',
+            mcpMode: 'off',
+            mcpServerIds: [],
+            skillMode: 'off',
+            skillIds: [],
+          },
+        });
+        const draft = parseMusicDraft(rawLyrics);
+        if (!draft.lyrics.trim()) throw new Error('歌词模型没有返回有效内容。');
+        const created = await createConversationArtifact(requestSessionId, createMusicArtifactInput({
+          messageId: assistantMessageId,
+          title: draft.title,
+          lyrics: draft.lyrics,
+          instruction: userMessage,
+        }));
+        const assistantMessage: ChatMessage = {
+          id: assistantMessageId,
+          role: 'assistant',
+          content: draft.note || `已完成《${draft.title}》的歌词初稿。你可以在右侧修改歌词、添加情感与乐器指令，然后生成音乐。`,
+        };
+        const nextMessages = [...messagesRef.current, assistantMessage];
+        messagesRef.current = nextMessages;
+        setMessages(nextMessages);
+        const updated = await saveSessionSnapshot(requestSessionId, { ...buildSnapshot(), messages: nextMessages }, false);
+        setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+        setConversationArtifactLinks((previous) => [...previous, created.link]);
+        openArtifactPanel(created.artifact, created.version);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : '歌词生成失败。');
+      } finally {
+        setIsLoading(false);
+      }
+    } else if (preferredCapability === 'ppt' && capabilityUsesTaskRoute(preferredCapability, mode)) {
       try {
         const presentation = await pptApi.createPresentation({ title: userMessage.slice(0, 80) || '未命名演示' });
         const run = await pptApi.createRun({
@@ -3972,9 +4061,28 @@ export default function ChatInterface() {
               </div>}
               modelControl={<ModelQuickSwitcher compact disabled={isLoading || !isSessionReady} preferredCapability={preferredCapability} imageModel={imageModel} videoModel={videoModel} onImageModelChange={setImageModel} onVideoModelChange={setVideoModel} videoMode={videoMode} videoParams={videoParams} onVideoParamsChange={setVideoParams}/>}
               videoModeControl={<select aria-label="视频生成模式" value={videoMode} onChange={(event) => setVideoMode(event.target.value as 'text_to_video' | 'multi_image_to_video')} className="h-9 max-w-28 rounded-lg border-0 bg-transparent px-1.5 text-xs font-medium text-slate-600 outline-none"><option value="text_to_video">单镜头生成</option><option value="multi_image_to_video">多参考生成</option></select>}
+              voiceControl={<div className="flex items-center gap-1.5">
+                {(mainAsr.isListening || mainAsr.status === 'connecting') && (
+                  <span className="hidden items-end gap-0.5 text-sky-500 sm:flex" aria-hidden="true">
+                    {[0, 1, 2].map((index) => <i key={index} className="w-0.5 animate-pulse rounded-full bg-current" style={{ height: `${7 + mainAsr.volume / 14 + index * 2}px`, animationDelay: `${index * 100}ms` }} />)}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={() => (mainAsr.isListening || mainAsr.status === 'connecting' ? mainAsr.stop() : void mainAsr.start())}
+                  disabled={isLoading || !isSessionReady}
+                  aria-label={mainAsr.isListening ? '停止语音识别' : '开始语音识别'}
+                  aria-pressed={mainAsr.isListening}
+                  title={mainAsr.status === 'connecting' ? '正在连接语音识别' : mainAsr.isListening ? '停止语音识别' : '语音输入'}
+                  className={`relative flex h-9 w-9 items-center justify-center rounded-full border transition disabled:cursor-not-allowed disabled:opacity-40 ${mainAsr.isListening ? 'border-sky-400 bg-sky-500 text-white shadow-md shadow-sky-500/25' : 'border-slate-300 text-slate-600 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-600'}`}
+                >
+                  {mainAsr.isListening && <span className="absolute inset-0 animate-ping rounded-full bg-sky-400/25" aria-hidden="true" />}
+                  {mainAsr.isListening ? <Square size={12} fill="currentColor" className="relative" aria-hidden="true" /> : <Mic size={16} className="relative" aria-hidden="true" />}
+                </button>
+              </div>}
               sendControl={<button
                 type="submit"
-                disabled={isLoading || !input.trim() || (preferredCapability === 'video' && videoMode === 'multi_image_to_video' && !attachments.some((item) => item.type === 'image_url'))}
+                disabled={isLoading || mainAsr.isListening || mainAsr.status === 'connecting' || !input.trim() || (preferredCapability === 'video' && videoMode === 'multi_image_to_video' && !attachments.some((item) => item.type === 'image_url'))}
                 aria-label="发送消息"
                 className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-white transition-all disabled:bg-slate-200 disabled:text-slate-400 disabled:cursor-not-allowed ${
                   mode === 'web' ? 'bg-green-600 hover:bg-green-700' :
@@ -4000,6 +4108,7 @@ export default function ChatInterface() {
                 ) : <ArrowUp size={19} strokeWidth={2.4} />}
               </button>}
             />
+            {mainAsr.error && <p role="alert" className="px-1 text-xs text-rose-500">{mainAsr.error}</p>}
 
             {/* Research Mode Tip */}
             {mode === 'research' && !isLoading && (

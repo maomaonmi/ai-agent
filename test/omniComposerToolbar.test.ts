@@ -8,10 +8,11 @@ import {
   selectPreferredCapability,
 } from '../src/features/omni/composerCapabilities.ts';
 
-test('全能模式下的图片、视频和 PPT 意图走专项任务路由', () => {
+test('全能模式下的图片、视频、PPT 和音乐意图走专项任务路由', () => {
   assert.equal(capabilityUsesTaskRoute('image', 'omni'), true);
   assert.equal(capabilityUsesTaskRoute('video', 'omni'), true);
   assert.equal(capabilityUsesTaskRoute('ppt', 'omni'), true);
+  assert.equal(capabilityUsesTaskRoute('music', 'omni'), true);
   assert.equal(capabilityUsesTaskRoute('writing', 'omni'), false);
   assert.equal(capabilityUsesTaskRoute('image', 'research'), false);
 });

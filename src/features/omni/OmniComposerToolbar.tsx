@@ -42,6 +42,7 @@ interface OmniComposerToolbarProps {
   attachmentControl: ReactNode;
   moreControl: ReactNode;
   modelControl: ReactNode;
+  voiceControl?: ReactNode;
   sendControl: ReactNode;
   modeControl?: ReactNode;
   videoModeControl?: ReactNode;
@@ -93,6 +94,7 @@ export default function OmniComposerToolbar({
   attachmentControl,
   moreControl,
   modelControl,
+  voiceControl,
   sendControl,
   modeControl,
   videoModeControl,
@@ -126,8 +128,8 @@ export default function OmniComposerToolbar({
               key={item.id}
               type="button"
               aria-pressed={active}
-              disabled={disabled || item.id === 'music'}
-              title={item.id === 'music' ? '音乐生成将在后续能力阶段接入' : `${item.label}：为本轮请求指定创作意图`}
+              disabled={disabled}
+              title={`${item.label}：为本轮请求指定创作意图`}
               onClick={() => onCapabilityChange(item.id)}
               className={`${item.responsiveClassName ?? 'inline-flex'} h-9 shrink-0 items-center gap-1 rounded-lg px-2 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
                 active
@@ -148,6 +150,7 @@ export default function OmniComposerToolbar({
       <RuntimeToggle active={webSearch === 'on'} disabled={disabled} icon={Globe2} label="联网" title="联网搜索（可与深度思考同时开启）" onClick={onWebSearchChange} />
       <RuntimeToggle active={deepThinking === 'on'} disabled={disabled} icon={Sparkles} label="深思" title="深度思考（可与联网搜索同时开启）" onClick={onDeepThinkingChange} />
       <div className="min-w-0 shrink">{modelControl}</div>
+      {voiceControl && <div className="shrink-0">{voiceControl}</div>}
       <div className="shrink-0">{sendControl}</div>
     </div>
   );

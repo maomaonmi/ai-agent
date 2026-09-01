@@ -37,6 +37,6 @@ export function nextCapabilityMode(current: CapabilityMode): CapabilityMode {
 /** Specialized generation capabilities must bypass the generic chat stream,
  * including when the conversation itself is in Omni mode. */
 export function capabilityUsesTaskRoute(capability: OmniComposerCapability, mode: string): boolean {
-  return (capability === 'ppt' || capability === 'image' || capability === 'video')
+  return (capability === 'ppt' || capability === 'image' || capability === 'video' || capability === 'music')
     && (mode === 'omni' || mode === 'standard' || mode === 'deep' || mode === 'web');
 }

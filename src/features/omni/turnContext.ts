@@ -5,7 +5,7 @@ import type { OmniComposerCapability } from './composerCapabilities';
 const CAPABILITY_TO_ARTIFACT_KIND = {
   omni: 'auto',
   ppt: 'presentation',
-  music: 'auto',
+  music: 'music',
   writing: 'document',
   image: 'image',
   video: 'video',

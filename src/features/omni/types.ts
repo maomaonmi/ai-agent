@@ -14,7 +14,8 @@ export type ArtifactKind =
   | 'document'
   | 'thesis'
   | 'research_report'
-  | 'presentation';
+  | 'presentation'
+  | 'music';
 
 export type ArtifactStatus =
   | 'draft'
@@ -73,6 +74,10 @@ export type ArtifactSourceRef =
       presentationId: string;
       revision: number;
       runId?: string;
+    }
+  | {
+      type: 'music_task';
+      musicTaskId: string;
     };
 
 export interface ArtifactVersion {

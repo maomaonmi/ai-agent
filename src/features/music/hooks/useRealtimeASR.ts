@@ -11,6 +11,8 @@ export function buildInlineAsrConfig() {
     sampleRate: 16000,
     language: 'auto',
     mode: 'vad',
+    vadThreshold: 0.08,
+    vadSilenceMs: 900,
     heartbeat: true,
   } as const;
 }
@@ -48,6 +50,7 @@ export function useRealtimeASR({ baseText, onText }: RealtimeASROptions) {
   const streamRef = useRef<MediaStream | null>(null);
   const contextRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const inputGainRef = useRef<GainNode | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const sinkRef = useRef<GainNode | null>(null);
   const baseTextRef = useRef(baseText);
@@ -61,9 +64,11 @@ export function useRealtimeASR({ baseText, onText }: RealtimeASROptions) {
 
   const cleanup = useCallback(() => {
     try { processorRef.current?.disconnect(); } catch { /* already disconnected */ }
+    try { inputGainRef.current?.disconnect(); } catch { /* already disconnected */ }
     try { sourceRef.current?.disconnect(); } catch { /* already disconnected */ }
     try { sinkRef.current?.disconnect(); } catch { /* already disconnected */ }
     processorRef.current = null;
+    inputGainRef.current = null;
     sourceRef.current = null;
     sinkRef.current = null;
     streamRef.current?.getTracks().forEach(track => track.stop());
@@ -109,6 +114,10 @@ export function useRealtimeASR({ baseText, onText }: RealtimeASROptions) {
         if (message.type === 'ready') {
           readyRef.current = true;
           const source = context.createMediaStreamSource(stream);
+          const inputGain = context.createGain();
+          // Browser AGC varies significantly by device. A moderate software gain
+          // makes normal-distance speech usable without heavily amplifying noise.
+          inputGain.gain.value = 2.25;
           const processor = context.createScriptProcessor(4096, 1, 1);
           const sink = context.createGain(); sink.gain.value = 0;
           processor.onaudioprocess = audioEvent => {
@@ -116,11 +125,11 @@ export function useRealtimeASR({ baseText, onText }: RealtimeASROptions) {
             const input = audioEvent.inputBuffer.getChannelData(0);
             let sum = 0;
             for (let index = 0; index < input.length; index += 1) sum += Math.abs(input[index]);
-            setVolume(Math.min(100, Math.round((sum / input.length) * 220)));
+            setVolume(Math.min(100, Math.round((sum / input.length) * 260)));
             socket.send(floatToPCM(input, context.sampleRate));
           };
-          source.connect(processor); processor.connect(sink); sink.connect(context.destination);
-          sourceRef.current = source; processorRef.current = processor; sinkRef.current = sink;
+          source.connect(inputGain); inputGain.connect(processor); processor.connect(sink); sink.connect(context.destination);
+          sourceRef.current = source; inputGainRef.current = inputGain; processorRef.current = processor; sinkRef.current = sink;
           setStatus('listening');
         } else if (message.type === 'transcript') {
           const text = message.text || '';

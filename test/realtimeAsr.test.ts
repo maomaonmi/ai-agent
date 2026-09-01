@@ -10,6 +10,8 @@ test('builds a safe PCM ASR start config for the music composer', () => {
     sampleRate: 16000,
     language: 'auto',
     mode: 'vad',
+    vadThreshold: 0.08,
+    vadSilenceMs: 900,
     heartbeat: true,
   });
 });

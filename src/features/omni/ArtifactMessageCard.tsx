@@ -1,10 +1,12 @@
 'use client';
 
-import { ArrowRight, FileText, Image as ImageIcon, Presentation, Search, Video } from 'lucide-react';
+import { ArrowRight, FileText, Image as ImageIcon, Music2, Presentation, Search, Video } from 'lucide-react';
 import { buildArtifactCardViewModel } from './artifactPresentation';
 import type { Artifact, ArtifactVersion } from './types';
 import { readImageArtifactPayload } from './imageArtifactAdapter';
 import { readVideoArtifactPayload } from './videoArtifactAdapter';
+import { readMusicArtifactPayload } from './musicArtifactAdapter';
+import { resolveSunoAssetUrl } from '../music/api';
 
 const icons = {
   image: ImageIcon,
@@ -13,6 +15,7 @@ const icons = {
   thesis: FileText,
   research_report: Search,
   presentation: Presentation,
+  music: Music2,
 };
 
 interface ArtifactMessageCardProps {
@@ -27,6 +30,8 @@ export default function ArtifactMessageCard({ artifact, version, onOpen, fromOth
   const Icon = icons[artifact.kind];
   const versionImagePayload = artifact.kind === 'image' ? readImageArtifactPayload(version.payload) : null;
   const videoPayload = artifact.kind === 'video' ? readVideoArtifactPayload(version.payload) : null;
+  const musicPayload = artifact.kind === 'music' ? readMusicArtifactPayload(version.payload) : null;
+  const musicCover = resolveSunoAssetUrl(musicPayload?.task?.clips.find((clip) => clip.image_url)?.image_url);
   const previewUrl = versionImagePayload?.images[0]?.thumbnail_url || versionImagePayload?.images[0]?.url || (typeof artifact.metadata.previewUrl === 'string'
     ? artifact.metadata.previewUrl
     : null);
@@ -36,6 +41,10 @@ export default function ArtifactMessageCard({ artifact, version, onOpen, fromOth
       {previewUrl && artifact.kind === 'image' && (
         // eslint-disable-next-line @next/next/no-img-element
         <img src={previewUrl} alt="" className="h-40 w-full object-cover" />
+      )}
+      {musicCover && artifact.kind === 'music' && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={musicCover} alt="" className="h-32 w-full object-cover opacity-80" />
       )}
       <div className="p-4">
         <div className="flex items-start gap-3">

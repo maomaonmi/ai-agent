@@ -37,6 +37,16 @@ test('未打开右侧作品时不产生隐式 it 引用', () => {
   assert.equal(context.activeArtifact, undefined);
 });
 
+test('音乐创作意图冻结为 music 作品能力', () => {
+  const context = createOmniTurnContext({
+    preferredCapability: 'music',
+    runtimeSettings: { webSearch: 'off', deepThinking: 'on' },
+    attachments: [],
+    artifactPanelState: { status: 'closed' },
+  });
+  assert.equal(context.preferredCapability, 'music');
+});
+
 test('聊天请求把冻结快照作为独立 omni_context 发送', async () => {
   const originalFetch = globalThis.fetch;
   let requestBody: Record<string, unknown> | undefined;
