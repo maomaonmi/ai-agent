@@ -32,6 +32,7 @@ export default function ArtifactMessageCard({ artifact, version, onOpen, fromOth
   const videoPayload = artifact.kind === 'video' ? readVideoArtifactPayload(version.payload) : null;
   const musicPayload = artifact.kind === 'music' ? readMusicArtifactPayload(version.payload) : null;
   const musicCover = resolveSunoAssetUrl(musicPayload?.task?.clips.find((clip) => clip.image_url)?.image_url);
+  const musicClips = musicPayload?.task?.clips ?? [];
   const previewUrl = versionImagePayload?.images[0]?.thumbnail_url || versionImagePayload?.images[0]?.url || (typeof artifact.metadata.previewUrl === 'string'
     ? artifact.metadata.previewUrl
     : null);
@@ -56,6 +57,7 @@ export default function ArtifactMessageCard({ artifact, version, onOpen, fromOth
               {fromOtherProject && <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[11px] text-violet-600">来自其他项目</span>}
             </div>
             <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">{videoPayload?.task.status === 'FAILED' && videoPayload.task.error?.message ? `生成失败：${videoPayload.task.error.message}` : viewModel.summary}</p>
+            {musicClips.some((clip) => clip.audio_url || clip.stream_audio_url) && <div className="mt-3 space-y-2">{musicClips.map((clip, index) => { const audioUrl = resolveSunoAssetUrl(clip.audio_url || clip.stream_audio_url); return audioUrl ? <div key={clip.id || index} className="rounded-lg bg-slate-50 p-2"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-700"><Music2 size={13} className="text-sky-600"/>{clip.title || `音乐版本 ${index + 1}`}</div><audio src={audioUrl} controls className="h-8 w-full" /></div> : null; })}</div>}
             <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
               <span>{viewModel.statusLabel}</span><span aria-hidden="true">·</span>
               <span className={viewModel.isHistoricalVersion ? 'font-medium text-amber-600' : ''}>{viewModel.versionLabel}</span>

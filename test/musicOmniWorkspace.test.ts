@@ -9,11 +9,12 @@ test('music workspace keeps lyrics editable and exposes preset instructions', ()
   assert.match(source, /STYLE_PRESETS/);
   assert.match(source, /INSTRUMENT_PRESETS/);
   assert.match(source, /aria-label="音乐创作指令"/);
+  assert.doesNotMatch(source, /aria-label="音乐生成结果"/);
 });
 
-test('music workspace generates and streams a Suno task with artwork-backed results', () => {
+test('music workspace submits a Suno task and reports the completed result to the conversation', () => {
   assert.match(source, /generateSunoMusic/);
   assert.match(source, /openSunoTaskStream/);
-  assert.match(source, /resolveSunoAssetUrl\(.*image_url/);
-  assert.match(source, /opacity-20/);
+  assert.match(source, /onGenerated/);
+  assert.match(source, /音乐生成完成/);
 });

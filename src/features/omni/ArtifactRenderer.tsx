@@ -9,6 +9,7 @@ import { readResearchArtifactPayload } from './researchArtifactAdapter';
 import { readThesisArtifactPayload } from './thesisArtifactAdapter';
 import { readVideoArtifactPayload } from './videoArtifactAdapter';
 import MusicOmniWorkspace from './MusicOmniWorkspace';
+import type { CreateArtifactResponse } from './api';
 
 function safeExternalUrl(value: string): string | null {
   try {
@@ -19,7 +20,7 @@ function safeExternalUrl(value: string): string | null {
   }
 }
 
-export default function ArtifactRenderer({ artifact, version }: { artifact: Artifact; version: ArtifactVersion }) {
+export default function ArtifactRenderer({ artifact, version, onMusicGenerated }: { artifact: Artifact; version: ArtifactVersion; onMusicGenerated?: (response: CreateArtifactResponse) => void }) {
   const previewUrl = typeof artifact.metadata.previewUrl === 'string' ? artifact.metadata.previewUrl : null;
   const versionPayload = version.payload && typeof version.payload === 'object'
     ? version.payload as Record<string, unknown>
@@ -31,7 +32,7 @@ export default function ArtifactRenderer({ artifact, version }: { artifact: Arti
   const videoPayload = artifact.kind === 'video' ? readVideoArtifactPayload(version.payload) : null;
   const pptPayload = artifact.kind === 'presentation' ? readPptArtifactPayload(version.payload) : null;
   const Icon = artifact.kind === 'image' ? ImageIcon : artifact.kind === 'video' ? Video : artifact.kind === 'music' ? Music2 : artifact.kind === 'presentation' ? Presentation : artifact.kind === 'research_report' ? Search : FileText;
-  if (artifact.kind === 'music') return <MusicOmniWorkspace artifact={artifact} version={version} />;
+  if (artifact.kind === 'music') return <MusicOmniWorkspace artifact={artifact} version={version} onGenerated={onMusicGenerated} />;
   if (artifact.kind === 'image' && (imagePayload?.images.length || previewUrl)) {
     const images = imagePayload?.images.length ? imagePayload.images : [{ id: 'preview', url: previewUrl! }];
     return <div className="h-full overflow-y-auto bg-slate-100 p-4 sm:p-6"><div className="grid grid-cols-1 gap-4 sm:grid-cols-2">{images.map((item) => (

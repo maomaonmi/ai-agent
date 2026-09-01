@@ -169,9 +169,10 @@ interface ModelQuickSwitcherProps {
   videoMode?: 'text_to_video' | 'multi_image_to_video';
   videoParams?: VideoComposerParams;
   onVideoParamsChange?: (params: VideoComposerParams) => void;
+  onProviderChange?: (provider: Provider) => void;
 }
 
-export default function ModelQuickSwitcher({ disabled = false, compact = false, preferredCapability, imageModel = '', videoModel = '', onImageModelChange, onVideoModelChange, videoMode = 'text_to_video', videoParams, onVideoParamsChange }: ModelQuickSwitcherProps) {
+export default function ModelQuickSwitcher({ disabled = false, compact = false, preferredCapability, imageModel = '', videoModel = '', onImageModelChange, onVideoModelChange, videoMode = 'text_to_video', videoParams, onVideoParamsChange, onProviderChange }: ModelQuickSwitcherProps) {
   const [active, setActive] = useState<Provider>('deepseek');
   const [profiles, setProfiles] = useState<Partial<Record<Provider, ModelSettings>>>({});
   const [catalog, setCatalog] = useState<Record<string, ModelVariant[]>>(FALLBACK_CATALOG);
@@ -186,11 +187,12 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
         getModelSettings(), getModelSettings('deepseek'), getModelSettings('glm'), getModelSettings('qwen'), getModelSettings('minimax'), getModelSettings('custom'),
       ]);
       setActive(current.provider);
+      onProviderChange?.(current.provider);
       setProfiles({ deepseek, glm, qwen, minimax, custom });
       setError('');
     } catch { setError('模型配置不可用'); }
     finally { setLoading(false); }
-  }, []);
+  }, [onProviderChange]);
 
   useEffect(() => {
     void refresh();
@@ -278,6 +280,7 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
       }
       const saved = await saveModelSettings(payload);
       setActive(saved.provider);
+      onProviderChange?.(saved.provider);
       window.dispatchEvent(new Event('model-settings-changed'));
     } catch { setError('模型切换失败'); setLoading(false); }
   };

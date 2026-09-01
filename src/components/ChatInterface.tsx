@@ -269,6 +269,7 @@ export default function ChatInterface() {
     (window as unknown as { __debugMessages?: ChatMessage[] }).__debugMessages = messages;
   }
   const [input, setInput] = useState('');
+  const [activeProvider, setActiveProvider] = useState<ModelSettings['provider']>('deepseek');
   const handleInputChangeFromASR = useCallback((text: string) => setInput(text), []);
   const mainAsr = useRealtimeASR({ baseText: input, onText: handleInputChangeFromASR });
   const [allSkills, setAllSkills] = useState<SkillCapsule[]>([]);
@@ -551,6 +552,27 @@ export default function ChatInterface() {
   const handleArtifactPanelWidthChange = useCallback((width: number) => {
     setArtifactPanelWidth(clampArtifactPanelWidth(width));
   }, []);
+  const handleMusicGenerated = async (response: import('../features/omni/api').CreateArtifactResponse) => {
+    const resultMessage: ChatMessage = {
+      id: response.link.messageId,
+      role: 'assistant',
+      content: response.version.status === 'ready'
+        ? '完整音乐结果已生成，已附在这条消息中。'
+        : '音乐任务已结束，但生成未成功，请在右侧歌词工作台重试。',
+    };
+    const nextMessages = [...messagesRef.current, resultMessage];
+    messagesRef.current = nextMessages;
+    setMessages(nextMessages);
+    setConversationArtifactLinks((previous) => [...previous, response.link]);
+    if (activeSessionId) {
+      try {
+        const updated = await saveSessionSnapshot(activeSessionId, { ...buildSnapshot(), messages: nextMessages }, false);
+        setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+      } catch {
+        setError('音乐已生成，但结果消息保存失败。');
+      }
+    }
+  };
   const [selectedResearchMessageIndex, setSelectedResearchMessageIndex] = useState<number | null>(null);
   const [writingSessionRestore, setWritingSessionRestore] = useState<{
     sessionId: string;
@@ -659,7 +681,10 @@ export default function ChatInterface() {
     const refresh = async () => {
       try {
         const settings = await getModelSettings();
-        if (active) setCurrentModelSettings(settings);
+        if (active) {
+          setCurrentModelSettings(settings);
+          setActiveProvider(settings.provider);
+        }
       } catch {
         /* ignore: 后端暂时不可用时保持上次状态 */
       }
@@ -2062,6 +2087,7 @@ export default function ChatInterface() {
 
     if (preferredCapability === 'music' && capabilityUsesTaskRoute(preferredCapability, mode)) {
       let rawLyrics = '';
+      let streamedReasoning = '';
       try {
         const activeMusicVersion = artifactPanelState.status !== 'closed'
           ? await getArtifactVersion(artifactPanelState.artifactId, artifactPanelState.versionId)
@@ -2088,7 +2114,7 @@ export default function ChatInterface() {
           const assistantMessage: ChatMessage = {
             id: assistantMessageId,
             role: 'assistant',
-            content: task ? '音乐任务已提交，右侧会实时更新生成结果。' : '已把新的情感与乐器要求加入右侧歌词工作台。需要生成时可以说“开始生成音乐”。',
+            content: task ? '音乐任务已提交，生成完成后会在对话中显示完整音乐结果。' : '已把新的情感与乐器要求加入右侧歌词工作台。需要生成时可以说“开始生成音乐”。',
           };
           const nextMessages = [...messagesRef.current, assistantMessage];
           messagesRef.current = nextMessages; setMessages(nextMessages);
@@ -2097,14 +2123,36 @@ export default function ChatInterface() {
           setConversationArtifactLinks((previous) => [...previous, created.link]);
           openArtifactPanel(created.artifact, created.version);
           return;
-        }
+      }
+        const streamingAssistant: ChatMessage = {
+          id: assistantMessageId,
+          role: 'assistant',
+          content: '正在理解主题并创作歌词…',
+        };
+        messagesRef.current = [...messagesRef.current, streamingAssistant];
+        setMessages(messagesRef.current);
+        let streamError = '';
         await sendChatMessage(buildMusicAgentPrompt(userMessage), 'deep', {
+          onNode: handleNodeEvent,
+          onReasoning: (event) => {
+            streamedReasoning = event.reasoning;
+            setReasoningSteps([streamedReasoning]);
+            reasoningPacing.commit(streamedReasoning);
+          },
+          onReasoningDelta: (token) => {
+            streamedReasoning += token;
+            setReasoningSteps([streamedReasoning]);
+            reasoningPacing.push(token);
+          },
           onToken: (token) => { rawLyrics += token; },
           onDone: (event) => { if (!rawLyrics) rawLyrics = event.answer; },
-          onError: (event) => { throw new Error(event.message); },
+          // sendChatMessage keeps consuming the SSE stream after an error
+          // event. Preserve the provider message and surface it below instead
+          // of replacing it with the generic empty-lyrics error.
+          onError: (event) => { streamError = event.message; },
         }, {
           sessionId: requestSessionId,
-          providerOverride: 'deepseek',
+          providerOverride: activeProvider === 'custom' ? 'deepseek' : activeProvider,
           maxTokensOverride: 6_000,
           thinkingBudgetOverride: 2_000,
           runtimeSettings: {
@@ -2117,8 +2165,11 @@ export default function ChatInterface() {
             skillIds: [],
           },
         });
+        if (streamError) throw new Error(streamError);
         const draft = parseMusicDraft(rawLyrics);
         if (!draft.lyrics.trim()) throw new Error('歌词模型没有返回有效内容。');
+        const finalReasoning = streamedReasoning.trim() || '已完成主题理解、情绪分析与歌词结构设计。';
+        reasoningPacing.flush();
         const created = await createConversationArtifact(requestSessionId, createMusicArtifactInput({
           messageId: assistantMessageId,
           title: draft.title,
@@ -2129,8 +2180,10 @@ export default function ChatInterface() {
           id: assistantMessageId,
           role: 'assistant',
           content: draft.note || `已完成《${draft.title}》的歌词初稿。你可以在右侧修改歌词、添加情感与乐器指令，然后生成音乐。`,
+          reasoning: finalReasoning,
+          nodeProgress: perRoundNodeEventsRef.current,
         };
-        const nextMessages = [...messagesRef.current, assistantMessage];
+        const nextMessages = messagesRef.current.map((message) => message.id === assistantMessageId ? assistantMessage : message);
         messagesRef.current = nextMessages;
         setMessages(nextMessages);
         const updated = await saveSessionSnapshot(requestSessionId, { ...buildSnapshot(), messages: nextMessages }, false);
@@ -2140,6 +2193,7 @@ export default function ChatInterface() {
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : '歌词生成失败。');
       } finally {
+        sealOffProcessingNodes();
         setIsLoading(false);
       }
     } else if (preferredCapability === 'ppt' && capabilityUsesTaskRoute(preferredCapability, mode)) {
@@ -3611,14 +3665,14 @@ export default function ChatInterface() {
                     </div>
                   )}
 
-                  {/* 可折叠的 R1 深度思考过程：仅非调研模式下保留在答案末尾；
-                      调研模式下 reasoning 流程已融入 NodeProgressPanel 链路面板
-                      （[Node: DeepThinker] processing→completed），不再在气泡末尾重复展示。 */}
-                  {msg.reasoning && mode !== 'research' && (
+                  {/* 可折叠的 R1 深度思考过程：仅在没有链路面板时保留在答案末尾；
+                      有 NodeProgressPanel 时，思考内容与字数统一在链路面板中展示，避免重复。 */}
+                  {msg.reasoning && mode !== 'research' && !(msg.nodeProgress && msg.nodeProgress.length > 0) && (
                     <details className="mt-3">
                       <summary className="cursor-pointer text-xs font-semibold text-purple-600 hover:text-purple-800 flex items-center gap-1.5 py-1 select-none">
                         <span>🧠</span>
                         R1 深度思考
+                        <span className="text-purple-400 font-normal">· {msg.reasoning.length} 字</span>
                         {msg.reasoning_time != null && (
                           <span className="text-purple-400 font-normal">· {msg.reasoning_time}s</span>
                         )}
@@ -4059,7 +4113,7 @@ export default function ChatInterface() {
                   </div>
                 )}
               </div>}
-              modelControl={<ModelQuickSwitcher compact disabled={isLoading || !isSessionReady} preferredCapability={preferredCapability} imageModel={imageModel} videoModel={videoModel} onImageModelChange={setImageModel} onVideoModelChange={setVideoModel} videoMode={videoMode} videoParams={videoParams} onVideoParamsChange={setVideoParams}/>}
+              modelControl={<ModelQuickSwitcher compact disabled={isLoading || !isSessionReady} preferredCapability={preferredCapability} imageModel={imageModel} videoModel={videoModel} onImageModelChange={setImageModel} onVideoModelChange={setVideoModel} videoMode={videoMode} videoParams={videoParams} onVideoParamsChange={setVideoParams} onProviderChange={setActiveProvider}/>}
               videoModeControl={<select aria-label="视频生成模式" value={videoMode} onChange={(event) => setVideoMode(event.target.value as 'text_to_video' | 'multi_image_to_video')} className="h-9 max-w-28 rounded-lg border-0 bg-transparent px-1.5 text-xs font-medium text-slate-600 outline-none"><option value="text_to_video">单镜头生成</option><option value="multi_image_to_video">多参考生成</option></select>}
               voiceControl={<div className="flex items-center gap-1.5">
                 {(mainAsr.isListening || mainAsr.status === 'connecting') && (
@@ -4168,6 +4222,7 @@ export default function ChatInterface() {
           onOpenVersion={handleArtifactOpenVersion}
           panelWidth={artifactPanelWidth}
           onPanelWidthChange={handleArtifactPanelWidthChange}
+          onMusicGenerated={(response) => void handleMusicGenerated(response)}
           onOpenProfessional={(artifact, version) => artifact.kind === 'image'
             ? openImageArtifactWorkspace(artifact, version)
             : artifact.kind === 'video'

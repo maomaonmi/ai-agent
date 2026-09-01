@@ -6,6 +6,7 @@ import { getArtifact, getArtifactVersion } from './api';
 import ArtifactRenderer from './ArtifactRenderer';
 import { artifactPanelWidthFromPointer, clampArtifactPanelWidth } from './artifactResize';
 import type { Artifact, ArtifactPanelState, ArtifactVersion } from './types';
+import type { CreateArtifactResponse } from './api';
 
 interface ArtifactPanelProps {
   state: Exclude<ArtifactPanelState, { status: 'closed' }>;
@@ -16,9 +17,10 @@ interface ArtifactPanelProps {
   onOpenProfessional?: (artifact: Artifact, version: ArtifactVersion) => void;
   panelWidth: number;
   onPanelWidthChange: (width: number) => void;
+  onMusicGenerated?: (response: CreateArtifactResponse) => void;
 }
 
-export default function ArtifactPanel({ state, onLoaded, onClose, onDisplayModeChange, onOpenVersion, onOpenProfessional, panelWidth, onPanelWidthChange }: ArtifactPanelProps) {
+export default function ArtifactPanel({ state, onLoaded, onClose, onDisplayModeChange, onOpenVersion, onOpenProfessional, panelWidth, onPanelWidthChange, onMusicGenerated }: ArtifactPanelProps) {
   const [artifact, setArtifact] = useState<Artifact | null>(null);
   const [version, setVersion] = useState<ArtifactVersion | null>(null);
   const [error, setError] = useState('');
@@ -89,6 +91,6 @@ export default function ArtifactPanel({ state, onLoaded, onClose, onDisplayModeC
       <button type="button" aria-label={state.displayMode === 'maximized' ? '恢复分栏' : '最大化作品'} onClick={() => onDisplayModeChange(state.displayMode === 'maximized' ? 'split' : 'maximized')} className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100">{state.displayMode === 'maximized' ? <Minimize2 size={18} /> : <Maximize2 size={18} />}</button>
       <button type="button" aria-label="关闭作品" onClick={onClose} className="flex h-9 w-9 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100"><X size={19} /></button>
     </header>
-    <div className="min-h-0 flex-1">{error ? <div role="alert" className="flex h-full flex-col items-center justify-center px-6 text-center"><p className="text-sm text-rose-600">{error}</p><button type="button" onClick={() => setRetryKey((value) => value + 1)} className="mt-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"><RotateCw size={15} />重试</button></div> : artifact && version ? <ArtifactRenderer artifact={artifact} version={version} /> : <div role="status" className="flex h-full items-center justify-center text-sm text-slate-400">正在加载作品…</div>}</div>
+    <div className="min-h-0 flex-1">{error ? <div role="alert" className="flex h-full flex-col items-center justify-center px-6 text-center"><p className="text-sm text-rose-600">{error}</p><button type="button" onClick={() => setRetryKey((value) => value + 1)} className="mt-3 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm"><RotateCw size={15} />重试</button></div> : artifact && version ? <ArtifactRenderer artifact={artifact} version={version} onMusicGenerated={onMusicGenerated} /> : <div role="status" className="flex h-full items-center justify-center text-sm text-slate-400">正在加载作品…</div>}</div>
   </aside>;
 }
