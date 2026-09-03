@@ -19,6 +19,7 @@ import {
   Music2,
   Sliders,
   ChevronDown,
+  ChevronRight,
   Bot,
   Trash2,
   FileMusic,
@@ -43,6 +44,8 @@ import {
   buildEditorDocument,
   createEditorProject,
   createEditorOperation,
+  createEditorAudioProcessing,
+  exportEditorProject,
   getEditorAsset,
   getEditorProject,
   getEditorOperation,
@@ -88,6 +91,9 @@ interface AudioClip {
   sourceOffset?: number;
   sourceDuration?: number;
   muted?: boolean;
+  pending?: boolean;
+  pitchSemitones?: number;
+  playbackRate?: number;
 }
 
 interface EditorHistorySnapshot {
@@ -235,10 +241,12 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
   const [tracks, setTracks] = useState<Track[]>([]);
   const [project, setProject] = useState<EditorProject | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [exportState, setExportState] = useState<'idle' | 'exporting' | 'error'>('idle');
   const [uploadState, setUploadState] = useState<'idle' | 'uploading' | 'error'>('idle');
   const [isTimelineDragActive, setIsTimelineDragActive] = useState(false);
   const [generationState, setGenerationState] = useState<'idle' | 'submitting' | 'processing' | 'error'>('idle');
-  const [processingAssetId, setProcessingAssetId] = useState<string | null>(null);
+  const [pendingClipId, setPendingClipId] = useState<string | null>(null);
+  const [clipProcessing, setClipProcessing] = useState<{ clipId: string; operationId: string; label: string } | null>(null);
   const [lyricsGenerationState, setLyricsGenerationState] = useState<'idle' | 'generating' | 'error'>('idle');
   const [beatLoadingId, setBeatLoadingId] = useState<string | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -266,6 +274,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
     top: number;
     left: number;
   } | null>(null);
+  const [clipSubmenu, setClipSubmenu] = useState<'pitch' | 'separation' | null>(null);
   const [clipNotice, setClipNotice] = useState<string | null>(null);
   const clipClipboardRef = useRef<{ trackId: string; clip: AudioClip } | null>(null);
   // 麦克风音量检测相关状态
@@ -327,6 +336,8 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
             sourceOffset: clip.sourceInSeconds,
             sourceDuration,
             muted: Boolean(clip.isMuted),
+            pitchSemitones: clip.pitchSemitones,
+            playbackRate: clip.playbackRate,
             waveform: buildWaveformValues(clip.id.length),
           };
         })),
@@ -432,6 +443,35 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
     } catch (error) {
       console.error('保存音乐编辑工程失败', error);
       setSaveState('error');
+    }
+  };
+
+  const handleExport = async () => {
+    if (exportState === 'exporting') return;
+    if (clipProcessing) {
+      setClipNotice('请等待音频处理完成后再导出');
+      return;
+    }
+    setExportState('exporting');
+    try {
+      const saved = await persistProject();
+      // WAV keeps the rendered mix lossless; the server also accepts MP3 for
+      // callers that need a smaller file.
+      const blob = await exportEditorProject(saved.id, 'wav');
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${saved.title || 'music-editor'}.wav`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 0);
+      setExportState('idle');
+      setClipNotice('音频已导出');
+    } catch (error) {
+      console.error('导出音乐编辑工程失败', error);
+      setExportState('error');
+      setClipNotice(error instanceof Error ? error.message : '导出失败');
     }
   };
 
@@ -739,6 +779,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
     if (existing) return existing;
     const player = new Audio(`/api/music/editor/assets/${encodeURIComponent(clip.assetId)}/stream`);
     player.preload = 'auto';
+    player.playbackRate = Math.max(0.25, Math.min(4, clip.playbackRate ?? 1));
     audioPlayersRef.current.set(clip.id, player);
     return player;
   };
@@ -893,7 +934,10 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       const enabled = !track.muted && (!hasSolo || track.solo);
       track.clips.forEach((clip) => {
         const player = audioPlayersRef.current.get(clip.id);
-        if (player) player.volume = enabled && !clip.muted ? Math.max(0, Math.min(1, track.volume * volume)) : 0;
+        if (player) {
+          player.volume = enabled && !clip.muted ? Math.max(0, Math.min(1, track.volume * volume)) : 0;
+          player.playbackRate = Math.max(0.25, Math.min(4, clip.playbackRate ?? 1));
+        }
       });
     });
   }, [tracks, volume]);
@@ -1164,19 +1208,27 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
     return null;
   };
 
-  const closeClipContextMenu = () => setClipContextMenu(null);
+  const closeClipContextMenu = () => {
+    setClipContextMenu(null);
+    setClipSubmenu(null);
+  };
 
   const handleClipContextMenu = (event: React.MouseEvent, trackId: string, clip: AudioClip) => {
     event.preventDefault();
     event.stopPropagation();
     setOpenMenuTrackId(null);
     setMenuPos(null);
-    const menuWidth = 232;
-    const menuHeight = 220;
+    setClipSubmenu(null);
+    const menuWidth = 240;
+    const menuHeight = 460;
+    const submenuWidth = 336;
+    const hasRightRoom = event.clientX + menuWidth + submenuWidth + 16 <= window.innerWidth;
     setClipContextMenu({
       trackId,
       clipId: clip.id,
-      left: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+      left: hasRightRoom
+        ? Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - submenuWidth - 16))
+        : Math.max(8, Math.min(event.clientX - menuWidth - 8, window.innerWidth - menuWidth - 8)),
       top: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
     });
     setSelectedClipId(clip.id);
@@ -1270,6 +1322,151 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       : track));
     closeClipContextMenu();
     setClipNotice(muted ? '片段已静音' : '片段已取消静音');
+  };
+
+  const startClipProcessing = async (
+    trackId: string,
+    clipId: string,
+    operationType: 'denoise' | 'beautify' | 'pitch_shift' | 'stem_separation',
+    label: string,
+    options: { pitchSemitones?: number; stemCount?: 2 | 3 | 4 } = {},
+  ) => {
+    if (clipProcessing || generationState === 'submitting' || generationState === 'processing') return;
+    const current = tracks.find((track) => track.id === trackId)?.clips.find((clip) => clip.id === clipId);
+    if (!current?.assetId || current.pending) {
+      setClipNotice('当前片段没有可处理的音频');
+      return;
+    }
+    closeClipContextMenu();
+    setClipProcessing({ clipId, operationId: '', label });
+    setClipNotice(`${label}处理中…`);
+    try {
+      const saved = await persistProject();
+      const requestId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+      let operation = await createEditorAudioProcessing(saved.id, {
+        type: operationType,
+        inputAssetId: current.assetId,
+        clientRequestId: requestId,
+        pitchSemitones: options.pitchSemitones,
+        stemCount: options.stemCount,
+      });
+      setClipProcessing({ clipId, operationId: operation.id, label });
+      for (let attempt = 0; attempt < 300 && !['SUCCESS', 'FAILED', 'TIMED_OUT'].includes(operation.status); attempt += 1) {
+        if (attempt > 0) await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        operation = await getEditorOperation(operation.id);
+      }
+      if (operation.status !== 'SUCCESS' || !operation.results.length) {
+        throw new Error(operation.error?.message || `${label}失败`);
+      }
+
+      const imported = [] as Awaited<ReturnType<typeof importEditorOperationResult>>[];
+      for (const result of operation.results) {
+        let asset: Awaited<ReturnType<typeof importEditorOperationResult>> | null = null;
+        for (let attempt = 0; attempt < 10 && !asset; attempt += 1) {
+          try {
+            asset = await importEditorOperationResult(operation.id, result.id);
+          } catch {
+            if (attempt < 9) await new Promise((resolve) => window.setTimeout(resolve, 500));
+          }
+        }
+        if (!asset) throw new Error('处理结果导入失败');
+        imported.push(asset);
+      }
+
+      if (operationType === 'stem_separation') {
+        const stemKinds: Array<{ match: string; type: Track['type']; name: string }> = [
+          { match: '人声', type: 'vocal', name: '人声（分离）' },
+          { match: '中声', type: 'vocal', name: '中声（分离）' },
+          { match: '贝斯', type: 'bass', name: '贝斯（分离）' },
+          { match: '鼓组', type: 'drum', name: '鼓组（分离）' },
+          { match: '伴奏', type: 'instrument', name: '伴奏（分离）' },
+        ];
+        const createdAt = Date.now();
+        setTracks((previous) => {
+          const next = [...previous];
+          imported.forEach((asset, index) => {
+            const title = operation.results[index]?.title || asset.displayName;
+            const stem = stemKinds.find((item) => title.includes(item.match)) || stemKinds[index] || stemKinds[0];
+            const trackId = `stem-${createdAt}-${index}`;
+            next.push({
+              id: trackId,
+              name: stem.name,
+              type: stem.type,
+              muted: false,
+              solo: false,
+              volume: 0.7,
+              clips: [{
+                id: `clip-${createdAt}-${index}`,
+                name: asset.displayName,
+                start: current.start,
+                duration: asset.duration / secondsPerBar,
+                sourceDuration: asset.duration,
+                sourceOffset: 0,
+                assetId: asset.id,
+                waveform: buildWaveformValues(asset.id.length + index),
+              }],
+            });
+          });
+          return next;
+        });
+      } else {
+        const asset = imported[0];
+        audioPlayersRef.current.get(clipId)?.pause();
+        const player = audioPlayersRef.current.get(clipId);
+        if (player) {
+          player.src = '';
+          audioPlayersRef.current.delete(clipId);
+        }
+        setTracks((previous) => previous.map((track) => track.id === trackId
+          ? {
+              ...track,
+              clips: track.clips.map((clip) => clip.id === clipId
+                ? {
+                    ...clip,
+                    name: asset.displayName,
+                    assetId: asset.id,
+                    sourceDuration: asset.duration,
+                    // Processing renders a new source file; keep the user's
+                    // selected source window instead of resetting its offset.
+                    sourceOffset: Math.min(clip.sourceOffset ?? 0, Math.max(0, asset.duration - 0.001)),
+                    duration: Math.min(
+                      clip.duration,
+                      Math.max(0.05, (asset.duration - Math.min(clip.sourceOffset ?? 0, Math.max(0, asset.duration - 0.001))) / secondsPerBar),
+                    ),
+                    pitchSemitones: 0,
+                    waveform: buildWaveformValues(asset.id.length + Math.round(asset.duration)),
+                  }
+                : clip),
+            }
+          : track));
+      }
+      setClipProcessing(null);
+      setClipNotice(`${label}完成`);
+    } catch (error) {
+      console.error(`${label}失败`, error);
+      setClipProcessing(null);
+      setClipNotice(error instanceof Error ? error.message : `${label}失败`);
+    }
+  };
+
+  const handleClipPitch = (trackId: string, clipId: string, delta: number) => {
+    const current = tracks.find((track) => track.id === trackId)?.clips.find((clip) => clip.id === clipId);
+    if (!current || current.pending) return;
+    const nextPitch = Math.max(-24, Math.min(24, (current.pitchSemitones ?? 0) + delta));
+    void startClipProcessing(trackId, clipId, 'pitch_shift', `变调 ${nextPitch > 0 ? '+' : ''}${nextPitch} key`, { pitchSemitones: nextPitch });
+  };
+
+  const handleClipSpeed = (trackId: string, clipId: string, delta: number) => {
+    const current = tracks.find((track) => track.id === trackId)?.clips.find((clip) => clip.id === clipId);
+    if (!current || current.pending) return;
+    const nextSpeed = Math.max(0.25, Math.min(4, (current.playbackRate ?? 1) + delta));
+    setTracks((previous) => previous.map((track) => track.id === trackId
+      ? { ...track, clips: track.clips.map((clip) => clip.id === clipId ? { ...clip, playbackRate: nextSpeed } : clip) }
+      : track));
+    closeClipContextMenu();
+    setClipNotice(`速度 ${nextSpeed.toFixed(2)}x`);
   };
 
   useEffect(() => {
@@ -1451,7 +1648,34 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       setGenerationState('error');
       return;
     }
-    setProcessingAssetId(sourceAssetId);
+    const sourceClip = tracks.flatMap((track) => track.clips).find((clip) => clip.assetId === sourceAssetId);
+    const targetType: Track['type'] = melodyMode === 'vocal' ? 'vocal' : 'instrument';
+    const targetTrack = tracks.find((track) => track.type === targetType);
+    const targetTrackId = targetTrack?.id || `t${Date.now()}`;
+    const placeholderId = `pending-${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
+    const placeholder: AudioClip = {
+      id: placeholderId,
+      name: melodyMode === 'vocal' ? 'AI 人声版本（生成中）' : 'AI 伴奏版本（生成中）',
+      start: sourceClip?.start ?? 0,
+      duration: Math.max(0.5, sourceClip?.duration ?? 4),
+      pending: true,
+      waveform: buildWaveformValues(placeholderId.length),
+    };
+    setTracks((previous) => {
+      const hasTarget = previous.some((track) => track.id === targetTrackId);
+      if (hasTarget) return previous.map((track) => track.id === targetTrackId ? { ...track, clips: [...track.clips, placeholder] } : track);
+      return [...previous, {
+        id: targetTrackId,
+        name: melodyMode === 'vocal' ? 'AI 人声轨' : 'AI 伴奏轨',
+        type: targetType,
+        muted: false,
+        solo: false,
+        volume: 0.7,
+        clips: [placeholder],
+      }];
+    });
+    setPendingClipId(placeholderId);
+    setSelectedClipId(placeholderId);
     setGenerationState('submitting');
     try {
       const saved = await persistProject();
@@ -1498,25 +1722,41 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       const clip: AudioClip = {
         id: `c${Date.now()}`,
         name: imported.displayName,
-        start: 0,
+        start: placeholder.start,
         duration: imported.duration / secondsPerBar,
         sourceDuration: imported.duration,
         sourceOffset: 0,
         assetId: imported.id,
         waveform: buildWaveformValues(imported.id.length),
       };
-      const targetType: Track['type'] = melodyMode === 'vocal' ? 'vocal' : 'instrument';
       setTracks((previous) => {
-        const target = previous.find((track) => track.type === targetType);
-        if (target) return previous.map((track) => track.id === target.id ? { ...track, clips: [...track.clips, clip] } : track);
-        return [...previous, { id: `t${Date.now()}`, name: melodyMode === 'vocal' ? 'AI 人声轨' : 'AI 伴奏轨', type: targetType, muted: false, solo: false, volume: 0.7, clips: [clip] }];
+        let replaced = false;
+        const next = previous.map((track) => {
+          if (track.id !== targetTrackId) return track;
+          const clips = track.clips.flatMap((item) => {
+            if (item.id !== placeholderId) return [item];
+            replaced = true;
+            return [{ ...clip, start: item.start }];
+          });
+          return { ...track, clips };
+        });
+        if (replaced) return next;
+        const target = next.find((track) => track.id === targetTrackId || track.type === targetType);
+        if (target) return next.map((track) => track.id === target.id ? { ...track, clips: [...track.clips, clip] } : track);
+        return [...next, { id: targetTrackId, name: melodyMode === 'vocal' ? 'AI 人声轨' : 'AI 伴奏轨', type: targetType, muted: false, solo: false, volume: 0.7, clips: [clip] }];
       });
       setGenerationState('idle');
-      setProcessingAssetId(null);
+      setPendingClipId(null);
+      setSelectedClipId((current) => current === placeholderId ? clip.id : current);
     } catch (error) {
       console.error('音乐编辑生成失败', error);
       setGenerationState('error');
-      setProcessingAssetId(null);
+      setTracks((previous) => previous.map((track) => ({
+        ...track,
+        clips: track.clips.filter((item) => item.id !== placeholderId),
+      })));
+      setPendingClipId(null);
+      setSelectedClipId((current) => current === placeholderId ? null : current);
     }
   };
 
@@ -1632,10 +1872,12 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
           </button>
           <button
             type="button"
-            className="flex items-center gap-1.5 rounded-md bg-sky-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-sky-600"
+            onClick={handleExport}
+            disabled={exportState === 'exporting' || Boolean(clipProcessing)}
+            className="flex items-center gap-1.5 rounded-md bg-sky-500 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            <Download size={13} />
-            <span>导出</span>
+            {exportState === 'exporting' ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+            <span>{exportState === 'exporting' ? '导出中…' : exportState === 'error' ? '重试导出' : '导出'}</span>
           </button>
         </div>
       </div>
@@ -2453,8 +2695,9 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                           <div className="flex h-full min-h-[80px] items-center px-3 text-[10px] text-slate-300 dark:text-neutral-600">空轨道</div>
                         ) : (
                           track.clips.map((clip) => {
-                            const isClipProcessing = processingAssetId === clip.assetId
-                              && (generationState === 'submitting' || generationState === 'processing');
+                            const isClipProcessing = (pendingClipId === clip.id
+                              && (generationState === 'submitting' || generationState === 'processing'))
+                              || clipProcessing?.clipId === clip.id;
                             return (
                               <div
                                 key={clip.id}
@@ -2521,8 +2764,8 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                                 <span className="absolute inset-y-1 right-0 w-1 rounded-l bg-white/95 shadow-sm" />
                               </span>}
                               {isClipProcessing && (
-                                <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-700/65 text-white" role="status" aria-label="后端处理中">
-                                  <Loader2 size={28} className="animate-spin text-white/90" />
+                                <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-700/90 text-white" role="status" aria-label="后端处理中">
+                                  <span className="flex items-center gap-2 text-xs font-medium"><Loader2 size={18} className="animate-spin text-white/90" />{clipProcessing?.clipId === clip.id ? clipProcessing.label : '生成中…'}</span>
                                 </div>
                               )}
                               </div>
@@ -2889,58 +3132,157 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       {clipContextMenu && contextMenuClip && (
         <div
           data-clip-menu
-          className="fixed z-[10000] w-56 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 text-slate-700 shadow-2xl dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
+          className="fixed z-[10000] w-[240px] overflow-visible text-slate-700"
           style={{ top: clipContextMenu.top, left: clipContextMenu.left }}
           onMouseDown={(event) => event.stopPropagation()}
           onContextMenu={(event) => event.preventDefault()}
         >
-          <button
-            type="button"
-            onClick={() => handleClipCopy(clipContextMenu.trackId, contextMenuClip)}
-            className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition hover:bg-slate-100 dark:hover:bg-neutral-800"
-          >
-            <span>复制</span>
-            <kbd className="text-[10px] text-slate-400 dark:text-neutral-500">Ctrl/Cmd + C</kbd>
-          </button>
-          {clipClipboardRef.current && (
+          <div className="w-[240px] overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 shadow-2xl shadow-slate-300/60">
             <button
               type="button"
-              onClick={() => handleClipPaste(clipContextMenu.trackId)}
-              className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition hover:bg-slate-100 dark:hover:bg-neutral-800"
+              onMouseEnter={() => setClipSubmenu(null)}
+              onClick={() => handleClipCopy(clipContextMenu.trackId, contextMenuClip)}
+              className="flex h-12 w-full items-center justify-between whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
             >
-              <span>粘贴</span>
-              <kbd className="text-[10px] text-slate-400 dark:text-neutral-500">Ctrl/Cmd + V</kbd>
+              <span>复制</span>
+              <kbd className="text-[12px] text-slate-400">⌘ + C</kbd>
             </button>
+            <button
+              type="button"
+              onMouseEnter={() => setClipSubmenu(null)}
+              onClick={() => handleClipDelete(clipContextMenu.trackId, clipContextMenu.clipId)}
+              className="flex h-12 w-full items-center justify-between whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+            >
+              <span>删除</span>
+              <kbd className="text-[12px] text-slate-400">⌫</kbd>
+            </button>
+            <button
+              type="button"
+              disabled={!canSplitContextClip}
+              onMouseEnter={() => setClipSubmenu(null)}
+              onClick={() => handleClipSplit(clipContextMenu.trackId, contextMenuClip)}
+              className={`flex h-12 w-full items-center justify-between whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition ${
+                canSplitContextClip
+                  ? 'hover:bg-slate-100'
+                  : 'cursor-not-allowed text-slate-300'
+              }`}
+            >
+              <span>裁剪</span>
+              <kbd className={`text-[12px] ${canSplitContextClip ? 'text-slate-400' : 'text-slate-300'}`}>S</kbd>
+            </button>
+            <button
+              type="button"
+              onMouseEnter={() => setClipSubmenu(null)}
+              onClick={() => handleClipMute(clipContextMenu.trackId, clipContextMenu.clipId)}
+              className="flex h-12 w-full items-center justify-between whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+            >
+              <span>{contextMenuClip.muted ? '取消静音' : '静音'}</span>
+              <kbd className="text-[12px] text-slate-400">Ctrl + M</kbd>
+            </button>
+
+            <div className="mx-2 my-1.5 h-px bg-slate-200" />
+
+            <button
+              type="button"
+              onMouseEnter={() => setClipSubmenu('pitch')}
+              className="flex h-12 w-full items-center justify-between whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+            >
+              <span>变调变速</span>
+              <ChevronRight size={17} className="text-slate-400" />
+            </button>
+            <button
+              type="button"
+              onMouseEnter={() => setClipSubmenu(null)}
+              onClick={() => void startClipProcessing(clipContextMenu.trackId, clipContextMenu.clipId, 'denoise', '人声降噪')}
+              className="flex h-12 w-full items-center rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+            >
+              <span>人声降噪</span>
+            </button>
+            <button
+              type="button"
+              onMouseEnter={() => setClipSubmenu(null)}
+              onClick={() => void startClipProcessing(clipContextMenu.trackId, clipContextMenu.clipId, 'beautify', '人声美化')}
+              className="flex h-12 w-full items-center rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+            >
+              <span>人声美化</span>
+            </button>
+
+            <div className="mx-2 my-1.5 h-px bg-slate-200" />
+
+            <button
+              type="button"
+              onMouseEnter={() => setClipSubmenu('separation')}
+              className="flex h-12 w-full items-center justify-between whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+            >
+              <span className="flex items-center gap-2">
+                <span>音轨分离</span>
+                <span className="rounded bg-[#39f5aa] px-1.5 py-0.5 text-[11px] font-bold text-[#07150f]">✦ AI</span>
+              </span>
+              <ChevronRight size={17} className="text-slate-400" />
+            </button>
+          </div>
+
+          {clipSubmenu === 'pitch' && (
+            <div className="absolute left-[calc(100%+8px)] top-[212px] w-[336px] overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 text-slate-700 shadow-2xl shadow-slate-300/60">
+              <div className="px-3 pb-1.5 pt-2 text-[13px] text-slate-400">变调</div>
+              <button
+                type="button"
+                onClick={() => handleClipPitch(clipContextMenu.trackId, clipContextMenu.clipId, 1)}
+                className="flex h-12 w-full items-center whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+              >
+                升半音（+1 key）
+              </button>
+              <button
+                type="button"
+                onClick={() => handleClipPitch(clipContextMenu.trackId, clipContextMenu.clipId, -1)}
+                className="flex h-12 w-full items-center whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+              >
+                降半音（-1 key）
+              </button>
+              <div className="mx-2 my-1.5 h-px bg-slate-200" />
+              <div className="px-3 pb-1.5 pt-1 text-[13px] text-slate-400">变速</div>
+              <button
+                type="button"
+                onClick={() => handleClipSpeed(clipContextMenu.trackId, clipContextMenu.clipId, 0.1)}
+                className="flex h-12 w-full items-center whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+              >
+                速度 +10%
+              </button>
+              <button
+                type="button"
+                onClick={() => handleClipSpeed(clipContextMenu.trackId, clipContextMenu.clipId, -0.1)}
+                className="flex h-12 w-full items-center whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+              >
+                速度 -10%
+              </button>
+            </div>
           )}
-          <button
-            type="button"
-            onClick={() => handleClipDelete(clipContextMenu.trackId, clipContextMenu.clipId)}
-            className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-rose-600 transition hover:bg-rose-50 dark:text-rose-300 dark:hover:bg-rose-500/10"
-          >
-            <span>删除</span>
-            <kbd className="text-[10px] text-rose-400 dark:text-rose-300/70">Delete</kbd>
-          </button>
-          <button
-            type="button"
-            disabled={!canSplitContextClip}
-            onClick={() => handleClipSplit(clipContextMenu.trackId, contextMenuClip)}
-            className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition ${
-              canSplitContextClip
-                ? 'hover:bg-slate-100 dark:hover:bg-neutral-800'
-                : 'cursor-not-allowed text-slate-300 dark:text-neutral-600'
-            }`}
-          >
-            <span>裁剪</span>
-            <kbd className="text-[10px] text-slate-400 dark:text-neutral-500">S</kbd>
-          </button>
-          <button
-            type="button"
-            onClick={() => handleClipMute(clipContextMenu.trackId, clipContextMenu.clipId)}
-            className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition hover:bg-slate-100 dark:hover:bg-neutral-800"
-          >
-            <span>{contextMenuClip.muted ? '取消静音' : '静音'}</span>
-            <kbd className="text-[10px] text-slate-400 dark:text-neutral-500">Ctrl/Cmd + M</kbd>
-          </button>
+
+          {clipSubmenu === 'separation' && (
+            <div className="absolute left-[calc(100%+8px)] top-[368px] w-[336px] overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 text-slate-700 shadow-2xl shadow-slate-300/60">
+              <button
+                type="button"
+                onClick={() => void startClipProcessing(clipContextMenu.trackId, clipContextMenu.clipId, 'stem_separation', '2轨音轨分离', { stemCount: 2 })}
+                className="flex min-h-12 w-full items-center whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+              >
+                2轨（人声 + 伴奏）
+              </button>
+              <button
+                type="button"
+                onClick={() => void startClipProcessing(clipContextMenu.trackId, clipContextMenu.clipId, 'stem_separation', '3轨音轨分离', { stemCount: 3 })}
+                className="flex min-h-12 w-full items-center whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+              >
+                3轨（人声 + 中声 + 和声 + 伴奏）
+              </button>
+              <button
+                type="button"
+                onClick={() => void startClipProcessing(clipContextMenu.trackId, clipContextMenu.clipId, 'stem_separation', '4轨音轨分离', { stemCount: 4 })}
+                className="flex min-h-12 w-full items-center whitespace-nowrap rounded-lg px-3 text-left text-[15px] transition hover:bg-slate-100"
+              >
+                4轨（人声 + 贝斯 + 鼓组 + 伴奏）
+              </button>
+            </div>
+          )}
         </div>
       )}
       {clipNotice && (

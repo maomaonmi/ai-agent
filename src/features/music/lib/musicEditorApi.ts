@@ -8,6 +8,8 @@ export interface EditorClipInput {
   sourceOffset?: number;
   sourceDuration?: number;
   muted?: boolean;
+  pitchSemitones?: number;
+  playbackRate?: number;
 }
 
 export interface EditorTrackInput {
@@ -107,8 +109,8 @@ export function buildEditorDocument(input: {
         gainDb: 0,
         fadeInSeconds: 0,
         fadeOutSeconds: 0,
-        pitchSemitones: 0,
-        playbackRate: 1,
+        pitchSemitones: clip.pitchSemitones ?? 0,
+        playbackRate: clip.playbackRate ?? 1,
       })),
     })),
     markers: [],
@@ -168,6 +170,41 @@ export function importEditorOperationResult(operationId: string, clipId: string)
     `${API_ROOT}/operations/${encodeURIComponent(operationId)}/results/${encodeURIComponent(clipId)}/import`,
     { method: 'POST' },
   );
+}
+
+export interface EditorAudioProcessingRequest {
+  type: 'denoise' | 'beautify' | 'pitch_shift' | 'stem_separation';
+  inputAssetId: string;
+  clientRequestId: string;
+  pitchSemitones?: number;
+  stemCount?: 2 | 3 | 4;
+}
+
+export function createEditorAudioProcessing(projectId: string, body: EditorAudioProcessingRequest) {
+  return request<EditorOperation>(`${API_ROOT}/projects/${encodeURIComponent(projectId)}/processing`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function exportEditorProject(projectId: string, format: 'wav' | 'mp3' = 'wav') {
+  const response = await fetch(`${API_ROOT}/projects/${encodeURIComponent(projectId)}/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ format }),
+  });
+  if (!response.ok) {
+    let message = `导出失败 (${response.status})`;
+    try {
+      const payload = await response.json();
+      message = payload?.error?.message || message;
+    } catch {
+      // Keep the status-based message when the server did not return JSON.
+    }
+    throw new Error(message);
+  }
+  return response.blob();
 }
 
 export function getSingerPresets() {
