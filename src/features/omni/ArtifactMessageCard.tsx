@@ -7,6 +7,7 @@ import { readImageArtifactPayload } from './imageArtifactAdapter';
 import { readVideoArtifactPayload } from './videoArtifactAdapter';
 import { readMusicArtifactPayload } from './musicArtifactAdapter';
 import { resolveSunoAssetUrl } from '../music/api';
+import MusicAudioPlayer from './MusicAudioPlayer';
 
 const icons = {
   image: ImageIcon,
@@ -38,7 +39,7 @@ export default function ArtifactMessageCard({ artifact, version, onOpen, fromOth
     : null);
 
   return (
-    <article className="mt-3 w-full max-w-xl overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm" aria-label={`${viewModel.kindLabel}作品：${viewModel.title}`}>
+    <article className={`mt-3 w-full ${artifact.kind === 'music' ? 'max-w-none' : 'max-w-xl'} overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm`} aria-label={`${viewModel.kindLabel}作品：${viewModel.title}`}>
       {previewUrl && artifact.kind === 'image' && (
         // eslint-disable-next-line @next/next/no-img-element
         <img src={previewUrl} alt="" className="h-40 w-full object-cover" />
@@ -57,7 +58,7 @@ export default function ArtifactMessageCard({ artifact, version, onOpen, fromOth
               {fromOtherProject && <span className="rounded-full bg-violet-50 px-2 py-0.5 text-[11px] text-violet-600">来自其他项目</span>}
             </div>
             <p className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">{videoPayload?.task.status === 'FAILED' && videoPayload.task.error?.message ? `生成失败：${videoPayload.task.error.message}` : viewModel.summary}</p>
-            {musicClips.some((clip) => clip.audio_url || clip.stream_audio_url) && <div className="mt-3 space-y-2">{musicClips.map((clip, index) => { const audioUrl = resolveSunoAssetUrl(clip.audio_url || clip.stream_audio_url); return audioUrl ? <div key={clip.id || index} className="rounded-lg bg-slate-50 p-2"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-700"><Music2 size={13} className="text-sky-600"/>{clip.title || `音乐版本 ${index + 1}`}</div><audio src={audioUrl} controls className="h-8 w-full" /></div> : null; })}</div>}
+            {musicClips.some((clip) => clip.audio_url || clip.stream_audio_url) && <div className="mt-3 space-y-2">{musicClips.map((clip, index) => { const audioUrl = resolveSunoAssetUrl(clip.audio_url || clip.stream_audio_url); return audioUrl ? <div key={clip.id || index} className="rounded-lg bg-slate-50 px-3 py-2"><div className="mb-1 flex items-center gap-2 text-xs font-medium text-slate-700"><Music2 size={13} className="text-sky-600"/>{clip.title || `音乐版本 ${index + 1}`}</div><MusicAudioPlayer src={audioUrl} title={clip.title || `音乐版本 ${index + 1}`} compact /></div> : null; })}</div>}
             <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
               <span>{viewModel.statusLabel}</span><span aria-hidden="true">·</span>
               <span className={viewModel.isHistoricalVersion ? 'font-medium text-amber-600' : ''}>{viewModel.versionLabel}</span>

@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import Image from 'next/image';
 import {
   Play,
   Square,
@@ -35,8 +36,29 @@ import {
   Zap,
   Disc,
   Wind,
+  Loader2,
 } from 'lucide-react';
 import { type MusicTab } from './MusicSidebar';
+import {
+  buildEditorDocument,
+  createEditorProject,
+  createEditorOperation,
+  getEditorAsset,
+  getEditorProject,
+  getEditorOperation,
+  importEditorOperationResult,
+  getSingerPresets,
+  editorTrackHasAudio,
+  selectGenerationAssetId,
+  saveEditorProject,
+  uploadEditorAsset,
+  type EditorProject,
+} from '../lib/musicEditorApi';
+import { SINGER_PRESETS, type SingerPreset } from '../lib/singerPresets';
+import { sendChatMessage } from '../../../lib/api';
+import { buildLyricsPolishPrompt } from '../lib/musicEditorLyrics';
+import { BEAT_PRESETS, type BeatPreset } from '../lib/musicEditorBeats';
+import { buildWaveformValues, formatTransportTime, moveClipWithInsertion, resizeClip, splitClipAtPosition, timelineDurationSeconds, type ClipResizeEdge } from '../lib/musicEditorTransport';
 
 interface MusicEditorPageProps {
   activeTab: MusicTab;
@@ -62,6 +84,18 @@ interface AudioClip {
   start: number; // 小节位置
   duration: number; // 小节长度
   waveform?: number[];
+  assetId?: string;
+  sourceOffset?: number;
+  sourceDuration?: number;
+  muted?: boolean;
+}
+
+interface EditorHistorySnapshot {
+  bpm: number;
+  timeSignature: string;
+  volume: number;
+  selectedKey: string;
+  tracks: Track[];
 }
 
 const EDITOR_TABS: { id: EditorTab; label: string }[] = [
@@ -75,13 +109,74 @@ const EDITOR_TABS: { id: EditorTab; label: string }[] = [
 
 const STYLE_PRESETS = ['流行抒情', '民谣吉他', '电子舞曲', 'R&B 慢板', '古风', '摇滚', '爵士', '嘻哈'];
 
-function generateWaveform(seed: number, length = 80): number[] {
-  const arr: number[] = [];
-  for (let i = 0; i < length; i++) {
-    const v = Math.abs(Math.sin((i + seed) * 0.4) * Math.cos((i + seed) * 0.15));
-    arr.push(0.2 + v * 0.8);
-  }
-  return arr;
+function WaveformCanvas({
+  values,
+  fill = 'rgba(255,255,255,0.82)',
+  topFill = 'rgba(255,255,255,0.64)',
+}: {
+  values: number[];
+  fill?: string;
+  topFill?: string;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const draw = () => {
+      const rect = canvas.getBoundingClientRect();
+      const width = Math.max(1, Math.round(rect.width));
+      const height = Math.max(1, Math.round(rect.height));
+      const dpr = window.devicePixelRatio || 1;
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+      const context = canvas.getContext('2d');
+      if (!context) return;
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      context.clearRect(0, 0, width, height);
+      if (!values.length) return;
+
+      const center = height / 2;
+      const amplitude = Math.max(1, height / 2 - 6);
+      const step = values.length / width;
+      const safeValues = values.map((value) => Math.max(0, Math.min(1, Number(value) || 0)));
+      for (let x = 0; x < width; x += 1) {
+        const value = safeValues[Math.min(safeValues.length - 1, Math.floor(x * step))] ?? 0;
+        const sampleHeight = value * amplitude;
+        context.fillStyle = topFill;
+        context.fillRect(x, center - sampleHeight, 1, sampleHeight);
+        context.fillStyle = fill;
+        context.fillRect(x, center, 1, sampleHeight);
+      }
+    };
+
+    draw();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(draw);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [values, fill, topFill]);
+
+  return <canvas ref={canvasRef} className="h-full w-full" aria-hidden="true" />;
+}
+
+function getClipPlaybackWindow(clip: AudioClip, secondsPerBar: number) {
+  const timelineDuration = Math.max(0, clip.duration * secondsPerBar);
+  const sourceStart = Math.max(0, clip.sourceOffset ?? 0);
+  const sourceLimit = clip.sourceDuration ?? sourceStart + timelineDuration;
+  const sourceEnd = Math.min(Math.max(sourceStart, sourceLimit), sourceStart + timelineDuration);
+  return { timelineDuration: Math.max(0, sourceEnd - sourceStart), sourceStart, sourceEnd };
+}
+
+function getVisibleWaveform(clip: AudioClip, secondsPerBar: number) {
+  const waveform = clip.waveform ?? [];
+  if (!waveform.length || !clip.sourceDuration || clip.sourceDuration <= 0) return waveform;
+  const sourceStart = Math.max(0, clip.sourceOffset ?? 0);
+  const sourceEnd = Math.min(clip.sourceDuration, sourceStart + Math.max(0, clip.duration * secondsPerBar));
+  const startIndex = Math.max(0, Math.floor((sourceStart / clip.sourceDuration) * waveform.length));
+  const endIndex = Math.min(waveform.length, Math.ceil((sourceEnd / clip.sourceDuration) * waveform.length));
+  return waveform.slice(startIndex, Math.max(startIndex + 1, endIndex));
 }
 
 const TRACK_ACCENT: Record<Track['type'], { bar: string; wave: string; chip: string }> = {
@@ -133,11 +228,27 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
   const [singSubTab, setSingSubTab] = useState<'voice' | 'harmony'>('voice');
   // AI歌手筛选
   const [singerFilter, setSingerFilter] = useState<'all' | 'male' | 'female'>('all');
+  const [singerPresets, setSingerPresets] = useState<SingerPreset[]>(SINGER_PRESETS);
+  const [selectedSingerId, setSelectedSingerId] = useState<string | null>(null);
+  const [selectedVocalTrackId, setSelectedVocalTrackId] = useState('');
+  const [selectedAccompanimentTrackId, setSelectedAccompanimentTrackId] = useState('');
   const [tracks, setTracks] = useState<Track[]>([]);
+  const [project, setProject] = useState<EditorProject | null>(null);
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [uploadState, setUploadState] = useState<'idle' | 'uploading' | 'error'>('idle');
+  const [isTimelineDragActive, setIsTimelineDragActive] = useState(false);
+  const [generationState, setGenerationState] = useState<'idle' | 'submitting' | 'processing' | 'error'>('idle');
+  const [processingAssetId, setProcessingAssetId] = useState<string | null>(null);
+  const [lyricsGenerationState, setLyricsGenerationState] = useState<'idle' | 'generating' | 'error'>('idle');
+  const [beatLoadingId, setBeatLoadingId] = useState<string | null>(null);
+  const previewAudioRef = useRef<HTMLAudioElement | null>(null);
+  const [previewingBeatId, setPreviewingBeatId] = useState<string | null>(null);
+  const beatAssetIdsRef = useRef<Record<string, string>>({});
   const [zoom, setZoom] = useState(1);
   const [bars] = useState(16);
   // 播放头位置（0-1 比例），可拖动
   const [playhead, setPlayhead] = useState(0);
+  const [currentTimeSeconds, setCurrentTimeSeconds] = useState(0);
   // 添加音轨弹窗
   const [showTrackTypeModal, setShowTrackTypeModal] = useState(false);
   // 「...」菜单：当前打开菜单的轨道 id（同时只允许一个菜单打开）
@@ -149,6 +260,14 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
   const [activeBottomPanel, setActiveBottomPanel] = useState<'recording' | 'track' | 'clip' | null>(null);
   // 选中的片段（片段编辑按钮需要）
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [clipContextMenu, setClipContextMenu] = useState<{
+    trackId: string;
+    clipId: string;
+    top: number;
+    left: number;
+  } | null>(null);
+  const [clipNotice, setClipNotice] = useState<string | null>(null);
+  const clipClipboardRef = useRef<{ trackId: string; clip: AudioClip } | null>(null);
   // 麦克风音量检测相关状态
   const [isMicEnabled, setIsMicEnabled] = useState(false);
   const [micVolume, setMicVolume] = useState(0.52); // 0-1，初始值对应-31.7 dB
@@ -171,6 +290,300 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
   // 人声效果器选中项
   const [selectedVocalEffect, setSelectedVocalEffect] = useState('说唱 Rap');
   const [vocalEffectTab, setVocalEffectTab] = useState<'recommend' | 'enhance' | 'special' | 'style'>('recommend');
+  const historyRef = useRef<{ current: string | null; past: string[]; future: string[]; applying: boolean }>({ current: null, past: [], future: [], applying: false });
+
+  useEffect(() => {
+    const savedId = window.localStorage.getItem('music-editor-project-id');
+    if (!savedId) return;
+    let active = true;
+    getEditorProject(savedId).then(async (loaded) => {
+      if (!active) return;
+      setProject(loaded);
+      setBpm(loaded.document.tempo.bpm);
+      setTimeSignature(loaded.document.tempo.timeSignature.join('/'));
+      const secondsPerBar = (60 / loaded.document.tempo.bpm) * loaded.document.tempo.timeSignature[0];
+      const loadedTracks = await Promise.all(loaded.document.tracks.map(async (track) => ({
+        id: track.id,
+        name: track.name,
+        type: track.kind,
+        muted: track.isMuted,
+        solo: track.isSolo,
+        volume: Math.pow(10, track.gainDb / 20),
+        clips: await Promise.all(track.clips.map(async (clip) => {
+          let sourceDuration = Math.max(clip.sourceOutSeconds, clip.sourceInSeconds);
+          try {
+            // sourceOut/sourceIn describe the visible window; fetch the asset
+            // metadata so a later resize can still reach the full source end.
+            sourceDuration = Math.max(sourceDuration, (await getEditorAsset(clip.assetId)).duration);
+          } catch {
+            // A missing asset is still rendered from the saved project window.
+          }
+          return {
+            id: clip.id,
+            name: clip.name,
+            start: clip.startSeconds / secondsPerBar,
+            duration: (clip.sourceOutSeconds - clip.sourceInSeconds) / secondsPerBar,
+            assetId: clip.assetId,
+            sourceOffset: clip.sourceInSeconds,
+            sourceDuration,
+            muted: Boolean(clip.isMuted),
+            waveform: buildWaveformValues(clip.id.length),
+          };
+        })),
+      })));
+      if (!active) return;
+      setTracks(loadedTracks);
+    }).catch(() => window.localStorage.removeItem('music-editor-project-id'));
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    getSingerPresets().then(({ presets }) => {
+      if (active && presets.length) setSingerPresets(presets);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (selectedVocalTrackId && !tracks.some((track) => track.id === selectedVocalTrackId && track.type === 'vocal' && editorTrackHasAudio(track))) {
+      setSelectedVocalTrackId('');
+    }
+    if (selectedAccompanimentTrackId && !tracks.some((track) => track.id === selectedAccompanimentTrackId && track.type !== 'vocal' && editorTrackHasAudio(track))) {
+      setSelectedAccompanimentTrackId('');
+    }
+  }, [tracks, selectedVocalTrackId, selectedAccompanimentTrackId]);
+
+  useEffect(() => {
+    const snapshot: EditorHistorySnapshot = {
+      bpm,
+      timeSignature,
+      volume,
+      selectedKey,
+      tracks: tracks.map((track) => ({ ...track, clips: track.clips.map((clip) => ({ ...clip, waveform: clip.waveform ? [...clip.waveform] : undefined })) })),
+    };
+    const serialized = JSON.stringify(snapshot);
+    const history = historyRef.current;
+    if (history.current === null) {
+      history.current = serialized;
+      return;
+    }
+    if (history.applying) {
+      history.current = serialized;
+      history.applying = false;
+      return;
+    }
+    if (clipMoveRef.current) {
+      history.current = serialized;
+      return;
+    }
+    if (history.current !== serialized) {
+      history.past.push(history.current);
+      history.current = serialized;
+      history.future = [];
+    }
+  }, [bpm, timeSignature, volume, selectedKey, tracks]);
+
+  const currentDocument = () => buildEditorDocument({ bpm, timeSignature, selectedKey, volume, tracks });
+
+  const restoreHistorySnapshot = (serialized: string) => {
+    const snapshot = JSON.parse(serialized) as EditorHistorySnapshot;
+    historyRef.current.applying = true;
+    historyRef.current.current = serialized;
+    setBpm(snapshot.bpm);
+    setTimeSignature(snapshot.timeSignature);
+    setVolume(snapshot.volume);
+    setSelectedKey(snapshot.selectedKey);
+    setTracks(snapshot.tracks.map((track) => ({ ...track, clips: track.clips.map((clip) => ({ ...clip, waveform: clip.waveform ? [...clip.waveform] : undefined })) })));
+  };
+
+  const handleUndo = () => {
+    const history = historyRef.current;
+    if (!history.current || history.past.length === 0) return;
+    const previous = history.past.pop();
+    if (!previous) return;
+    history.future.push(history.current);
+    restoreHistorySnapshot(previous);
+  };
+
+  const handleRedo = () => {
+    const history = historyRef.current;
+    if (!history.current || history.future.length === 0) return;
+    const next = history.future.pop();
+    if (!next) return;
+    history.past.push(history.current);
+    restoreHistorySnapshot(next);
+  };
+
+  const persistProject = async () => {
+    const saved = project
+        ? await saveEditorProject(project, currentDocument())
+        : await createEditorProject('新项目', currentDocument());
+    setProject(saved);
+    window.localStorage.setItem('music-editor-project-id', saved.id);
+    return saved;
+  };
+
+  const handleSave = async () => {
+    setSaveState('saving');
+    try {
+      await persistProject();
+      setSaveState('saved');
+    } catch (error) {
+      console.error('保存音乐编辑工程失败', error);
+      setSaveState('error');
+    }
+  };
+
+  const handleGenerateLyrics = async () => {
+    const seed = lyrics.trim();
+    if (!seed || lyricsGenerationState === 'generating') return;
+    setLyricsGenerationState('generating');
+    let generated = '';
+    let streamError = '';
+    try {
+      await sendChatMessage(buildLyricsPolishPrompt(seed), 'standard', {
+        onToken: (token) => { generated += token; },
+        onDone: (event) => { if (!generated) generated = event.answer; },
+        onError: (event) => { streamError = event.message; },
+      }, {
+        maxTokensOverride: 2_048,
+        runtimeSettings: {
+          responseLength: 'brief',
+          webSearch: 'off',
+          deepThinking: 'off',
+          discussionRounds: 1,
+          mcpMode: 'off',
+          mcpServerIds: [],
+          skillMode: 'off',
+          skillIds: [],
+          webSearchOptions: { limit: 5, timeRange: '', location: '', scrapeTopN: 0, highlights: false },
+          qwenNativeSearchOptions: { searchStrategy: 'turbo', forcedSearch: false, enableSearchExtension: false, freshness: 0, assignedSiteList: [], promptIntervene: '' },
+        },
+      });
+      if (streamError) throw new Error(streamError);
+      const clean = generated.trim().replace(/^```(?:text|markdown)?\s*/i, '').replace(/\s*```$/, '').trim();
+      if (!clean) throw new Error('模型没有返回歌词');
+      setLyrics(clean);
+      setLyricsGenerationState('idle');
+    } catch (error) {
+      console.error('歌词生成失败', error);
+      setLyricsGenerationState('error');
+    }
+  };
+
+  const appendAssetToTimeline = (asset: { id: string; displayName: string; duration: number }, trackName?: string) => {
+    const numerator = Number(timeSignature.split('/')[0]) || 4;
+    const secondsPerBar = (60 / bpm) * numerator;
+    const clip: AudioClip = {
+        id: `c${Date.now()}`,
+        name: trackName || asset.displayName,
+        start: 0,
+        duration: asset.duration / secondsPerBar,
+        sourceDuration: asset.duration,
+        sourceOffset: 0,
+        assetId: asset.id,
+        waveform: buildWaveformValues(asset.id.length),
+    };
+    const audioTrack = tracks.find((track) => track.type === 'instrument');
+    const targetTrackId = audioTrack?.id || `t${Date.now()}`;
+    setTracks((previous) => {
+      const target = previous.find((track) => track.id === targetTrackId);
+      if (target) return previous.map((track) => track.id === target.id ? { ...track, clips: [...track.clips, clip] } : track);
+      return [...previous, {
+        id: targetTrackId,
+        name: '音频轨 1',
+        type: 'instrument',
+        muted: false,
+        solo: false,
+        volume: 0.7,
+        clips: [clip],
+      }];
+    });
+    setSelectedAccompanimentTrackId(targetTrackId);
+  };
+
+  const handleAssetUpload = async (file: File) => {
+    setUploadState('uploading');
+    try {
+      const asset = await uploadEditorAsset(file);
+      appendAssetToTimeline(asset);
+      setUploadState('idle');
+    } catch (error) {
+      console.error('上传音乐编辑素材失败', error);
+      setUploadState('error');
+    }
+  };
+
+  const handleBeatPreview = (beat: BeatPreset) => {
+    if (previewAudioRef.current && previewingBeatId === beat.id) {
+      previewAudioRef.current.pause();
+      previewAudioRef.current.currentTime = 0;
+      setPreviewingBeatId(null);
+      return;
+    }
+    previewAudioRef.current?.pause();
+    const audio = new Audio(beat.audioUrl);
+    previewAudioRef.current = audio;
+    audio.onended = () => setPreviewingBeatId(null);
+    void audio.play().then(() => setPreviewingBeatId(beat.id)).catch(() => setPreviewingBeatId(null));
+  };
+
+  const handleAddBeat = async (beat: BeatPreset) => {
+    if (beatLoadingId) return;
+    setBeatLoadingId(beat.id);
+    try {
+      let assetId = beatAssetIdsRef.current[beat.id];
+      let asset = assetId ? { id: assetId, displayName: beat.name, duration: beat.durationSeconds } : null;
+      if (!asset) {
+        const response = await fetch(beat.audioUrl);
+        if (!response.ok) throw new Error('Beats 音频读取失败');
+        const blob = await response.blob();
+        const uploaded = await uploadEditorAsset(new File([blob], beat.fileName, { type: 'audio/mpeg' }));
+        assetId = uploaded.id;
+        beatAssetIdsRef.current[beat.id] = assetId;
+        asset = uploaded;
+      }
+      appendAssetToTimeline(asset, beat.name);
+    } catch (error) {
+      console.error('添加 Beats 素材失败', error);
+      setUploadState('error');
+    } finally {
+      setBeatLoadingId(null);
+    }
+  };
+
+  const handleBeatDragStart = (event: React.DragEvent<HTMLElement>, beat: BeatPreset) => {
+    event.dataTransfer.effectAllowed = 'copy';
+    event.dataTransfer.setData('application/x-music-editor-beat', beat.id);
+  };
+
+  const handleTimelineDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    if (event.dataTransfer.types.includes('Files') || event.dataTransfer.types.includes('application/x-music-editor-beat')) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      setIsTimelineDragActive(true);
+    }
+  };
+
+  const handleTimelineDrop = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setIsTimelineDragActive(false);
+    const beatId = event.dataTransfer.getData('application/x-music-editor-beat');
+    const beat = BEAT_PRESETS.find((item) => item.id === beatId);
+    if (beat) {
+      void handleAddBeat(beat);
+      return;
+    }
+    const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith('audio/'));
+    if (file) void handleAssetUpload(file);
+  };
+
+  const handleTimelineFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) void handleAssetUpload(file);
+    event.currentTarget.value = '';
+  };
 
   // 打开上滑面板
   const openSlideUpPanel = (panel: 'vocalEffect' | 'key' | 'reverb', e: React.MouseEvent<HTMLButtonElement>) => {
@@ -282,6 +695,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
 
   // 时间轴右侧区域引用（不含左侧固定面板，用于计算播放头比例与点击定位）
   const timelineAreaRef = useRef<HTMLDivElement>(null);
+  const timelineScrollRef = useRef<HTMLDivElement>(null);
   // 播放头竖线 DOM 引用 - 拖动期间绕过 React 直接更新 style.left，避免每次 mousemove 触发整树重渲染造成的卡顿
   const playheadLineRef = useRef<HTMLDivElement>(null);
   const isDraggingPlayheadRef = useRef(false);
@@ -289,31 +703,354 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
   const pendingPlayheadRef = useRef<number | null>(null);
   // RAF 句柄 - 拖动期间 mousemove 用 requestAnimationFrame 节流到 60fps
   const playheadRafRef = useRef<number | null>(null);
+  const clipResizeRef = useRef<{
+    trackId: string;
+    clipId: string;
+    edge: ClipResizeEdge;
+    startClientX: number;
+    initialStartBars: number;
+    initialDurationBars: number;
+    sourceOffset?: number;
+    sourceDuration?: number;
+  } | null>(null);
+  const clipMoveRef = useRef<{
+    sourceTrackId: string;
+    clipId: string;
+    startClientX: number;
+    initialStartBars: number;
+    baseTracks: Track[];
+    moved: boolean;
+    historyStart: string | null;
+  } | null>(null);
+  const audioPlayersRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const currentTimeSecondsRef = useRef(0);
+  const playbackRafRef = useRef<number | null>(null);
+  const playbackStartedAtRef = useRef(0);
+  const playbackStartOffsetRef = useRef(0);
+  const timelineClips = tracks.flatMap((track) => track.clips);
+  const timelineLengthSeconds = timelineDurationSeconds(timelineClips, bpm, timeSignature, bars);
+  const timelineLengthRef = useRef(timelineLengthSeconds);
+  const timeSignatureNumerator = Number(timeSignature.split('/')[0]) || 4;
+  const secondsPerBar = (60 / Math.max(1, bpm || 120)) * timeSignatureNumerator;
 
-  const togglePlay = () => setIsPlaying((p) => !p);
+  const getOrCreateAudioPlayer = (clip: AudioClip) => {
+    if (!clip.assetId) return null;
+    const existing = audioPlayersRef.current.get(clip.id);
+    if (existing) return existing;
+    const player = new Audio(`/api/music/editor/assets/${encodeURIComponent(clip.assetId)}/stream`);
+    player.preload = 'auto';
+    audioPlayersRef.current.set(clip.id, player);
+    return player;
+  };
+
+  const getTimelineMetrics = () => {
+    const scroll = timelineScrollRef.current;
+    const area = timelineAreaRef.current;
+    if (!scroll || !area) return null;
+    const scrollRect = scroll.getBoundingClientRect();
+    const trackWidth = Math.max(area.clientWidth, scroll.scrollWidth - 208);
+    return { scroll, trackWidth, origin: scrollRect.left + 208 };
+  };
+
+  const getPlayheadRatioFromClientX = (clientX: number) => {
+    const metrics = getTimelineMetrics();
+    if (!metrics || metrics.trackWidth <= 0) return 0;
+    return Math.max(0, Math.min(1, (clientX - metrics.origin + metrics.scroll.scrollLeft) / metrics.trackWidth));
+  };
+
+  const ensurePlayheadVisible = (ratio: number) => {
+    const metrics = getTimelineMetrics();
+    if (!metrics) return;
+    const absoluteLeft = 208 + Math.max(0, Math.min(1, ratio)) * metrics.trackWidth;
+    const leftEdge = metrics.scroll.scrollLeft + 208;
+    const rightEdge = metrics.scroll.scrollLeft + metrics.scroll.clientWidth - 24;
+    const margin = 48;
+    if (absoluteLeft > rightEdge - margin) {
+      const targetScrollLeft = Math.min(metrics.scroll.scrollWidth - metrics.scroll.clientWidth, absoluteLeft - (metrics.scroll.clientWidth - 208) * 0.65);
+      const delta = targetScrollLeft - metrics.scroll.scrollLeft;
+      // 每次只前进一小段，避免到边缘时出现“整页翻动”的跳变。
+      metrics.scroll.scrollLeft += Math.sign(delta) * Math.min(Math.abs(delta), Math.max(3, Math.abs(delta) * 0.18));
+    } else if (absoluteLeft < leftEdge + margin) {
+      const targetScrollLeft = Math.max(0, absoluteLeft - 208 - margin);
+      const delta = targetScrollLeft - metrics.scroll.scrollLeft;
+      metrics.scroll.scrollLeft += Math.sign(delta) * Math.min(Math.abs(delta), Math.max(3, Math.abs(delta) * 0.18));
+    }
+  };
+
+  const positionPlayheadLine = (ratio: number) => {
+    const metrics = getTimelineMetrics();
+    if (metrics && playheadLineRef.current) {
+      playheadLineRef.current.style.left = `${208 + Math.max(0, Math.min(1, ratio)) * metrics.trackWidth}px`;
+    }
+    ensurePlayheadVisible(ratio);
+  };
+
+  useEffect(() => {
+    timelineLengthRef.current = timelineLengthSeconds;
+  }, [timelineLengthSeconds]);
+
+  useEffect(() => {
+    positionPlayheadLine(playhead);
+  }, [playhead, timelineLengthSeconds, tracks.length]);
+
+  useEffect(() => {
+    const handleResizeMove = (event: MouseEvent) => {
+      const active = clipResizeRef.current;
+      if (!active) return;
+      const metrics = getTimelineMetrics();
+      if (!metrics || metrics.trackWidth <= 0) return;
+      const deltaBars = ((event.clientX - active.startClientX) / metrics.trackWidth) * bars;
+      const result = resizeClip({
+        edge: active.edge,
+        startBars: active.initialStartBars,
+        durationBars: active.initialDurationBars,
+        deltaBars,
+        maxDurationBars: active.sourceDuration !== undefined ? active.sourceDuration / secondsPerBar : undefined,
+        sourceOffsetSeconds: active.sourceOffset,
+        sourceDurationSeconds: active.sourceDuration,
+        secondsPerBar,
+      });
+      setTracks((previous) => previous.map((track) => {
+        if (track.id !== active.trackId) return track;
+        return {
+          ...track,
+          clips: track.clips.map((clip) => clip.id === active.clipId
+            ? {
+                ...clip,
+                start: result.startBars,
+                duration: result.durationBars,
+                sourceOffset: result.sourceOffsetSeconds ?? clip.sourceOffset,
+              }
+            : clip),
+        };
+      }));
+    };
+
+    const handleResizeEnd = () => {
+      if (!clipResizeRef.current) return;
+      clipResizeRef.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    window.addEventListener('mousemove', handleResizeMove);
+    window.addEventListener('mouseup', handleResizeEnd);
+    return () => {
+      window.removeEventListener('mousemove', handleResizeMove);
+      window.removeEventListener('mouseup', handleResizeEnd);
+    };
+  }, [bars, secondsPerBar]);
+
+  useEffect(() => {
+    const handleClipMove = (event: MouseEvent) => {
+      const active = clipMoveRef.current;
+      if (!active) return;
+      const metrics = getTimelineMetrics();
+      if (!metrics || metrics.trackWidth <= 0) return;
+      const deltaBars = ((event.clientX - active.startClientX) / metrics.trackWidth) * bars;
+      const targetElement = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+      const targetTrackId = targetElement?.closest<HTMLElement>('[data-track-id]')?.dataset.trackId || active.sourceTrackId;
+      const nextStartBars = Math.max(0, active.initialStartBars + deltaBars);
+      if (Math.abs(deltaBars) < 0.01 && targetTrackId === active.sourceTrackId) return;
+      const movedTracks = moveClipWithInsertion(
+        active.baseTracks,
+        active.sourceTrackId,
+        active.clipId,
+        targetTrackId,
+        nextStartBars,
+        secondsPerBar,
+      );
+      if (!movedTracks) return;
+      active.moved = true;
+      setTracks(movedTracks);
+    };
+
+    const handleClipMoveEnd = () => {
+      const active = clipMoveRef.current;
+      if (!active) return;
+      const history = historyRef.current;
+      // 一次整段拖动只生成一个撤销点；拖动过程中的每帧状态更新不应污染撤销栈。
+      if (active.moved && active.historyStart && history.current !== active.historyStart) {
+        history.past.push(active.historyStart);
+        history.future = [];
+      }
+      clipMoveRef.current = null;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    window.addEventListener('mousemove', handleClipMove);
+    window.addEventListener('mouseup', handleClipMoveEnd);
+    return () => {
+      window.removeEventListener('mousemove', handleClipMove);
+      window.removeEventListener('mouseup', handleClipMoveEnd);
+    };
+  }, [bars, secondsPerBar]);
+
+  const updatePlayerVolumes = useCallback(() => {
+    const hasSolo = tracks.some((track) => track.solo);
+    tracks.forEach((track) => {
+      const enabled = !track.muted && (!hasSolo || track.solo);
+      track.clips.forEach((clip) => {
+        const player = audioPlayersRef.current.get(clip.id);
+        if (player) player.volume = enabled && !clip.muted ? Math.max(0, Math.min(1, track.volume * volume)) : 0;
+      });
+    });
+  }, [tracks, volume]);
+
+  const stopPlayback = useCallback((reset = false) => {
+    if (playbackRafRef.current !== null) {
+      cancelAnimationFrame(playbackRafRef.current);
+      playbackRafRef.current = null;
+    }
+    audioPlayersRef.current.forEach((player) => player.pause());
+    setIsPlaying(false);
+    if (reset) {
+      setPlayhead(0);
+      setCurrentTimeSeconds(0);
+      currentTimeSecondsRef.current = 0;
+    }
+  }, []);
+
+  const seekPlaybackToRatio = useCallback((ratio: number) => {
+    const targetSeconds = Math.max(0, Math.min(1, ratio)) * timelineLengthSeconds;
+    playbackStartOffsetRef.current = targetSeconds;
+    playbackStartedAtRef.current = performance.now();
+    currentTimeSecondsRef.current = targetSeconds;
+    setCurrentTimeSeconds(targetSeconds);
+    tracks.forEach((track) => track.clips.forEach((clip) => {
+      const player = getOrCreateAudioPlayer(clip);
+      if (!player) return;
+      const clipStart = clip.start * secondsPerBar;
+      const { timelineDuration: clipDuration, sourceStart, sourceEnd } = getClipPlaybackWindow(clip, secondsPerBar);
+      const offset = targetSeconds - clipStart;
+      try {
+        player.currentTime = Math.max(sourceStart, Math.min(sourceEnd, sourceStart + offset));
+      } catch {
+        // 浏览器在音频元数据尚未加载时可能暂时拒绝设置 currentTime。
+      }
+      if (offset < 0 || offset >= clipDuration) player.pause();
+      else if (isPlaying) void player.play().catch(() => undefined);
+    }));
+  }, [isPlaying, secondsPerBar, timelineLengthSeconds, tracks]);
+
+  const togglePlay = useCallback(async () => {
+    if (isPlaying) {
+      stopPlayback();
+      return;
+    }
+    const playableClips = tracks.flatMap((track) => track.clips.filter((clip) => clip.assetId).map((clip) => ({ track, clip })));
+    if (!playableClips.length) return;
+    const targetSeconds = playhead * timelineLengthSeconds;
+    const hasSolo = tracks.some((track) => track.solo);
+    const playersToStart: HTMLAudioElement[] = [];
+    playableClips.forEach(({ track, clip }) => {
+      const player = getOrCreateAudioPlayer(clip);
+      if (!player) return;
+      player.volume = (!track.muted && !clip.muted && (!hasSolo || track.solo)) ? Math.max(0, Math.min(1, track.volume * volume)) : 0;
+      const clipStart = clip.start * secondsPerBar;
+      const { timelineDuration: clipDuration, sourceStart, sourceEnd } = getClipPlaybackWindow(clip, secondsPerBar);
+      const offset = targetSeconds - clipStart;
+      try {
+        player.currentTime = Math.max(sourceStart, Math.min(sourceEnd, sourceStart + offset));
+      } catch {
+        // 浏览器在音频元数据尚未加载时可能暂时拒绝设置 currentTime。
+      }
+      if (offset >= 0 && offset < clipDuration) playersToStart.push(player);
+      else player.pause();
+    });
+    playbackStartOffsetRef.current = targetSeconds;
+    playbackStartedAtRef.current = performance.now();
+    currentTimeSecondsRef.current = targetSeconds;
+    setCurrentTimeSeconds(targetSeconds);
+    setIsPlaying(true);
+    await Promise.allSettled(playersToStart.map((player) => player.play()));
+    const tick = () => {
+      const elapsed = (performance.now() - playbackStartedAtRef.current) / 1000;
+      const current = playbackStartOffsetRef.current + elapsed;
+      const currentTimelineLength = Math.max(1, timelineLengthRef.current);
+      if (current >= currentTimelineLength) {
+        stopPlayback(true);
+        return;
+      }
+      currentTimeSecondsRef.current = current;
+      setCurrentTimeSeconds(current);
+      setPlayhead(current / currentTimelineLength);
+      positionPlayheadLine(current / currentTimelineLength);
+      playbackRafRef.current = requestAnimationFrame(tick);
+    };
+    playbackRafRef.current = requestAnimationFrame(tick);
+  }, [isPlaying, playhead, secondsPerBar, stopPlayback, timelineLengthSeconds, tracks, volume]);
+
+  useEffect(() => {
+    updatePlayerVolumes();
+  }, [updatePlayerVolumes]);
+
+  useEffect(() => {
+    currentTimeSecondsRef.current = currentTimeSeconds;
+  }, [currentTimeSeconds]);
+
+  // 拖动片段时，正在播放的播放器要立即按照新的时间线位置重新对齐。
+  useEffect(() => {
+    if (!isPlaying) return;
+    const current = currentTimeSecondsRef.current;
+    const activeClipIds = new Set(
+      tracks.flatMap((track) => track.clips).filter((clip) => clip.assetId).map((clip) => clip.id),
+    );
+    audioPlayersRef.current.forEach((player, clipId) => {
+      if (activeClipIds.has(clipId)) return;
+      player.pause();
+      player.src = '';
+      audioPlayersRef.current.delete(clipId);
+    });
+    const hasSolo = tracks.some((track) => track.solo);
+    tracks.forEach((track) => track.clips.forEach((clip) => {
+      const player = getOrCreateAudioPlayer(clip);
+      if (!player) return;
+      const enabled = !track.muted && !clip.muted && (!hasSolo || track.solo);
+      player.volume = enabled ? Math.max(0, Math.min(1, track.volume * volume)) : 0;
+      const clipStart = clip.start * secondsPerBar;
+      const { timelineDuration: clipDuration, sourceStart, sourceEnd } = getClipPlaybackWindow(clip, secondsPerBar);
+      const offset = current - clipStart;
+      if (offset < 0 || offset >= clipDuration) {
+        player.pause();
+        return;
+      }
+      try {
+        player.currentTime = Math.max(sourceStart, Math.min(sourceEnd, sourceStart + offset));
+      } catch {
+        // 浏览器在音频元数据尚未加载时可能拒绝设置 currentTime，下一帧会重试。
+      }
+      if (player.paused) void player.play().catch(() => undefined);
+    }));
+  }, [isPlaying, secondsPerBar, tracks, volume]);
+
+  useEffect(() => () => {
+    stopPlayback();
+    audioPlayersRef.current.forEach((player) => player.src = '');
+    audioPlayersRef.current.clear();
+  }, [stopPlayback]);
   const toggleRecord = () => setIsRecording((r) => !r);
 
   // 点击时间轴空白处定位播放头 - 立即提交到 state
   const setPlayheadFromEvent = useCallback((clientX: number) => {
     const el = timelineAreaRef.current;
     if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const ratio = getPlayheadRatioFromClientX(clientX);
     setPlayhead(ratio);
-  }, []);
+    seekPlaybackToRatio(ratio);
+    positionPlayheadLine(ratio);
+  }, [seekPlaybackToRatio]);
 
   // 播放头拖动逻辑 - 关键：mousemove 期间只操作 ref.current.style.left，不触发任何 setState
   useEffect(() => {
     const flushPlayhead = (clientX: number) => {
       const el = timelineAreaRef.current;
       if (!el) return;
-      const rect = el.getBoundingClientRect();
-      const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      const ratio = getPlayheadRatioFromClientX(clientX);
       pendingPlayheadRef.current = ratio;
       // 直接写入 DOM 样式，跳过 React reconciler
-      if (playheadLineRef.current) {
-        playheadLineRef.current.style.left = `calc(8rem + ${ratio} * (100% - 8rem))`;
-      }
+      positionPlayheadLine(ratio);
     };
 
     const onMove = (e: MouseEvent) => {
@@ -334,7 +1071,9 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       }
       // 仅在 mouseup 提交最终位置到 state（用于触发后续依赖 playhead 的逻辑/渲染）
       if (isDraggingPlayheadRef.current && pendingPlayheadRef.current !== null) {
-        setPlayhead(pendingPlayheadRef.current);
+        const finalRatio = pendingPlayheadRef.current;
+        setPlayhead(finalRatio);
+        seekPlaybackToRatio(finalRatio);
         pendingPlayheadRef.current = null;
       }
       isDraggingPlayheadRef.current = false;
@@ -351,7 +1090,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
         playheadRafRef.current = null;
       }
     };
-  }, []);
+  }, [seekPlaybackToRatio]);
 
   const handlePlayheadMouseDown = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -362,14 +1101,233 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
     // 起拖时立即定位一次（写入 ref+state），避免拖动起点错位
     setPlayheadFromEvent(e.clientX);
     if (timelineAreaRef.current) {
-      const rect = timelineAreaRef.current.getBoundingClientRect();
-      const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      const ratio = getPlayheadRatioFromClientX(e.clientX);
       pendingPlayheadRef.current = ratio;
-      if (playheadLineRef.current) {
-        playheadLineRef.current.style.left = `calc(8rem + ${ratio} * (100% - 8rem))`;
-      }
+      positionPlayheadLine(ratio);
     }
   };
+
+  const handleClipResizeMouseDown = (e: React.MouseEvent, trackId: string, clip: AudioClip, edge: ClipResizeEdge) => {
+    e.stopPropagation();
+    e.preventDefault();
+    clipMoveRef.current = null;
+    clipResizeRef.current = {
+      trackId,
+      clipId: clip.id,
+      edge,
+      startClientX: e.clientX,
+      initialStartBars: clip.start,
+      initialDurationBars: clip.duration,
+      sourceOffset: clip.sourceOffset,
+      sourceDuration: clip.sourceDuration,
+    };
+    setSelectedClipId(clip.id);
+    document.body.style.cursor = 'ew-resize';
+    document.body.style.userSelect = 'none';
+  };
+
+  const handleClipMoveMouseDown = (e: React.MouseEvent, trackId: string, clip: AudioClip) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    e.preventDefault();
+    clipResizeRef.current = null;
+    clipMoveRef.current = {
+      sourceTrackId: trackId,
+      clipId: clip.id,
+      startClientX: e.clientX,
+      initialStartBars: clip.start,
+      baseTracks: tracks.map((track) => ({
+        ...track,
+        clips: track.clips.map((item) => ({ ...item, waveform: item.waveform ? [...item.waveform] : undefined })),
+      })),
+      moved: false,
+      historyStart: historyRef.current.current,
+    };
+    setSelectedClipId(clip.id);
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+  };
+
+  const createClipId = (base: string) => {
+    const entropy = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+    return `${base}-copy-${entropy}`;
+  };
+
+  const findClipLocation = (clipId: string | null = selectedClipId) => {
+    if (!clipId) return null;
+    for (const track of tracks) {
+      const clip = track.clips.find((item) => item.id === clipId);
+      if (clip) return { track, clip };
+    }
+    return null;
+  };
+
+  const closeClipContextMenu = () => setClipContextMenu(null);
+
+  const handleClipContextMenu = (event: React.MouseEvent, trackId: string, clip: AudioClip) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setOpenMenuTrackId(null);
+    setMenuPos(null);
+    const menuWidth = 232;
+    const menuHeight = 220;
+    setClipContextMenu({
+      trackId,
+      clipId: clip.id,
+      left: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
+      top: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+    });
+    setSelectedClipId(clip.id);
+  };
+
+  const handleClipCopy = (trackId: string, clip: AudioClip) => {
+    clipClipboardRef.current = {
+      trackId,
+      clip: { ...clip, waveform: clip.waveform ? [...clip.waveform] : undefined },
+    };
+    setSelectedClipId(clip.id);
+    closeClipContextMenu();
+    setClipNotice('片段已复制，可使用 Ctrl/Cmd + V 粘贴');
+  };
+
+  const handleClipPaste = (targetTrackId?: string) => {
+    const clipboard = clipClipboardRef.current;
+    if (!clipboard) {
+      setClipNotice('剪贴板中没有音频片段');
+      return;
+    }
+    const targetTrack = (targetTrackId && tracks.find((track) => track.id === targetTrackId))
+      || tracks.find((track) => track.id === clipboard.trackId)
+      || tracks[0];
+    if (!targetTrack) {
+      setClipNotice('请先添加一条音轨');
+      return;
+    }
+    const startBars = Math.max(0, (playhead * timelineLengthSeconds) / secondsPerBar);
+    const pastedClip: AudioClip = {
+      ...clipboard.clip,
+      id: createClipId(clipboard.clip.id),
+      start: startBars,
+      waveform: clipboard.clip.waveform ? [...clipboard.clip.waveform] : undefined,
+    };
+    setTracks((previous) => previous.map((track) => (
+      track.id === targetTrack.id ? { ...track, clips: [...track.clips, pastedClip] } : track
+    )));
+    setSelectedClipId(pastedClip.id);
+    closeClipContextMenu();
+    setClipNotice(`已粘贴到「${targetTrack.name}」`);
+  };
+
+  const handleClipDelete = (trackId: string, clipId: string) => {
+    const player = audioPlayersRef.current.get(clipId);
+    if (player) {
+      player.pause();
+      player.src = '';
+      audioPlayersRef.current.delete(clipId);
+    }
+    setTracks((previous) => previous.map((track) => (
+      track.id === trackId ? { ...track, clips: track.clips.filter((clip) => clip.id !== clipId) } : track
+    )));
+    if (selectedClipId === clipId) {
+      setSelectedClipId(null);
+      setActiveBottomPanel(null);
+    }
+    closeClipContextMenu();
+    setClipNotice('片段已删除');
+  };
+
+  const handleClipSplit = (trackId: string, clip: AudioClip) => {
+    const splitBars = (playhead * timelineLengthSeconds) / secondsPerBar;
+    const pieces = splitClipAtPosition(clip, splitBars, secondsPerBar, `${clip.id}:left`, `${clip.id}:right`);
+    if (pieces.length < 2) {
+      setClipNotice('请把播放头放在片段中间再裁剪');
+      return;
+    }
+    setTracks((previous) => previous.map((track) => (
+      track.id === trackId
+        ? { ...track, clips: track.clips.flatMap((item) => item.id === clip.id ? pieces : [item]) }
+        : track
+    )));
+    setSelectedClipId(pieces[0].id);
+    closeClipContextMenu();
+    setClipNotice('片段已在播放头处分割');
+  };
+
+  const handleClipMute = (trackId: string, clipId: string) => {
+    const current = tracks.find((track) => track.id === trackId)?.clips.find((clip) => clip.id === clipId);
+    if (!current) return;
+    const muted = !current.muted;
+    setTracks((previous) => previous.map((track) => track.id === trackId
+      ? {
+          ...track,
+          clips: track.clips.map((clip) => {
+            if (clip.id !== clipId) return clip;
+            return { ...clip, muted };
+          }),
+        }
+      : track));
+    closeClipContextMenu();
+    setClipNotice(muted ? '片段已静音' : '片段已取消静音');
+  };
+
+  useEffect(() => {
+    if (!clipContextMenu) return;
+    const onDocDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('[data-clip-menu]')) return;
+      closeClipContextMenu();
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeClipContextMenu();
+    };
+    document.addEventListener('mousedown', onDocDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onDocDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [clipContextMenu]);
+
+  useEffect(() => {
+    if (!clipNotice) return;
+    const timer = window.setTimeout(() => setClipNotice(null), 1800);
+    return () => window.clearTimeout(timer);
+  }, [clipNotice]);
+
+  useEffect(() => {
+    const isEditableTarget = (target: EventTarget | null) => {
+      const element = target as HTMLElement | null;
+      return element?.tagName === 'INPUT'
+        || element?.tagName === 'TEXTAREA'
+        || element?.tagName === 'SELECT'
+        || Boolean(element?.isContentEditable);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (isEditableTarget(event.target)) return;
+      const commandKey = event.metaKey || event.ctrlKey;
+      const location = findClipLocation();
+      if (commandKey && event.key.toLowerCase() === 'c' && location) {
+        event.preventDefault();
+        handleClipCopy(location.track.id, location.clip);
+      } else if (commandKey && event.key.toLowerCase() === 'v') {
+        event.preventDefault();
+        handleClipPaste();
+      } else if ((event.key === 'Delete' || event.key === 'Backspace') && location) {
+        event.preventDefault();
+        handleClipDelete(location.track.id, location.clip.id);
+      } else if (!commandKey && event.key.toLowerCase() === 's' && location) {
+        event.preventDefault();
+        handleClipSplit(location.track.id, location.clip);
+      } else if (commandKey && event.key.toLowerCase() === 'm' && location) {
+        event.preventDefault();
+        handleClipMute(location.track.id, location.clip.id);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [selectedClipId, tracks, playhead, timelineLengthSeconds, secondsPerBar]);
 
   const handleTimelineClick = (e: React.MouseEvent) => {
     // 点击时间刻度空白处也可定位播放头
@@ -481,40 +1439,98 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
     return () => document.removeEventListener('mousedown', onDocDown);
   }, [openMenuTrackId]);
 
-  const handleGenerate = () => {
+  const handleGenerate = async () => {
     if (!creationPrompt.trim() && !lyrics.trim()) return;
-    // 若没有任何轨道，自动添加一个人声轨再生成
-    if (tracks.length === 0) {
-      const newTrack: Track = {
-        id: `t${Date.now()}`,
-        name: '人声轨 1',
-        type: 'vocal',
-        muted: false,
-        solo: false,
-        volume: 0.7,
-        clips: [],
-      };
-      const newClip: AudioClip = {
-        id: `c${Date.now()}`,
-        name: 'AI 生成片段',
-        start: 0,
-        duration: 4,
-        waveform: generateWaveform(Math.random() * 10),
-      };
-      setTracks([{ ...newTrack, clips: [newClip] }]);
+    const sourceAssetId = selectGenerationAssetId(
+      tracks,
+      melodyMode === 'vocal' ? 'vocal' : 'instrumental',
+      selectedVocalTrackId,
+      selectedAccompanimentTrackId,
+    );
+    if (!sourceAssetId) {
+      setGenerationState('error');
       return;
     }
-    const newClip: AudioClip = {
-      id: `c${Date.now()}`,
-      name: 'AI 生成片段',
-      start: 0,
-      duration: 4,
-      waveform: generateWaveform(Math.random() * 10),
-    };
-    setTracks((prev) =>
-      prev.map((t, i) => (i === 0 ? { ...t, clips: [...t.clips, newClip] } : t)),
-    );
+    setProcessingAssetId(sourceAssetId);
+    setGenerationState('submitting');
+    try {
+      const saved = await persistProject();
+      const common = {
+        inputAssetId: sourceAssetId,
+        clientRequestId: crypto.randomUUID(),
+        model: 'V5',
+      };
+      const body = melodyMode === 'vocal'
+        ? {
+            ...common,
+            type: 'add_vocals',
+            prompt: lyrics.trim() || creationPrompt.trim(),
+            title: 'AI 人声版本',
+            style: selectedStyle,
+            negativeTags: 'metal, noise',
+            vocalGender: voiceGender === 'female' ? 'f' : 'm',
+          }
+        : {
+            ...common,
+            type: 'add_instrumental',
+            title: 'AI 伴奏版本',
+            tags: `${selectedStyle}, ${creationPrompt.trim()}`,
+            negativeTags: 'spoken word, noise',
+          };
+      let operation = await createEditorOperation(saved.id, body);
+      setGenerationState('processing');
+      for (let attempt = 0; attempt < 200 && !['SUCCESS', 'FAILED', 'TIMED_OUT'].includes(operation.status); attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 3000));
+        operation = await getEditorOperation(operation.id);
+      }
+      if (operation.status !== 'SUCCESS' || !operation.results[0]) throw new Error(operation.error?.message || '生成失败');
+      let imported: Awaited<ReturnType<typeof importEditorOperationResult>> | null = null;
+      for (let attempt = 0; attempt < 10 && !imported; attempt += 1) {
+        try {
+          imported = await importEditorOperationResult(operation.id, operation.results[0].id);
+        } catch {
+          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        }
+      }
+      if (!imported) throw new Error('生成结果本地化超时');
+      const numerator = Number(timeSignature.split('/')[0]) || 4;
+      const secondsPerBar = (60 / bpm) * numerator;
+      const clip: AudioClip = {
+        id: `c${Date.now()}`,
+        name: imported.displayName,
+        start: 0,
+        duration: imported.duration / secondsPerBar,
+        sourceDuration: imported.duration,
+        sourceOffset: 0,
+        assetId: imported.id,
+        waveform: buildWaveformValues(imported.id.length),
+      };
+      const targetType: Track['type'] = melodyMode === 'vocal' ? 'vocal' : 'instrument';
+      setTracks((previous) => {
+        const target = previous.find((track) => track.type === targetType);
+        if (target) return previous.map((track) => track.id === target.id ? { ...track, clips: [...track.clips, clip] } : track);
+        return [...previous, { id: `t${Date.now()}`, name: melodyMode === 'vocal' ? 'AI 人声轨' : 'AI 伴奏轨', type: targetType, muted: false, solo: false, volume: 0.7, clips: [clip] }];
+      });
+      setGenerationState('idle');
+      setProcessingAssetId(null);
+    } catch (error) {
+      console.error('音乐编辑生成失败', error);
+      setGenerationState('error');
+      setProcessingAssetId(null);
+    }
   };
+
+  const contextMenuClip = clipContextMenu
+    ? tracks.find((track) => track.id === clipContextMenu.trackId)?.clips.find((clip) => clip.id === clipContextMenu.clipId)
+    : undefined;
+  const contextMenuPlayheadBars = timelineLengthSeconds > 0
+    ? (playhead * timelineLengthSeconds) / secondsPerBar
+    : 0;
+  const canSplitContextClip = Boolean(
+    contextMenuClip
+      && contextMenuPlayheadBars > contextMenuClip.start
+      && contextMenuPlayheadBars < contextMenuClip.start + contextMenuClip.duration,
+  );
 
   return (
     <div className="flex h-full flex-col gap-3 p-3">
@@ -524,7 +1540,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => setIsPlaying(false)}
+            onClick={() => stopPlayback(true)}
             className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"
             title="回到开头"
           >
@@ -550,7 +1566,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
           </button>
           <div className="ml-2 flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 font-mono text-xs text-slate-700 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200">
             <Timer size={12} className="text-slate-400" />
-            <span>00:00.0</span>
+            <span>{formatTransportTime(currentTimeSeconds)}</span>
           </div>
         </div>
 
@@ -562,7 +1578,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
             <input
               type="number"
               value={bpm}
-              onChange={(e) => setBpm(Number(e.target.value) || 60)}
+              onChange={(e) => setBpm(Math.max(40, Math.min(240, Number(e.target.value) || 60)))}
               min={40}
               max={240}
               className="w-10 border-none bg-transparent text-sm font-semibold text-slate-900 outline-none dark:text-white"
@@ -594,10 +1610,10 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
             />
           </div>
           <div className="flex items-center gap-1">
-            <button type="button" className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200" title="撤销">
+            <button type="button" onClick={handleUndo} disabled={historyRef.current.past.length === 0} className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-30 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200" title="撤销">
               <Undo2 size={14} />
             </button>
-            <button type="button" className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200" title="重做">
+            <button type="button" onClick={handleRedo} disabled={historyRef.current.future.length === 0} className="flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-30 dark:text-neutral-400 dark:hover:bg-neutral-800 dark:hover:text-neutral-200" title="重做">
               <Redo2 size={14} />
             </button>
           </div>
@@ -607,10 +1623,12 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={handleSave}
+            disabled={saveState === 'saving'}
             className="flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-700"
           >
             <Save size={13} />
-            <span>保存</span>
+            <span>{saveState === 'saving' ? '保存中…' : saveState === 'saved' ? '已保存' : saveState === 'error' ? '重试保存' : '保存'}</span>
           </button>
           <button
             type="button"
@@ -687,14 +1705,18 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
 
                 {/* 主伴奏音轨 */}
                 <div className="mb-4">
-                  <label className="mb-2 block text-xs font-medium text-slate-700 dark:text-neutral-200">主伴奏音轨</label>
-                  <button
-                    type="button"
-                    className="flex w-full items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 transition hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-700"
+                  <label className="mb-1 block text-xs font-medium text-slate-700 dark:text-neutral-200">主伴奏音轨（可选）</label>
+                  <p className="mb-2 text-[10px] text-slate-400 dark:text-neutral-500">先选择要配人声的伴奏；没有伴奏时保持空着</p>
+                  <select
+                    value={selectedAccompanimentTrackId}
+                    onChange={(event) => setSelectedAccompanimentTrackId(event.target.value)}
+                    className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 outline-none focus:border-sky-400 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200"
                   >
-                    <span>选择音轨</span>
-                    <ChevronDown size={14} className="text-slate-400" />
-                  </button>
+                    <option value="">无伴奏音轨</option>
+                    {tracks.filter((track) => track.type !== 'vocal' && editorTrackHasAudio(track)).map((track) => (
+                      <option key={track.id} value={track.id}>{track.name}</option>
+                    ))}
+                  </select>
                 </div>
 
                 {/* 歌词 */}
@@ -733,10 +1755,12 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                     />
                     <button
                       type="button"
+                      onClick={() => void handleGenerateLyrics()}
+                      disabled={!lyrics.trim() || lyricsGenerationState === 'generating'}
                       className="absolute bottom-2 right-2 flex items-center gap-1 rounded-md bg-slate-200 px-2 py-1 text-[10px] text-slate-600 transition hover:bg-slate-300 dark:bg-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-600"
                     >
                       <Sparkles size={10} />
-                      生成歌词
+                      {lyricsGenerationState === 'generating' ? '润色中…' : lyricsGenerationState === 'error' ? '重试生成' : '生成歌词'}
                     </button>
                   </div>
                 </div>
@@ -814,13 +1838,31 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                 <div className="mb-4">
                   <label className="mb-1 block text-xs font-medium text-slate-700 dark:text-neutral-200">主唱音轨</label>
                   <p className="mb-2 text-[10px] text-slate-400 dark:text-neutral-500">需避免同一时间有多个人声演唱</p>
-                  <button
-                    type="button"
-                    className="flex w-full items-center justify-between rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 transition hover:bg-slate-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200 dark:hover:bg-neutral-700"
+                  <select
+                    value={selectedVocalTrackId}
+                    onChange={(event) => setSelectedVocalTrackId(event.target.value)}
+                    className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 outline-none focus:border-sky-400 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200"
                   >
-                    <span>选择音轨</span>
-                    <ChevronDown size={14} className="text-slate-400" />
-                  </button>
+                    <option value="">无人声音轨</option>
+                    {tracks.filter((track) => track.type === 'vocal' && editorTrackHasAudio(track)).map((track) => (
+                      <option key={track.id} value={track.id}>{track.name}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="mb-4">
+                  <label className="mb-1 block text-xs font-medium text-slate-700 dark:text-neutral-200">添加的伴奏音轨（可选）</label>
+                  <p className="mb-2 text-[10px] text-slate-400 dark:text-neutral-500">没有伴奏时保持“无伴奏音轨”即可</p>
+                  <select
+                    value={selectedAccompanimentTrackId}
+                    onChange={(event) => setSelectedAccompanimentTrackId(event.target.value)}
+                    className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 outline-none focus:border-sky-400 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-200"
+                  >
+                    <option value="">无伴奏音轨</option>
+                    {tracks.filter((track) => track.type !== 'vocal' && editorTrackHasAudio(track)).map((track) => (
+                      <option key={track.id} value={track.id}>{track.name}</option>
+                    ))}
+                  </select>
                 </div>
 
                 {/* AI歌手 */}
@@ -855,35 +1897,29 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
 
                   {/* 歌手列表 */}
                   <div className="grid grid-cols-3 gap-3">
-                    {[
-                      { name: '叶雪如', type: '女高音 流行', tags: '温柔 磁性', gender: 'female' },
-                      { name: '哈森', type: '男高音 流行', tags: '明亮 磁性', gender: 'male' },
-                      { name: 'Aimi芷', type: '女低音 流行', tags: '沙哑 醇厚 成熟', gender: 'female' },
-                      { name: '陈笑之', type: '男高音 流行', tags: '温柔 慵懒', gender: 'male' },
-                      { name: '太二', type: '男中音 R&B', tags: '二次元 醇厚 空灵 慵懒', gender: 'male' },
-                      { name: 'Feeling储艺洁', type: '女高音 流行', tags: '明亮 空灵', gender: 'female' },
-                      { name: '航仔', type: '男高音 流行', tags: '温柔 沙哑', gender: 'male' },
-                      { name: '莎莎', type: '女中音 流行', tags: '性感 慵懒', gender: 'female' },
-                      { name: '乐潮', type: '男高音 流行', tags: '旋律说唱 细腻 纯净', gender: 'male' },
-                    ]
+                    {singerPresets
                       .filter((s) => singerFilter === 'all' || s.gender === singerFilter)
                       .map((singer) => (
                         <button
-                          key={singer.name}
+                          key={singer.id}
                           type="button"
-                          className="flex flex-col items-center gap-1.5 rounded-lg p-2 transition hover:bg-slate-50 dark:hover:bg-neutral-800"
+                          onClick={() => {
+                            setSelectedSingerId(singer.id);
+                            setSelectedStyle(`${singer.voiceType}, ${singer.tags}`);
+                            void new Audio(singer.referenceAudioUrl).play();
+                          }}
+                          title={`${singer.name}（风格预设，点击试听）`}
+                          className={`flex flex-col items-center gap-1.5 rounded-lg border p-2 transition ${selectedSingerId === singer.id ? 'border-sky-500 bg-sky-50 dark:border-sky-400 dark:bg-sky-500/10' : 'border-transparent hover:bg-slate-50 dark:hover:bg-neutral-800'}`}
                         >
                           <div className="relative h-14 w-14 overflow-hidden rounded-full bg-slate-200 dark:bg-neutral-700">
-                            <div className="absolute inset-0 flex items-center justify-center text-slate-400">
-                              <Mic size={20} />
-                            </div>
+                            <Image src={singer.avatarUrl} alt="" fill sizes="56px" className="object-cover" />
                             <div className="absolute bottom-0 right-0 flex h-5 w-5 items-center justify-center rounded-full bg-white shadow dark:bg-neutral-800">
                               <Play size={8} className="ml-0.5 text-slate-600 dark:text-neutral-300" />
                             </div>
                           </div>
                           <div className="text-center">
                             <div className="text-xs font-medium text-slate-800 dark:text-neutral-200">{singer.name}</div>
-                            <div className="text-[10px] text-slate-500 dark:text-neutral-400">{singer.type}</div>
+                            <div className="text-[10px] text-slate-500 dark:text-neutral-400">{singer.voiceType}</div>
                             <div className="text-[10px] text-slate-400 dark:text-neutral-500">{singer.tags}</div>
                           </div>
                         </button>
@@ -980,12 +2016,82 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                   ))}
                 </div>
 
-                {/* 上传区域 */}
-                <div className="rounded-lg border-2 border-dashed border-slate-200 bg-slate-50 p-6 text-center dark:border-neutral-700 dark:bg-neutral-800/50">
-                  <Plus size={24} className="mx-auto mb-2 text-slate-400" />
-                  <div className="text-xs font-medium text-slate-700 dark:text-neutral-200">上传音频文件</div>
-                  <div className="mt-1 text-[10px] text-slate-400 dark:text-neutral-500">支持wav/mp3，不超过100MB，不超过10分钟</div>
-                </div>
+                {materialSource === 'local' && (
+                  <label className="block cursor-pointer rounded-lg border-2 border-dashed border-slate-200 bg-slate-50 p-6 text-center transition hover:border-sky-300 dark:border-neutral-700 dark:bg-neutral-800/50 dark:hover:border-sky-700">
+                    <input
+                      type="file"
+                      accept="audio/mpeg,audio/wav,audio/mp4,audio/flac,audio/ogg"
+                      className="sr-only"
+                      disabled={uploadState === 'uploading'}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (file) void handleAssetUpload(file);
+                        event.currentTarget.value = '';
+                      }}
+                    />
+                    <Plus size={24} className="mx-auto mb-2 text-slate-400" />
+                    <div className="text-xs font-medium text-slate-700 dark:text-neutral-200">
+                      {uploadState === 'uploading' ? '上传并分析中…' : uploadState === 'error' ? '上传失败，点击重试' : '上传音频文件'}
+                    </div>
+                    <div className="mt-1 text-[10px] text-slate-400 dark:text-neutral-500">支持wav/mp3，不超过100MB，不超过10分钟</div>
+                  </label>
+                )}
+
+                {materialSource === 'beats' && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-[10px] text-slate-400 dark:text-neutral-500">
+                      <span>20 首纯伴奏素材</span>
+                      <span>点击试听 · 拖入时间线</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {BEAT_PRESETS.map((beat) => (
+                        <div
+                          key={beat.id}
+                          draggable
+                          onDragStart={(event) => handleBeatDragStart(event, beat)}
+                          className="group overflow-hidden rounded-lg border border-slate-200 bg-white transition hover:border-sky-300 hover:shadow-sm dark:border-neutral-700 dark:bg-neutral-800/70 dark:hover:border-sky-700"
+                        >
+                          <div className="relative aspect-[2.8/1] overflow-hidden bg-slate-100 dark:bg-neutral-700">
+                            <Image src={beat.coverUrl} alt="" fill sizes="160px" className="object-cover transition group-hover:scale-105" />
+                            <button
+                              type="button"
+                              onClick={() => handleBeatPreview(beat)}
+                              className="absolute inset-0 flex items-center justify-center bg-black/0 text-white transition group-hover:bg-black/20"
+                              aria-label={`${previewingBeatId === beat.id ? '停止试听' : '试听'} ${beat.name}`}
+                            >
+                              <span className="flex h-7 w-7 items-center justify-center rounded-full bg-black/55 shadow">
+                                {previewingBeatId === beat.id ? <Square size={11} fill="currentColor" /> : <Play size={11} fill="currentColor" />}
+                              </span>
+                            </button>
+                          </div>
+                          <div className="p-2">
+                            <div className="truncate text-[11px] font-medium text-slate-800 dark:text-neutral-100" title={beat.name}>{beat.name}</div>
+                            <div className="mt-1 flex items-center gap-1 text-[9px] text-slate-400 dark:text-neutral-500">
+                              <span className="truncate">{beat.style}</span><span>·</span><span>{beat.bpm}</span><span>·</span><span>{beat.key}</span>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void handleAddBeat(beat)}
+                              disabled={beatLoadingId !== null}
+                              className="mt-2 flex w-full items-center justify-center gap-1 rounded-md bg-slate-100 py-1 text-[10px] text-slate-600 transition hover:bg-sky-100 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-neutral-700 dark:text-neutral-300 dark:hover:bg-sky-500/15 dark:hover:text-sky-300"
+                            >
+                              <Plus size={10} />
+                              {beatLoadingId === beat.id ? '添加中…' : '添加到时间线'}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {materialSource === 'sample' && (
+                  <div className="flex min-h-[280px] flex-col items-center justify-center text-center text-slate-400 dark:text-neutral-500">
+                    <Music2 size={30} className="mb-3 opacity-60" />
+                    <p className="text-xs">Sample 素材即将开放</p>
+                    <p className="mt-1 text-[10px]">当前版本先支持本地音频和 Beats 纯伴奏</p>
+                  </div>
+                )}
               </>
             )}
 
@@ -1004,11 +2110,12 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
           <div className="border-t border-slate-200 p-3 dark:border-neutral-800">
             <button
               type="button"
-              onClick={handleGenerate}
+              onClick={() => void handleGenerate()}
+              disabled={generationState === 'submitting' || generationState === 'processing'}
               className="flex w-full items-center justify-center gap-2 rounded-md bg-sky-500 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-sky-600"
             >
               <Sparkles size={14} />
-              <span>生成详情</span>
+              <span>{generationState === 'submitting' ? '正在提交…' : generationState === 'processing' ? '生成处理中…' : generationState === 'error' ? '生成失败，检查素材后重试' : '生成详情'}</span>
             </button>
           </div>
         </div>
@@ -1037,8 +2144,12 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
 
           {/* 内容区：时间刻度 + 轨道列表 + 拖拽占位 - 同一容器内承载全高播放头竖线 */}
           <div
-            className="relative flex-1 overflow-y-auto scrollbar-thin"
+            ref={timelineScrollRef}
+            className="relative flex-1 overflow-auto bg-slate-50 scrollbar-thin dark:bg-neutral-950"
             onClick={handleTimelineClick}
+            onDragOver={handleTimelineDragOver}
+            onDragLeave={() => setIsTimelineDragActive(false)}
+            onDrop={handleTimelineDrop}
           >
             {/* 全高播放头竖线 - 跨越时间刻度、轨道列表、占位区
                 关键设计：整条不可见的 16px 命中区 = 拖动手柄（覆盖整条高度，任意位置可抓）
@@ -1047,7 +2158,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
             <div
               ref={playheadLineRef}
               className="pointer-events-none absolute top-0 z-30 h-full"
-              style={{ left: `calc(8rem + ${playhead} * (100% - 8rem))` }}
+              style={{ left: `calc(13rem + ${playhead} * (100% - 13rem))` }}
             >
               {/* 全高抓取命中区：16px 宽 × 100% 高，居中于位置点；在竖线任何高度点击/拖动都生效 */}
               <div
@@ -1065,7 +2176,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
             </div>
 
             {/* 时间刻度条 - 左侧固定面板放「+ 添加音轨」按钮 + 弹窗，右侧为时间轴 */}
-            <div className="sticky top-0 z-10 flex border-b border-slate-200 bg-slate-50 dark:border-neutral-800 dark:bg-neutral-800/50">
+            <div className="sticky top-0 z-10 flex border-b border-slate-200 bg-white dark:border-neutral-800 dark:bg-neutral-900">
               {/* 左侧固定面板：添加音轨按钮 + 选择类型弹窗 */}
               <div className="relative flex w-52 shrink-0 items-center justify-start border-r border-slate-200 px-3 py-2 dark:border-neutral-800">
                 <button
@@ -1074,7 +2185,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                     e.stopPropagation();
                     setShowTrackTypeModal((v) => !v);
                   }}
-                  className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-slate-600 transition hover:bg-slate-200 hover:text-slate-900 dark:text-neutral-300 dark:hover:bg-neutral-700 dark:hover:text-white"
+                  className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 dark:text-neutral-300 dark:hover:bg-neutral-800 dark:hover:text-white"
                   title="添加音轨"
                 >
                   <Plus size={14} />
@@ -1084,7 +2195,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                 {/* 弹窗 - 锚定在「添加音轨」按钮正下方，覆盖到时间刻度区域，宽度 w-80 */}
                 {showTrackTypeModal && (
                   <div
-                    className="absolute top-full left-0 z-50 mt-1 w-80 rounded-xl border border-slate-200 bg-white p-3 shadow-2xl dark:border-neutral-700 dark:bg-neutral-800"
+                    className="absolute top-full left-0 z-50 mt-1 w-80 rounded-xl border border-slate-200 bg-white p-3 shadow-xl dark:border-neutral-700 dark:bg-neutral-900"
                     onClick={(e) => e.stopPropagation()}
                   >
                     <div className="mb-2 flex items-center justify-between">
@@ -1105,13 +2216,13 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                             key={opt.type}
                             type="button"
                             onClick={() => handleAddTrack(opt.type)}
-                            className="flex w-full items-start gap-3 rounded-lg p-2.5 text-left transition hover:bg-slate-50 dark:hover:bg-neutral-700/60"
+                            className="flex w-full items-start gap-3 rounded-lg p-2.5 text-left transition hover:bg-slate-50 dark:hover:bg-neutral-800"
                           >
                             <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white ${opt.iconBg}`}>
                               <Icon size={18} />
                             </div>
                             <div className="min-w-0 flex-1">
-                              <p className="text-sm font-semibold text-slate-900 dark:text-white">{opt.label}</p>
+                              <p className="text-sm font-semibold text-slate-800 dark:text-white">{opt.label}</p>
                               <p className="mt-0.5 text-xs text-slate-500 dark:text-neutral-400">{opt.desc}</p>
                             </div>
                           </button>
@@ -1122,11 +2233,11 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                 )}
               </div>
               {/* 右侧时间刻度 */}
-              <div ref={timelineAreaRef} className="relative flex flex-1">
+              <div ref={timelineAreaRef} className="relative flex flex-1 bg-white dark:bg-neutral-900">
                 {Array.from({ length: bars }).map((_, i) => (
                   <div
                     key={i}
-                    className="relative flex-1 border-r border-slate-200 py-1.5 text-center last:border-r-0 dark:border-neutral-700"
+                    className="relative flex-1 border-r border-slate-200 py-1.5 text-center last:border-r-0 dark:border-neutral-800"
                   >
                     <span className="text-[10px] font-medium text-slate-500 dark:text-neutral-400">{i + 1}</span>
                   </div>
@@ -1139,13 +2250,24 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
               {tracks.length === 0 ? (
                 <div className="flex min-h-[88px]">
                   {/* 左侧固定面板占位（与轨道行对齐） */}
-                  <div className="w-52 shrink-0 border-r border-slate-200 dark:border-neutral-800" />
+                  <div className="w-52 shrink-0 border-r border-slate-200 bg-slate-50 dark:border-neutral-800 dark:bg-neutral-900" />
                   {/* 右侧时间轴区域显示虚线占位框 */}
                   <div className="flex-1 p-2">
-                    <div className="flex h-[200px] flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-slate-300 bg-slate-50/40 text-slate-400 dark:border-neutral-700 dark:bg-neutral-800/30 dark:text-neutral-500">
-                      <Plus size={20} className="text-slate-300 dark:text-neutral-600" />
-                      <span className="text-xs">将音轨/音频文件直接拖拽到此处</span>
-                    </div>
+                    <label
+                      onClick={(event) => event.stopPropagation()}
+                      className={`flex h-[200px] cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed transition-colors ${isTimelineDragActive ? 'border-sky-500 bg-sky-500/10 text-sky-600' : 'border-slate-300 bg-white text-slate-500 hover:border-sky-400 hover:bg-sky-50 dark:border-neutral-700 dark:bg-neutral-900/40 dark:text-neutral-500 dark:hover:border-sky-700 dark:hover:bg-sky-500/5'}`}
+                    >
+                      <input
+                        type="file"
+                        accept="audio/mpeg,audio/wav,audio/mp4,audio/flac,audio/ogg"
+                        className="sr-only"
+                        disabled={uploadState === 'uploading'}
+                        onChange={handleTimelineFileChange}
+                      />
+                      <Plus size={20} className="text-slate-400 dark:text-neutral-600" />
+                      <span className="text-xs">{isTimelineDragActive ? '松开以上传音频并添加音轨' : '将音轨/音频文件直接拖拽到此处'}</span>
+                      <span className="text-[10px] text-slate-400 dark:text-neutral-500">或点击选择音频文件</span>
+                    </label>
                   </div>
                 </div>
               ) : (
@@ -1156,22 +2278,22 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                   const displayName = track.name?.trim() ? track.name : fallbackName;
                   const isMenuOpen = openMenuTrackId === track.id;
                   return (
-                    <div key={track.id} className="relative flex min-h-[120px] border-b border-slate-200 last:border-b-0 dark:border-neutral-800">
+                    <div key={track.id} data-track-id={track.id} className={`relative flex min-h-[136px] border-b border-slate-200 bg-slate-50 transition-[filter,opacity] last:border-b-0 dark:border-neutral-800 dark:bg-neutral-900 ${track.muted ? 'grayscale opacity-60' : ''}`}>
                       {/* 轨道控制面板（左侧固定列，宽 208px） */}
-                      <div className="relative flex w-52 shrink-0 flex-col justify-center gap-1.5 border-r border-slate-200 bg-slate-50 px-2.5 py-2 dark:border-neutral-800 dark:bg-neutral-800/50">
+                      <div className="relative flex w-52 shrink-0 flex-col justify-center gap-2 border-r border-slate-200 bg-white px-2.5 py-2 dark:border-neutral-800 dark:bg-neutral-900/80">
                         {/* 第一行：类型图标 + 名称 + 静音/监听/更多/效果 */}
                         <div className="flex items-center gap-1">
                           <div className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-white ${accent.bar}`} title={track.type === 'vocal' ? '人声' : '音频'}>
                             {track.type === 'vocal' ? <Mic size={11} /> : <AudioLines size={11} />}
                           </div>
-                          <span className="flex-1 truncate text-[11px] font-medium text-slate-700 dark:text-neutral-200" title={displayName}>{displayName}</span>
+                          <span className="flex-1 truncate text-[11px] font-medium text-slate-800 dark:text-neutral-100" title={displayName}>{displayName}</span>
                           <button
                             type="button"
                             onClick={() => toggleMute(track.id)}
                             className={`flex h-5 w-5 items-center justify-center rounded transition ${
                               track.muted
                                 ? 'bg-rose-500 text-white'
-                                : 'text-slate-500 hover:bg-slate-200 hover:text-slate-800 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-white'
+                                : 'text-slate-400 hover:bg-slate-100 hover:text-slate-800 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-white'
                             }`}
                             title="静音"
                           >
@@ -1183,7 +2305,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                             className={`flex h-5 w-5 items-center justify-center rounded transition ${
                               track.solo
                                 ? 'bg-amber-500 text-white'
-                                : 'text-slate-500 hover:bg-slate-200 hover:text-slate-800 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-white'
+                                : 'text-slate-400 hover:bg-slate-100 hover:text-slate-800 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-white'
                             }`}
                             title="监听"
                           >
@@ -1209,7 +2331,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                             className={`flex h-5 w-5 items-center justify-center rounded transition ${
                               isMenuOpen
                                 ? 'bg-slate-200 text-slate-800 dark:bg-neutral-700 dark:text-white'
-                                : 'text-slate-500 hover:bg-slate-200 hover:text-slate-800 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-white'
+                                : 'text-slate-400 hover:bg-slate-100 hover:text-slate-800 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-white'
                             }`}
                             title="更多"
                             aria-expanded={isMenuOpen}
@@ -1218,7 +2340,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                           </button>
                           <button
                             type="button"
-                            className="flex h-5 w-5 items-center justify-center rounded text-slate-500 transition hover:bg-slate-200 hover:text-slate-800 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-white"
+                            className="flex h-5 w-5 items-center justify-center rounded text-slate-400 transition hover:bg-slate-100 hover:text-slate-800 dark:text-neutral-400 dark:hover:bg-neutral-700 dark:hover:text-white"
                             title="轨道效果"
                           >
                             <Sliders size={11} />
@@ -1243,7 +2365,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                           <button
                             type="button"
                             onClick={() => removeTrack(track.id)}
-                            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-slate-400 transition hover:bg-rose-500/15 hover:text-rose-500 dark:text-neutral-500"
+                            className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-slate-400 transition hover:bg-rose-500/15 hover:text-rose-500 dark:text-neutral-500 dark:hover:text-rose-400"
                             title="删除"
                           >
                             <Trash2 size={10} />
@@ -1254,7 +2376,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                         {isMenuOpen && menuPos && (
                           <div
                             data-track-menu
-                            className="fixed z-[9999] w-56 overflow-hidden rounded-lg border border-neutral-700 bg-neutral-800 text-neutral-100 shadow-2xl"
+                            className="fixed z-[9999] w-56 overflow-hidden rounded-lg border border-slate-200 bg-white text-slate-700 shadow-xl dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100"
                             style={{ top: menuPos.top, left: menuPos.left }}
                             onClick={(e) => e.stopPropagation()}
                           >
@@ -1262,14 +2384,14 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                             <button
                               type="button"
                               onClick={() => handleRenameTrack(track.id)}
-                              className="flex w-full items-center px-3 py-2 text-left text-sm transition hover:bg-neutral-700/70"
+                              className="flex w-full items-center px-3 py-2 text-left text-sm transition hover:bg-slate-50 dark:hover:bg-neutral-700/70"
                             >
                               <span>重命名</span>
                             </button>
-                            <div className="mx-3 h-px bg-neutral-700" />
+                            <div className="mx-3 h-px bg-slate-200 dark:bg-neutral-700" />
                             {/* 更改轨道类型 */}
                             <div className="px-3 py-2.5">
-                              <p className="mb-1.5 text-xs text-neutral-400">更改轨道类型</p>
+                              <p className="mb-1.5 text-xs text-slate-500 dark:text-neutral-400">更改轨道类型</p>
                               <div className="flex gap-2">
                                 <button
                                   type="button"
@@ -1277,7 +2399,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                                   className={`flex flex-1 items-center justify-center gap-1.5 rounded-md py-1.5 text-xs transition ${
                                     track.type === 'vocal'
                                       ? 'border border-sky-500/60 bg-sky-500/10 text-sky-200'
-                                      : 'border border-transparent bg-neutral-700/60 text-neutral-300 hover:bg-neutral-700'
+                                      : 'border border-transparent bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-neutral-700/60 dark:text-neutral-300 dark:hover:bg-neutral-700'
                                   }`}
                                 >
                                   <Mic size={12} /> 人声
@@ -1288,41 +2410,41 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                                   className={`flex flex-1 items-center justify-center gap-1.5 rounded-md py-1.5 text-xs transition ${
                                     track.type === 'instrument'
                                       ? 'border border-sky-500/60 bg-sky-500/10 text-sky-200'
-                                      : 'border border-transparent bg-neutral-700/60 text-neutral-300 hover:bg-neutral-700'
+                                      : 'border border-transparent bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-neutral-700/60 dark:text-neutral-300 dark:hover:bg-neutral-700'
                                   }`}
                                 >
                                   <AudioLines size={12} /> 音频
                                 </button>
                               </div>
                             </div>
-                            <div className="mx-3 h-px bg-neutral-700" />
+                            <div className="mx-3 h-px bg-slate-200 dark:bg-neutral-700" />
                             {/* 克隆 */}
                             <button
                               type="button"
                               onClick={() => handleCloneTrack(track.id)}
-                              className="flex w-full items-center justify-between px-3 py-2 text-left text-sm transition hover:bg-neutral-700/70"
+                              className="flex w-full items-center justify-between px-3 py-2 text-left text-sm transition hover:bg-slate-50 dark:hover:bg-neutral-700/70"
                             >
                               <span>克隆</span>
-                              <kbd className="rounded border border-neutral-600 bg-neutral-700 px-1.5 py-0.5 text-[10px] font-medium text-neutral-300">Shift + D</kbd>
+                              <kbd className="rounded border border-slate-200 bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500 dark:border-neutral-600 dark:bg-neutral-700 dark:text-neutral-300">Shift + D</kbd>
                             </button>
                             {/* 删除 */}
                             <button
                               type="button"
                               onClick={() => removeTrack(track.id)}
-                              className="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-rose-300 transition hover:bg-rose-500/10"
+                              className="flex w-full items-center justify-between px-3 py-2 text-left text-sm text-rose-500 transition hover:bg-rose-500/10 dark:text-rose-300"
                             >
                               <span>删除</span>
-                              <kbd className="rounded border border-neutral-600 bg-neutral-700 px-1.5 py-0.5 text-[10px] font-medium text-neutral-300">Shift + ⌫</kbd>
+                              <kbd className="rounded border border-slate-200 bg-slate-100 px-1.5 py-0.5 text-[10px] font-medium text-slate-500 dark:border-neutral-600 dark:bg-neutral-700 dark:text-neutral-300">Shift + ⌫</kbd>
                             </button>
                           </div>
                         )}
                       </div>
                       {/* 轨道内容（与时间刻度对齐） */}
                       <div
-                        className="relative flex-1 bg-white dark:bg-neutral-900"
+                        className="relative flex-1 bg-white"
                         style={{
                           backgroundImage:
-                            'repeating-linear-gradient(90deg, rgba(148,163,184,0.2) 0px, rgba(148,163,184,0.2) 1px, transparent 1px, transparent ' +
+                            'repeating-linear-gradient(90deg, rgba(148,163,184,0.18) 0px, rgba(148,163,184,0.18) 1px, transparent 1px, transparent ' +
                             `${(100 / bars) * zoom}%`,
                           backgroundSize: `${(100 / bars) * zoom}% 100%`,
                         }}
@@ -1330,33 +2452,82 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                         {track.clips.length === 0 ? (
                           <div className="flex h-full min-h-[80px] items-center px-3 text-[10px] text-slate-300 dark:text-neutral-600">空轨道</div>
                         ) : (
-                          track.clips.map((clip) => (
-                            <div
-                              key={clip.id}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setSelectedClipId(selectedClipId === clip.id ? null : clip.id);
-                              }}
-                              className={`absolute top-2 bottom-2 flex items-center overflow-hidden rounded-md bg-gradient-to-br ${accent.chip} shadow-md transition cursor-pointer ${selectedClipId === clip.id ? 'ring-2 ring-sky-400 ring-offset-1' : ''}`}
-                              style={{
-                                left: `${(clip.start / bars) * 100}%`,
-                                width: `${(clip.duration / bars) * 100}%`,
-                              }}
-                            >
-                              <div className="flex h-full w-full items-center gap-0.5 px-2">
-                                {clip.waveform?.slice(0, 30).map((v, i) => (
-                                  <div
-                                    key={i}
-                                    className="flex-1 rounded-sm bg-white/70"
-                                    style={{ height: `${v * 100}%` }}
-                                  />
-                                ))}
+                          track.clips.map((clip) => {
+                            const isClipProcessing = processingAssetId === clip.assetId
+                              && (generationState === 'submitting' || generationState === 'processing');
+                            return (
+                              <div
+                                key={clip.id}
+                                onMouseDown={(event) => {
+                                  if (!isClipProcessing) handleClipMoveMouseDown(event, track.id, clip);
+                                }}
+                                onContextMenu={(event) => {
+                                  if (isClipProcessing) {
+                                    event.preventDefault();
+                                    return;
+                                  }
+                                  handleClipContextMenu(event, track.id, clip);
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedClipId(selectedClipId === clip.id ? null : clip.id);
+                                }}
+                                className={`group absolute top-2 bottom-2 flex cursor-grab items-center overflow-hidden rounded-lg border border-white/70 bg-gradient-to-br ${accent.chip} shadow-sm transition-[box-shadow,transform,filter,opacity] duration-150 hover:shadow-md active:cursor-grabbing ${clip.muted ? 'grayscale opacity-60' : ''} ${selectedClipId === clip.id ? 'z-10 ring-2 ring-sky-400 ring-offset-1' : ''}`}
+                                style={{
+                                  left: `${(clip.start / bars) * 100}%`,
+                                  width: `${(clip.duration / bars) * 100}%`,
+                                }}
+                              >
+                              <div className="absolute inset-x-0 bottom-1 top-6 flex items-center overflow-hidden" aria-hidden="true">
+                                <svg className="h-full w-2.5 shrink-0" viewBox="0 0 10 10" preserveAspectRatio="none">
+                                  <path d="M 10 0 L 0 10 L 10 10 Z" fill="rgba(255,255,255,0.18)" />
+                                </svg>
+                                <div className="h-full min-w-0 flex-1">
+                                  <WaveformCanvas values={getVisibleWaveform(clip, secondsPerBar)} />
+                                </div>
+                                <svg className="h-full w-2.5 shrink-0" viewBox="0 0 10 10" preserveAspectRatio="none">
+                                  <path d="M 0 0 L 10 10 L 0 10 Z" fill="rgba(255,255,255,0.18)" />
+                                </svg>
                               </div>
-                              <span className="absolute left-2 top-0.5 truncate text-[9px] font-medium text-white drop-shadow">
-                                {clip.name}
-                              </span>
-                            </div>
-                          ))
+                              <div className="absolute inset-x-0 top-0 flex h-5 items-center bg-black/10 px-2">
+                                <span className="truncate text-[9px] font-semibold text-white drop-shadow">
+                                  {clip.name}
+                                </span>
+                              </div>
+                              {!isClipProcessing && <span
+                                role="slider"
+                                aria-label={`调整 ${clip.name} 起点`}
+                                aria-valuemin={0}
+                                aria-valuemax={Math.max(0, clip.start + clip.duration)}
+                                aria-valuenow={clip.start}
+                                onMouseDown={(event) => handleClipResizeMouseDown(event, track.id, clip, 'start')}
+                                onClick={(event) => event.stopPropagation()}
+                                className={`pointer-events-auto absolute left-0 top-1/2 z-20 h-12 w-4 -translate-y-1/2 cursor-ew-resize rounded-r bg-transparent transition-opacity ${selectedClipId === clip.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                              >
+                                <span className="absolute inset-y-1 left-0 w-1 rounded-r bg-white/95 shadow-sm" />
+                              </span>}
+                              {!isClipProcessing && <span
+                                role="slider"
+                                aria-label={`调整 ${clip.name} 终点`}
+                                aria-valuemin={clip.start + 0.05}
+                                aria-valuemax={clip.start + (clip.sourceDuration !== undefined
+                                  ? Math.max(0.05, (clip.sourceDuration - (clip.sourceOffset ?? 0)) / secondsPerBar)
+                                  : clip.duration)}
+                                aria-valuenow={clip.start + clip.duration}
+                                onMouseDown={(event) => handleClipResizeMouseDown(event, track.id, clip, 'end')}
+                                onClick={(event) => event.stopPropagation()}
+                                className={`pointer-events-auto absolute right-0 top-1/2 z-20 h-12 w-4 -translate-y-1/2 cursor-ew-resize rounded-l bg-transparent transition-opacity ${selectedClipId === clip.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                              >
+                                <span className="absolute inset-y-1 right-0 w-1 rounded-l bg-white/95 shadow-sm" />
+                              </span>}
+                              {isClipProcessing && (
+                                <div className="absolute inset-0 z-30 flex items-center justify-center bg-slate-700/65 text-white" role="status" aria-label="后端处理中">
+                                  <Loader2 size={28} className="animate-spin text-white/90" />
+                                </div>
+                              )}
+                              </div>
+                            );
+                          })
                         )}
                       </div>
                     </div>
@@ -1367,12 +2538,23 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
               {/* 轨道下方始终显示一个拖拽占位区（与设计图一致） */}
               {tracks.length > 0 && (
                 <div className="flex">
-                  <div className="w-52 shrink-0 border-r border-slate-200 dark:border-neutral-800" />
+                  <div className="w-52 shrink-0 border-r border-slate-200 bg-slate-50 dark:border-neutral-800 dark:bg-neutral-900" />
                   <div className="flex-1 p-2">
-                    <div className="flex h-[120px] flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed border-slate-300 bg-slate-50/40 text-slate-400 dark:border-neutral-700 dark:bg-neutral-800/30 dark:text-neutral-500">
-                      <Plus size={16} className="text-slate-300 dark:text-neutral-600" />
-                      <span className="text-[11px]">将音轨/音频文件直接拖拽到此处</span>
-                    </div>
+                    <label
+                      onClick={(event) => event.stopPropagation()}
+                      className={`flex h-[120px] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-lg border-2 border-dashed transition-colors ${isTimelineDragActive ? 'border-sky-500 bg-sky-500/10 text-sky-600' : 'border-slate-300 bg-white text-slate-500 hover:border-sky-400 hover:bg-sky-50 dark:border-neutral-700 dark:bg-neutral-900/40 dark:text-neutral-500 dark:hover:border-sky-700 dark:hover:bg-sky-500/5'}`}
+                    >
+                      <input
+                        type="file"
+                        accept="audio/mpeg,audio/wav,audio/mp4,audio/flac,audio/ogg"
+                        className="sr-only"
+                        disabled={uploadState === 'uploading'}
+                        onChange={handleTimelineFileChange}
+                      />
+                      <Plus size={16} className="text-slate-400 dark:text-neutral-600" />
+                      <span className="text-[11px]">{isTimelineDragActive ? '松开以上传音频并添加音轨' : '将音轨/音频文件直接拖拽到此处'}</span>
+                      <span className="text-[10px] text-slate-400 dark:text-neutral-500">或点击选择音频文件</span>
+                    </label>
                   </div>
                 </div>
               )}
@@ -1703,6 +2885,69 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
 
         </div>
       </div>
+
+      {clipContextMenu && contextMenuClip && (
+        <div
+          data-clip-menu
+          className="fixed z-[10000] w-56 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 text-slate-700 shadow-2xl dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-100"
+          style={{ top: clipContextMenu.top, left: clipContextMenu.left }}
+          onMouseDown={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.preventDefault()}
+        >
+          <button
+            type="button"
+            onClick={() => handleClipCopy(clipContextMenu.trackId, contextMenuClip)}
+            className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition hover:bg-slate-100 dark:hover:bg-neutral-800"
+          >
+            <span>复制</span>
+            <kbd className="text-[10px] text-slate-400 dark:text-neutral-500">Ctrl/Cmd + C</kbd>
+          </button>
+          {clipClipboardRef.current && (
+            <button
+              type="button"
+              onClick={() => handleClipPaste(clipContextMenu.trackId)}
+              className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition hover:bg-slate-100 dark:hover:bg-neutral-800"
+            >
+              <span>粘贴</span>
+              <kbd className="text-[10px] text-slate-400 dark:text-neutral-500">Ctrl/Cmd + V</kbd>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => handleClipDelete(clipContextMenu.trackId, clipContextMenu.clipId)}
+            className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm text-rose-600 transition hover:bg-rose-50 dark:text-rose-300 dark:hover:bg-rose-500/10"
+          >
+            <span>删除</span>
+            <kbd className="text-[10px] text-rose-400 dark:text-rose-300/70">Delete</kbd>
+          </button>
+          <button
+            type="button"
+            disabled={!canSplitContextClip}
+            onClick={() => handleClipSplit(clipContextMenu.trackId, contextMenuClip)}
+            className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition ${
+              canSplitContextClip
+                ? 'hover:bg-slate-100 dark:hover:bg-neutral-800'
+                : 'cursor-not-allowed text-slate-300 dark:text-neutral-600'
+            }`}
+          >
+            <span>裁剪</span>
+            <kbd className="text-[10px] text-slate-400 dark:text-neutral-500">S</kbd>
+          </button>
+          <button
+            type="button"
+            onClick={() => handleClipMute(clipContextMenu.trackId, clipContextMenu.clipId)}
+            className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition hover:bg-slate-100 dark:hover:bg-neutral-800"
+          >
+            <span>{contextMenuClip.muted ? '取消静音' : '静音'}</span>
+            <kbd className="text-[10px] text-slate-400 dark:text-neutral-500">Ctrl/Cmd + M</kbd>
+          </button>
+        </div>
+      )}
+      {clipNotice && (
+        <div className="fixed bottom-6 left-1/2 z-[10001] -translate-x-1/2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs text-slate-700 shadow-xl dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-200">
+          {clipNotice}
+        </div>
+      )}
 
       {/* 上滑面板：人声效果器 */}
       {slideUpPanel === 'vocalEffect' && (

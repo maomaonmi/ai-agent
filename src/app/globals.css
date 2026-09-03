@@ -53,6 +53,37 @@
 .scrollbar-none { scrollbar-width: none; -ms-overflow-style: none; }
 .scrollbar-none::-webkit-scrollbar { display: none; }
 
+.music-player-range {
+  height: 0.375rem;
+  appearance: none;
+  border-radius: 9999px;
+  outline: none;
+  transition: opacity 150ms ease;
+}
+
+.music-player-range:disabled { cursor: not-allowed; opacity: 0.55; }
+.music-player-range:not(:disabled) { cursor: pointer; }
+.music-player-range:focus-visible { box-shadow: 0 0 0 3px rgb(56 189 248 / 0.25); }
+.music-player-range::-webkit-slider-thumb {
+  width: 0.75rem;
+  height: 0.75rem;
+  appearance: none;
+  border: 2px solid #fff;
+  border-radius: 9999px;
+  background: #0284c7;
+  box-shadow: 0 1px 4px rgb(15 23 42 / 0.24);
+}
+.music-player-range-dark::-webkit-slider-thumb { background: #67e8f9; }
+.music-player-range::-moz-range-thumb {
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 2px solid #fff;
+  border-radius: 9999px;
+  background: #0284c7;
+  box-shadow: 0 1px 4px rgb(15 23 42 / 0.24);
+}
+.music-player-range-dark::-moz-range-thumb { background: #67e8f9; }
+
 @keyframes code-workbench-rise {
   from { transform: translateY(100%); opacity: 0.72; }
   to { transform: translateY(0); opacity: 1; }

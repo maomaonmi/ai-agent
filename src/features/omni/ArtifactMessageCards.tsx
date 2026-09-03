@@ -36,5 +36,5 @@ export default function ArtifactMessageCards({ links, onOpen, conversationId }: 
   }, [visibleLinks]);
   useEffect(() => { void getConversationOmniContext(conversationId).then((value) => setProjectId(value.projectId)).catch(() => setProjectId(null)); }, [conversationId]);
   if (items.length === 0) return null;
-  return <div className="space-y-2">{items.map(({ link, artifact, version }) => <ArtifactMessageCard key={link.id} artifact={artifact} version={version} fromOtherProject={artifact.projectId !== projectId} onOpen={onOpen} />)}</div>;
+  return <div className="w-full space-y-2">{items.map(({ link, artifact, version }) => <ArtifactMessageCard key={link.id} artifact={artifact} version={version} fromOtherProject={artifact.projectId !== projectId} onOpen={onOpen} />)}</div>;
 }

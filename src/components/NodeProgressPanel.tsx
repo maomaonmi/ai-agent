@@ -31,6 +31,8 @@ interface NodeProgressPanelProps {
   /** Why fallback：老快照 DeepThinker extras 里没有 reasoning_full，需从 ChatMessage 兜底读取 */
   researchReasoningFallback?: string;
   reasoningText?: string;
+  /** Measured duration for streams that only expose reasoning (no node events). */
+  reasoningTime?: number;
 }
 
 type InlineView = 'timeline' | 'sources';
@@ -53,6 +55,7 @@ export default function NodeProgressPanel({
   researchChunks,
   researchReasoningFallback,
   reasoningText,
+  reasoningTime,
 }: NodeProgressPanelProps) {
   const readCount = Math.max(
     0,
@@ -63,13 +66,25 @@ export default function NodeProgressPanel({
   const thinkingTime = useMemo(() => {
     const start = nodeProgress[0]?.timestamp_ms;
     const end = [...nodeProgress].reverse().find((e) => e.status === 'completed')?.timestamp_ms;
-    if (!start) return 0;
+    const fromMessage = typeof reasoningTime === 'number' && Number.isFinite(reasoningTime)
+      ? Math.max(0, reasoningTime)
+      : 0;
+    if (!start) {
+      // Older snapshots did not persist a duration. We cannot reconstruct the
+      // exact elapsed time, but showing a small non-zero fallback is more
+      // truthful than claiming that a visible reasoning block took 0 seconds.
+      if (fromMessage > 0) return Math.round(fromMessage);
+      return reasoningText?.trim() || researchReasoningFallback?.trim() ? 1 : 0;
+    }
     const baseMs = end ? end - start : Date.now() - start;
     const fromExtras = nodeProgress
       .flatMap((e) => (typeof e.extras?.reasoning_time === 'number' ? [e.extras.reasoning_time as number] : []))
       .reduce((a, b) => a + b, 0);
+    // A message-level duration is a fallback for reasoning-only streams. When
+    // node timestamps exist they already cover the elapsed request, so adding
+    // it again would double the displayed time.
     return Math.max(1, Math.round(baseMs / 1000) + Math.round(fromExtras));
-  }, [nodeProgress]);
+  }, [nodeProgress, reasoningTime, reasoningText, researchReasoningFallback]);
 
   const [inlineView, setInlineView] = useState<InlineView>('timeline');
   const [expandedNodeId, setExpandedNodeId] = useState<number | string | null>(null);

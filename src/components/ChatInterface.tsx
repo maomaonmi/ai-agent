@@ -493,6 +493,9 @@ export default function ChatInterface() {
   const [pptHistoryLoading, setPptHistoryLoading] = useState(true);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [artifactPanelState, dispatchArtifactPanel] = useReducer(artifactPanelReducer, { status: 'closed' });
+  // Remember the latest music artifact so a follow-up "生成音乐" command can
+  // still use the task route after the user closes the right-hand panel.
+  const latestMusicArtifactRef = useRef<{ artifactId: string; versionId: string } | null>(null);
   const [artifactPanelWidth, setArtifactPanelWidth] = useState(() => {
     if (typeof window === 'undefined') return ARTIFACT_PANEL_DEFAULT_WIDTH;
     try {
@@ -517,6 +520,7 @@ export default function ChatInterface() {
   }, [activeSessionId, messages]);
   useEffect(() => {
     let cancelled = false;
+    latestMusicArtifactRef.current = null;
     // A task poll can outlive the conversation that started it. Clear the
     // per-session finalization guards before loading the next session so an
     // old task can never suppress (or complete) work in the new one.
@@ -541,6 +545,7 @@ export default function ChatInterface() {
     return grouped;
   }, [conversationArtifactLinks]);
   const openArtifactPanel = useCallback((artifact: Artifact, version: ArtifactVersion) => {
+    if (artifact.kind === 'music') latestMusicArtifactRef.current = { artifactId: artifact.id, versionId: version.id };
     dispatchArtifactPanel({ type: 'open', artifactId: artifact.id, versionId: version.id });
   }, []);
   const handleArtifactLoaded = useCallback(() => dispatchArtifactPanel({ type: 'loaded' }), []);
@@ -549,6 +554,7 @@ export default function ChatInterface() {
     dispatchArtifactPanel({ type: 'setDisplayMode', displayMode });
   }, []);
   const handleArtifactOpenVersion = useCallback((artifact: Artifact, versionId: ArtifactVersion['id']) => {
+    if (artifact.kind === 'music') latestMusicArtifactRef.current = { artifactId: artifact.id, versionId };
     dispatchArtifactPanel({ type: 'open', artifactId: artifact.id, versionId });
   }, []);
   const handleArtifactPanelWidthChange = useCallback((width: number) => {
@@ -574,6 +580,9 @@ export default function ChatInterface() {
         setError('音乐已生成，但结果消息保存失败。');
       }
     }
+    // The terminal version is the actual music result. Switch the open panel
+    // to it immediately instead of leaving the user on the old lyrics draft.
+    openArtifactPanel(response.artifact, response.version);
   };
   const [selectedResearchMessageIndex, setSelectedResearchMessageIndex] = useState<number | null>(null);
   const [writingSessionRestore, setWritingSessionRestore] = useState<{
@@ -1970,6 +1979,23 @@ export default function ChatInterface() {
     const requestAttachments = attachments;
     const userMessageId = createClientMessageId();
     const assistantMessageId = createClientMessageId();
+    // Materialize the user turn before any awaited context/API work.  The
+    // previous functional setState updater was evaluated after the music task
+    // branch had already read messagesRef, so the user prompt could disappear
+    // from the turn that opened an artifact panel.
+    const currentMessages = messagesRef.current;
+    const turnBaseMessages = rewritingIndex != null
+      ? currentMessages.slice(0, rewritingIndex)
+      : currentMessages;
+    const userTurnMessage: ChatMessage = {
+      id: userMessageId,
+      role: 'user',
+      content: userMessage,
+      attachments: requestAttachments.length ? requestAttachments : undefined,
+    };
+    const nextMessagesWithUser = [...turnBaseMessages, userTurnMessage];
+    messagesRef.current = nextMessagesWithUser;
+    setMessages(nextMessagesWithUser);
     // Freeze all per-turn intent before any awaited session creation or streaming work.
     // Toolbar changes made while this request runs therefore apply only to the next turn.
     let omniTurnContext = createOmniTurnContext({
@@ -1980,9 +2006,11 @@ export default function ChatInterface() {
       mentionedArtifacts: mentionedArtifactSummaries,
     });
     if (mode === 'research') setSelectedResearchMessageIndex(null);
-    // Why: 新一轮发送前强制上屏上一轮 pacing 残留，避免旧答案继续展开干扰新轮。
-    answerPacing.flush();
-    reasoningPacing.flush();
+    // Start a fresh pacing window for this turn.  Keeping the previous
+    // counters made the new reasoning inherit an already-consumed length and
+    // jump straight to the full text on the first render.
+    answerPacing.reset();
+    reasoningPacing.reset();
     setIsLoading(true);
     setError(null);
     setMcpTrace([]);
@@ -2073,20 +2101,6 @@ export default function ChatInterface() {
     setAgentStatus('');
     setPlanProgress(null);
 
-    setMessages((prev) => {
-      // Why: 重写历史消息时，先截断到 rewritingIndex（该条及其后的记录全部清除），
-      // 再追加新的用户消息，实现 ChatGPT 式"编辑并重发"。
-      const base = rewritingIndex != null ? prev.slice(0, rewritingIndex) : prev;
-      const next = [...base, {
-        id: userMessageId,
-        role: 'user' as const,
-        content: userMessage,
-        // Why: Code 模式历史消息回显图片缩略图；standard/deep 模式消息列表也支持展示附件。
-        attachments: requestAttachments.length ? requestAttachments : undefined,
-      }];
-      messagesRef.current = next;
-      return next;
-    });
     // 截断后重写索引失效，下一轮提交按普通发送处理
     setRewritingIndex(null);
 
@@ -2094,11 +2108,17 @@ export default function ChatInterface() {
       let rawLyrics = '';
       let streamedReasoning = '';
       try {
-        const activeMusicVersion = artifactPanelState.status !== 'closed'
-          ? await getArtifactVersion(artifactPanelState.artifactId, artifactPanelState.versionId)
+        const musicArtifactRef = artifactPanelState.status !== 'closed'
+          ? { artifactId: artifactPanelState.artifactId, versionId: artifactPanelState.versionId }
+          : latestMusicArtifactRef.current;
+        const activeMusicVersion = musicArtifactRef
+          ? await getArtifactVersion(musicArtifactRef.artifactId, musicArtifactRef.versionId)
           : null;
         const activeMusic = readMusicArtifactPayload(activeMusicVersion?.payload);
-        if (activeMusic && artifactPanelState.status !== 'closed') {
+        // Existing music artifacts use the task route directly. It never calls
+        // the chat model, so the global deep-thinking toggle cannot add a
+        // reasoning phase to actual music generation.
+        if (activeMusic && musicArtifactRef) {
           const nextInstruction = [activeMusic.instruction, userMessage].filter(Boolean).join('；');
           const shouldGenerate = isMusicGenerationCommand(userMessage);
           const task = shouldGenerate ? await generateSunoMusic({
@@ -2108,7 +2128,7 @@ export default function ChatInterface() {
             title: activeMusic.title,
             model: 'V4_5ALL',
           }) : null;
-          const created = await createArtifactVersion(artifactPanelState.artifactId, {
+          const created = await createArtifactVersion(musicArtifactRef.artifactId, {
             conversationId: requestSessionId,
             messageId: assistantMessageId,
             summary: task ? '音乐任务已提交，正在生成。' : '已更新音乐情感与乐器指令。',
@@ -2137,6 +2157,7 @@ export default function ChatInterface() {
         messagesRef.current = [...messagesRef.current, streamingAssistant];
         setMessages(messagesRef.current);
         let streamError = '';
+        const reasoningStartedAt = Date.now();
         await sendChatMessage(buildMusicAgentPrompt(userMessage), 'deep', {
           onNode: handleNodeEvent,
           onReasoning: (event) => {
@@ -2149,8 +2170,22 @@ export default function ChatInterface() {
             setReasoningSteps([streamedReasoning]);
             reasoningPacing.push(token);
           },
+          // MiniMax native loops expose the same content through agent_delta
+          // on a few gateways. Consume both channels so the reasoning panel is
+          // live regardless of the selected provider/protocol.
+          onAgentDelta: (event) => {
+            if (event.kind !== 'reasoning') return;
+            streamedReasoning += event.delta;
+            setReasoningSteps([streamedReasoning]);
+            reasoningPacing.push(event.delta);
+          },
           onToken: (token) => { rawLyrics += token; },
-          onDone: (event) => { if (!rawLyrics) rawLyrics = event.answer; },
+          onDone: (event) => {
+            // A provider may stream only a prefix and put the complete answer
+            // in the terminal event. Keep the more complete payload so lyric
+            // parsing never silently truncates the draft.
+            if (event.answer.length > rawLyrics.length) rawLyrics = event.answer;
+          },
           // sendChatMessage keeps consuming the SSE stream after an error
           // event. Preserve the provider message and surface it below instead
           // of replacing it with the generic empty-lyrics error.
@@ -2174,7 +2209,11 @@ export default function ChatInterface() {
         const draft = parseMusicDraft(rawLyrics);
         if (!draft.lyrics.trim()) throw new Error('歌词模型没有返回有效内容。');
         const finalReasoning = streamedReasoning.trim() || '已完成主题理解、情绪分析与歌词结构设计。';
-        reasoningPacing.flush();
+        // Let the pacing timer finish naturally after the final snapshot is
+        // stored; flushing here was the reason a long thought block appeared
+        // all at once at the end of the request.
+        reasoningPacing.commit(finalReasoning);
+        const reasoningTime = Math.max(1, Math.round((Date.now() - reasoningStartedAt) / 1000));
         const created = await createConversationArtifact(requestSessionId, createMusicArtifactInput({
           messageId: assistantMessageId,
           title: draft.title,
@@ -2186,6 +2225,7 @@ export default function ChatInterface() {
           role: 'assistant',
           content: draft.note || `已完成《${draft.title}》的歌词初稿。你可以在右侧修改歌词、添加情感与乐器指令，然后生成音乐。`,
           reasoning: finalReasoning,
+          reasoning_time: reasoningTime,
           nodeProgress: perRoundNodeEventsRef.current,
         };
         const nextMessages = messagesRef.current.map((message) => message.id === assistantMessageId ? assistantMessage : message);
@@ -2344,6 +2384,15 @@ export default function ChatInterface() {
       // 深度调研模式
       try {
         let streamedResearchReasoning = '';
+        const researchAssistant: ChatMessage = {
+          id: assistantMessageId,
+          role: 'assistant',
+          content: '',
+        };
+        // Give early node/reasoning events a message anchor so the timeline
+        // appears while the research engine is still working.
+        messagesRef.current = [...messagesRef.current, researchAssistant];
+        setMessages(messagesRef.current);
         await sendDeepResearch(userMessage, {
           onNode: handleNodeEvent,
           onUsage: (usage) => {
@@ -2372,19 +2421,21 @@ export default function ChatInterface() {
             // 1. 写入本轮 per-round ref（会被随后的 syncRoundStateToLastMessage 覆写到消息）
             perRoundResearchChunksRef.current = mergeResearchSources(perRoundResearchChunksRef.current, (event.top_chunks as ResearchChunk[]) ?? []);
             setResearchChunks(perRoundResearchChunksRef.current);
-            // 2. 先追加消息占位（此时 nodeProgress / webDocs 可能已经在回调里累积到了 ref）
-            persistResearchMessages(requestSessionId, [
-              ...messagesRef.current,
-              {
-                id: assistantMessageId,
-                role: 'assistant',
-                content: event.report ||
-                  `✅ 深度调研完成！\n\n已从 ${event.total_pages} 个网页中抓取内容，切分为 ${event.total_chunks} 个切片，通过 BGE-Reranker 精选出 ${event.top_chunks.length} 条高相关性片段。\n\n正在生成深度研究报告...`,
-                nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : undefined,
-                webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : undefined,
-                researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : undefined,
-              },
-            ]);
+            // 2. 更新同一个消息占位（此时 nodeProgress / webDocs 可能已经在回调里累积到了 ref）
+            const reportMessage: ChatMessage = {
+              id: assistantMessageId,
+              role: 'assistant',
+              content: event.report ||
+                `✅ 深度调研完成！\n\n已从 ${event.total_pages} 个网页中抓取内容，切分为 ${event.total_chunks} 个切片，通过 BGE-Reranker 精选出 ${event.top_chunks.length} 条高相关性片段。\n\n正在生成深度研究报告...`,
+              nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : undefined,
+              webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : undefined,
+              researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : undefined,
+            };
+            const reportIndex = messagesRef.current.findIndex((message) => message.id === assistantMessageId);
+            const reportMessages = reportIndex >= 0
+              ? messagesRef.current.map((message, index) => index === reportIndex ? reportMessage : message)
+              : [...messagesRef.current, reportMessage];
+            persistResearchMessages(requestSessionId, reportMessages);
           },
           onResearchReasonDone: (event) => {
               answerPacing.commit(event.report);
@@ -2475,6 +2526,17 @@ export default function ChatInterface() {
     } else if (mode === 'plan' || mode === 'distributed_plan') {
       try {
         let streamedPlanReasoning = '';
+        const reasoningStartedAt = Date.now();
+        const planAssistant: ChatMessage = {
+          id: assistantMessageId,
+          role: 'assistant',
+          content: '',
+        };
+        // Reasoning can precede the first plan_update event. Mount the turn
+        // now so that early deltas are visible instead of waiting for a plan
+        // graph snapshot.
+        messagesRef.current = [...messagesRef.current, planAssistant];
+        setMessages(messagesRef.current);
         await sendChatMessage(userMessage, mode, {
           onNode: handleNodeEvent,
           onSystemStatus: (event) => {
@@ -2496,7 +2558,7 @@ export default function ChatInterface() {
             setAgentStatus('');
             const current = messagesRef.current;
             const existingIndex = [...current].map((message, index) => ({ message, index })).reverse()
-              .find(({ message }) => message.role === 'assistant' && message.planProgress)?.index ?? -1;
+              .find(({ message }) => message.id === assistantMessageId || (message.role === 'assistant' && message.planProgress))?.index ?? -1;
             const nextMessages = existingIndex >= 0
               ? current.map((message, index) => index === existingIndex ? { ...message, planProgress: event } : message)
               : [...current, { role: 'assistant' as const, content: '', planProgress: event }];
@@ -2591,7 +2653,7 @@ export default function ChatInterface() {
                 setPlanProgress(nextProgress);
                 const current = messagesRef.current;
                 const existingIndex = [...current].map((message, index) => ({ message, index })).reverse()
-                  .find(({ message }) => message.role === 'assistant' && message.planProgress)?.index ?? -1;
+                  .find(({ message }) => message.id === assistantMessageId || (message.role === 'assistant' && message.planProgress))?.index ?? -1;
                 const nextMessages = existingIndex >= 0
                   ? current.map((message, index) => index === existingIndex ? { ...message, planProgress: nextProgress } : message)
                   : [...current, { role: 'assistant' as const, content: '', planProgress: nextProgress }];
@@ -2603,7 +2665,7 @@ export default function ChatInterface() {
             if (event.type === 'report_delta') {
               const current = messagesRef.current;
               const existingIndex = [...current].map((message, index) => ({ message, index })).reverse()
-                .find(({ message }) => message.role === 'assistant' && message.planProgress)?.index ?? -1;
+                .find(({ message }) => message.id === assistantMessageId || (message.role === 'assistant' && message.planProgress))?.index ?? -1;
               const previousReport = existingIndex >= 0 ? current[existingIndex]?.streamingReport ?? '' : '';
               const nextMessages = existingIndex >= 0
                 ? current.map((message, index) => index === existingIndex ? { ...message, streamingReport: `${previousReport}${event.delta}` } : message)
@@ -2625,25 +2687,31 @@ export default function ChatInterface() {
           },
           onDone: (event) => {
             answerPacing.commit(event.answer);
+            const finalReasoning = streamedPlanReasoning.trim();
+            const reasoningTime = finalReasoning
+              ? Math.max(1, Math.round((Date.now() - reasoningStartedAt) / 1000))
+              : undefined;
             const current = messagesRef.current;
             const existingIndex = [...current].map((message, index) => ({ message, index })).reverse()
-              .find(({ message }) => message.role === 'assistant' && message.planProgress)?.index ?? -1;
+              .find(({ message }) => message.id === assistantMessageId || (message.role === 'assistant' && message.planProgress))?.index ?? -1;
             const nextMessages = existingIndex >= 0
               ? current.map((message, index) => index === existingIndex ? {
                 ...message,
                 content: event.answer,
-                reasoning: streamedPlanReasoning || message.reasoning,
+                reasoning: finalReasoning || message.reasoning,
+                reasoning_time: reasoningTime ?? message.reasoning_time,
                 streamingReport: undefined,
                 planProgress: perRoundPlanProgressRef.current ?? message.planProgress,
               } : message)
               : [...current, {
                 role: 'assistant' as const,
                 content: event.answer,
-                reasoning: streamedPlanReasoning || undefined,
+                reasoning: finalReasoning || undefined,
+                reasoning_time: reasoningTime,
                 planProgress: perRoundPlanProgressRef.current ?? undefined,
               }];
             persistPlanMessages(requestSessionId, nextMessages);
-            reasoningPacing.flush();
+            reasoningPacing.commit(finalReasoning);
             setAgentStatus('');
           },
           onError: (event) => {
@@ -2719,11 +2787,24 @@ export default function ChatInterface() {
         let streamedAnswer = '';
         let streamedReasoning = '';
         let completedAnswer = '';
+        const reasoningStartedAt = Date.now();
+        // Mount the assistant turn before the first token. Reasoning often
+        // starts seconds earlier than the answer; without this placeholder the
+        // chain panel had no message to attach to and the user saw a blank
+        // conversation during the entire thinking phase.
+        const streamingAssistant: ChatMessage = {
+          id: assistantMessageId,
+          role: 'assistant',
+          content: '',
+        };
+        messagesRef.current = [...messagesRef.current, streamingAssistant];
+        setMessages(messagesRef.current);
         await sendChatMessage(userMessage, mode, {
           onNode: handleNodeEvent,
           onReasoning: (event) => {
+            streamedReasoning = event.reasoning;
             reasoningPacing.commit(event.reasoning);
-            setReasoningSteps((prev) => [...prev, event.reasoning]);
+            setReasoningSteps([streamedReasoning]);
           },
           onReasoningDelta: (token) => {
             streamedReasoning += token;
@@ -2789,23 +2870,61 @@ export default function ChatInterface() {
           },
           onDone: (event) => {
             completedAnswer = event.answer || streamedAnswer;
+            const finalReasoning = streamedReasoning.trim();
+            const reasoningTime = finalReasoning
+              ? Math.max(1, Math.round((Date.now() - reasoningStartedAt) / 1000))
+              : undefined;
+            // Commit only the total length here. The renderer continues to
+            // slice the final snapshot through reasoningPacing, so a gateway
+            // that sends one large reasoning field still appears as a live
+            // typewriter stream.
+            if (finalReasoning) reasoningPacing.commit(finalReasoning);
             if (!streamedAnswer) {
               // 追加答案时同步挂入本轮累积的所有状态
-              setMessages((prev) => [...prev, {
+              const finalMessage: ChatMessage = {
                 id: assistantMessageId,
                 role: 'assistant',
                 content: event.answer,
+                reasoning: finalReasoning || undefined,
+                reasoning_time: reasoningTime,
                 nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : undefined,
                 webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : undefined,
                 researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : undefined,
                 tokenUsage: event.usage ?? perRoundTokenUsageRef.current ?? undefined,
                 mcpTrace: perRoundMcpTraceRef.current.length > 0 ? perRoundMcpTraceRef.current : undefined,
-              }]);
+              };
+              const existingIndex = messagesRef.current.findIndex((message) => message.id === assistantMessageId);
+              const nextMessages = existingIndex >= 0
+                ? messagesRef.current.map((message, index) => index === existingIndex ? finalMessage : message)
+                : [...messagesRef.current, finalMessage];
+              messagesRef.current = nextMessages;
+              setMessages(nextMessages);
               // Why: 整块源（DeepSeek 非流式兜底）走 commit，伪打字机匀速展开。
               answerPacing.commit(event.answer);
             } else {
-              // 流式已经写入最后一条消息，再补一次最终状态作为"快照落点"
-              syncRoundStateToLastMessage();
+              // 流式已经写入最后一条消息，再补一次最终状态作为"快照落点"。
+              // Persist the reasoning metadata too; otherwise a refreshed
+              // session loses the duration and renders the old 0-second label.
+              setMessages((prev) => {
+                const next = [...prev];
+                const lastIndex = [...next].map((message, index) => ({ message, index }))
+                  .reverse().find(({ message }) => message.role === 'assistant')?.index ?? -1;
+                if (lastIndex >= 0) {
+                  next[lastIndex] = {
+                    ...next[lastIndex],
+                    content: event.answer || next[lastIndex].content,
+                    reasoning: finalReasoning || next[lastIndex].reasoning,
+                    reasoning_time: reasoningTime ?? next[lastIndex].reasoning_time,
+                    nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : next[lastIndex].nodeProgress,
+                    webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : next[lastIndex].webDocs,
+                    researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : next[lastIndex].researchChunks,
+                    tokenUsage: event.usage ?? perRoundTokenUsageRef.current ?? next[lastIndex].tokenUsage,
+                    mcpTrace: perRoundMcpTraceRef.current.length > 0 ? perRoundMcpTraceRef.current : next[lastIndex].mcpTrace,
+                  };
+                }
+                messagesRef.current = next;
+                return next;
+              });
               // Why: done 携带的可能是服务端最终全文（含流式期间未推完的尾部），
               //   commit 对齐总量；队列未排空部分继续匀速展开。
               answerPacing.commit(event.answer);
@@ -3502,6 +3621,7 @@ export default function ChatInterface() {
               //   前几轮的"阅读了多少网页 + 搜索结果"按钮消失（用户报告的问题）。
               //   只要 msg.nodeProgress（或 ref 中正在累积的本轮状态）有内容，就渲染面板。
               const isAssistant = msg.role === 'assistant';
+              const hasArtifactLinks = Boolean(msg.id && (artifactLinksByMessageId.get(msg.id)?.length ?? 0) > 0);
               const msgPlanProgress = isAssistant ? msg.planProgress : undefined;
               // Why: 旧会话只保存了报告和来源，没有保存原始节点事件。
               //   有来源的历史调研仍应显示一个明确的已完成链路摘要，不能退化成只有文档卡片。
@@ -3531,12 +3651,17 @@ export default function ChatInterface() {
                     ? perRoundResearchChunksRef.current
                     : undefined);
               const liveReasoning = reasoningSteps.join('\n\n');
-              const liveReasoningDisplay = index === visibleMessages.length - 1 && (reasonPacingActive || reasonPacedLength > 0)
-                ? liveReasoning.slice(0, reasonPacedLength)
-                : liveReasoning;
-              const msgReasoningText = isAssistant
-                ? (msg.reasoning || (index === visibleMessages.length - 1 ? liveReasoningDisplay : ''))
+              const rawReasoningText = isAssistant
+                ? (msg.reasoning || (index === visibleMessages.length - 1 ? liveReasoning : ''))
                 : '';
+              // Keep the final snapshot on the same pacing channel as live
+              // deltas.  Otherwise replacing the placeholder with the full
+              // reasoning string makes the entire thought block appear in one
+              // render at stream completion.
+              const msgReasoningText = isAssistant && index === visibleMessages.length - 1
+                && (reasonPacingActive || reasonPacedLength > 0)
+                ? rawReasoningText.slice(0, reasonPacedLength)
+                : rawReasoningText;
               const showPanel = isAssistant && (hasProgress || Boolean(msgReasoningText.trim()));
 
               return (
@@ -3569,6 +3694,7 @@ export default function ChatInterface() {
                       webDocs={msgWebDocs}
                       researchChunks={msgResearchChunks}
                       researchReasoningFallback={msg.researchReasoning ?? msg.reasoning ?? undefined}
+                      reasoningTime={msg.reasoning_time}
                       reasoningText={msgReasoningText}
                     />
                   </div>
@@ -3636,7 +3762,7 @@ export default function ChatInterface() {
                   />
                 ) : <div className={`
                   ${showPanel ? 'mt-1' : ''}
-                  max-w-[85%] rounded-2xl px-5 py-3 ${
+                  ${hasArtifactLinks ? 'w-full max-w-full' : 'max-w-[85%]'} rounded-2xl px-5 py-3 ${
                   msg.role === 'user'
                     ? 'bg-blue-600 text-white rounded-br-md'
                     : 'bg-gray-100 text-gray-900 rounded-bl-md'
@@ -3675,7 +3801,7 @@ export default function ChatInterface() {
                         : msg.content
                     }
                   />
-                  {msg.id && (artifactLinksByMessageId.get(msg.id)?.length ?? 0) > 0 && (
+                  {hasArtifactLinks && msg.id && (
                     <ArtifactMessageCards conversationId={activeSessionId ?? ''} links={artifactLinksByMessageId.get(msg.id) ?? []} onOpen={openArtifactPanel} />
                   )}
                   {isAssistant && answerPacingActive && index === visibleMessages.length - 1 && (
