@@ -1544,6 +1544,43 @@ export interface CodeAgentTrace {
   terminalProposals?: Array<{ command: string; reason?: string; expected_output_hint?: string }>;
   hookEvents?: HookEvent[];
   tokenUsage?: TokenUsage;
+  timeline?: CodeAgentTimelineEvent[];
+}
+
+export type CodeAgentActorKind = 'main' | 'test' | 'ops' | 'system';
+
+export type CodeAgentTimelineStage =
+  | 'status'
+  | 'thinking'
+  | 'output'
+  | 'tool_call'
+  | 'observation'
+  | 'file_change'
+  | 'validation'
+  | 'verification'
+  | 'summary'
+  | 'error';
+
+export interface CodeAgentTimelineEvent {
+  eventId: string;
+  runId: string;
+  actorId: string;
+  actorKind: CodeAgentActorKind;
+  stage: CodeAgentTimelineStage;
+  content: string;
+  done: boolean;
+  timestampMs: number;
+  sequence: number;
+  iteration?: number;
+  mergeKey?: string;
+  status?: string;
+  metrics?: {
+    charCount?: number;
+    tokenCount?: number;
+    durationMs?: number;
+  };
+  file?: CodeFileChange & { operation?: 'create' | 'modify' | 'delete' };
+  metadata?: Record<string, unknown>;
 }
 
 export interface CodeFileChange {
