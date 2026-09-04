@@ -289,6 +289,37 @@ export default function useCodeAutoRepair() {
     }));
   }, [commitAgentTrace]);
 
+  const finishTimeline = useCallback((actorKind?: CodeAgentActorKind) => {
+    const finishedAt = Date.now();
+    commitAgentTrace((previous) => ({
+      ...previous,
+      timeline: (previous.timeline ?? []).map((event) => {
+        if (
+          event.done
+          || (actorKind && event.actorKind !== actorKind)
+          || !['thinking', 'output', 'validation', 'summary'].includes(event.stage)
+        ) return event;
+        const startedAt = event.stage === 'thinking'
+          ? thinkingStartedAtRef.current[`${event.actorId}:${event.stage}`]
+          : undefined;
+        return {
+          ...event,
+          done: true,
+          metrics: startedAt == null
+            ? event.metrics
+            : { ...event.metrics, durationMs: Math.max(0, finishedAt - startedAt) },
+        };
+      }),
+    }));
+    if (actorKind) {
+      Object.keys(thinkingStartedAtRef.current)
+        .filter((key) => key.startsWith(`${actorKind}:`))
+        .forEach((key) => delete thinkingStartedAtRef.current[key]);
+    } else {
+      thinkingStartedAtRef.current = {};
+    }
+  }, [commitAgentTrace]);
+
   const beginAgentTrace = useCallback((message: string, request = '', projectKind: 'frontend' | 'fullstack' = 'frontend') => {
     hasAgentOutputRef.current = false;
     const id = `agent-run-${Date.now()}-${sequenceRef.current + 1}`;
@@ -735,6 +766,7 @@ export default function useCodeAutoRepair() {
       if (event.done) {
         didComplete = true;
         recordFileChanges('', event.code);
+        finishTimeline('main');
         commitAgentTrace((previous) => ({ ...previous, isRunning: false }));
         beginRuntimeCheck(event.code);
       } else {
@@ -760,7 +792,7 @@ export default function useCodeAutoRepair() {
       throw error;
     }
     return didComplete;
-  }, [addTrustedTerminalPrefix, beginAgentTrace, beginRuntimeCheck, commitAgentTrace, consumeAgentEvent, recordFileChanges, reset, terminalWorkspaceId, updateCode]);
+  }, [addTrustedTerminalPrefix, beginAgentTrace, beginRuntimeCheck, commitAgentTrace, consumeAgentEvent, finishTimeline, recordFileChanges, reset, terminalWorkspaceId, updateCode]);
 
   const modify = useCallback(async (
     instruction: string,
@@ -823,7 +855,10 @@ export default function useCodeAutoRepair() {
       }
       modifiedCode = event.code;
       didComplete = didComplete || event.done;
-      if (event.done) commitAgentTrace((previous) => ({ ...previous, isRunning: false }));
+      if (event.done) {
+        finishTimeline('main');
+        commitAgentTrace((previous) => ({ ...previous, isRunning: false }));
+      }
       setStatus({ state: 'modifying', charCount: event.code.length });
     };
     try {
@@ -851,7 +886,7 @@ export default function useCodeAutoRepair() {
     recordFileChanges(currentCode, modifiedCode);
     beginRuntimeCheck(modifiedCode);
     return true;
-  }, [addTrustedTerminalPrefix, beginAgentTrace, beginRuntimeCheck, clearCheckTimer, clearRepairRetryTimer, commitAgentTrace, consumeAgentEvent, recordFileChanges, terminalWorkspaceId]);
+  }, [addTrustedTerminalPrefix, beginAgentTrace, beginRuntimeCheck, clearCheckTimer, clearRepairRetryTimer, commitAgentTrace, consumeAgentEvent, finishTimeline, recordFileChanges, terminalWorkspaceId]);
 
   const handleRuntimeError = useCallback(async (
     runtimeError: RuntimeErrorReport,
@@ -961,6 +996,7 @@ export default function useCodeAutoRepair() {
           fixedCode = event.code;
           didComplete = didComplete || event.done;
           if (event.done) {
+            finishTimeline('ops');
             appendTimeline({
               actorKind: 'ops',
               actorId: `ops:${currentAgentRunIdRef.current}:repair`,
@@ -999,6 +1035,7 @@ export default function useCodeAutoRepair() {
       ));
       isRepairingRef.current = false;
       recordFileChanges(codeBeforeRepair, fixedCode, true, 'ops', `ops:${currentAgentRunIdRef.current}:repair`);
+      finishTimeline('ops');
       appendTimeline({
         actorKind: 'ops',
         actorId: `ops:${currentAgentRunIdRef.current}:repair`,
@@ -1011,6 +1048,7 @@ export default function useCodeAutoRepair() {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       isRepairingRef.current = false;
       const message = error instanceof Error ? error.message : '自动修复失败。';
+      finishTimeline('ops');
       setRepairLogs((previous) => previous.map((log) =>
         log.attempt === attempt ? { ...log, status: 'failed' } : log
       ));
@@ -1047,7 +1085,7 @@ export default function useCodeAutoRepair() {
         repairHandlerRef.current(runtimeError);
       }, 300);
     }
-  }, [appendTimeline, beginRuntimeCheck, clearCheckTimer, clearRepairRetryTimer, commitAgentTrace, consumeAgentEvent, continueAgentTrace, recordFileChanges, terminalWorkspaceId]);
+  }, [appendTimeline, beginRuntimeCheck, clearCheckTimer, clearRepairRetryTimer, commitAgentTrace, consumeAgentEvent, continueAgentTrace, finishTimeline, recordFileChanges, terminalWorkspaceId]);
 
   repairHandlerRef.current = (runtimeError) => {
     void handleRuntimeError(runtimeError);

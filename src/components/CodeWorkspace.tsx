@@ -1462,7 +1462,13 @@ export default function CodeWorkspace({
                       <CodeAgentTimeline
                         events={getTimelineEvents(run)}
                         runId={run.id}
-                        isRunning={run.trace.isRunning}
+                        isRunning={run.trace.isRunning || (run.id === latestRunId && (
+                          acceptanceState === 'running' ||
+                          status.state === 'generating' ||
+                          status.state === 'modifying' ||
+                          status.state === 'checking' ||
+                          status.state === 'repairing'
+                        ))}
                         acceptanceState={run.id === latestRunId ? acceptanceState : 'idle'}
                         acceptanceReport={run.id === latestRunId ? acceptanceReport : null}
                         acceptanceElapsedSeconds={run.id === latestRunId ? acceptanceElapsedSeconds : 0}

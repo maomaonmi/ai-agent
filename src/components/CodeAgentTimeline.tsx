@@ -156,9 +156,9 @@ function makeTestEvents(
   return events;
 }
 
-function thoughtSummary(event: CodeAgentTimelineEvent): string {
+function thoughtSummary(event: CodeAgentTimelineEvent, isRunning: boolean): string {
   const durationMs = event.metrics?.durationMs;
-  const duration = durationMs == null ? '计时中' : `${Math.max(0, Math.round(durationMs / 1_000))} 秒`;
+  const duration = durationMs == null ? (isRunning ? '计时中' : '已结束') : `${Math.max(0, Math.round(durationMs / 1_000))} 秒`;
   return `思考 · ${duration} · ${event.content.length.toLocaleString()} 字`;
 }
 
@@ -170,17 +170,18 @@ function ActorBadge({ kind }: { kind: CodeAgentActorKind }) {
   );
 }
 
-function TimelineEventCard({ event, onOpenDiff }: {
+function TimelineEventCard({ event, onOpenDiff, isRunning }: {
   event: CodeAgentTimelineEvent;
   onOpenDiff?: (path: string) => void;
+  isRunning: boolean;
 }) {
   const filePath = event.file?.path || (typeof event.metadata?.path === 'string' ? event.metadata.path : '');
   if (event.stage === 'thinking') {
     return (
-      <details className="rounded-lg border border-slate-200 bg-white" open={!event.done}>
+      <details className="rounded-lg border border-slate-200 bg-white" open={!event.done && isRunning}>
         <summary className="cursor-pointer list-none px-3 py-2 text-xs font-medium text-slate-600 marker:hidden">
-          <span className="mr-2 text-slate-400">⌄</span>{thoughtSummary(event)}
-          {!event.done && <span className="ml-2 animate-pulse text-blue-500">生成中</span>}
+          <span className="mr-2 text-slate-400">⌄</span>{thoughtSummary(event, isRunning)}
+          {!event.done && isRunning && <span className="ml-2 animate-pulse text-blue-500">生成中</span>}
         </summary>
         <div className="border-t border-slate-100 px-3 py-3 text-xs leading-6 text-slate-600">
           <div className="whitespace-pre-wrap break-words">{event.content}</div>
@@ -289,7 +290,7 @@ export default function CodeAgentTimeline({
               <span className="text-[10px] text-slate-400">{STAGE_LABEL[event.stage]}</span>
               {event.status && <span className="text-[10px] text-slate-400">· {event.status}</span>}
             </div>
-            <TimelineEventCard event={event} onOpenDiff={onOpenDiff} />
+          <TimelineEventCard event={event} onOpenDiff={onOpenDiff} isRunning={isRunning} />
           </li>
         ))}
       </ol>
