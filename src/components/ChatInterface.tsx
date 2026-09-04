@@ -644,7 +644,6 @@ export default function ChatInterface() {
     agentRuns,
     terminalWorkspaceId,
     trustedTerminalPrefixes,
-    tasks: codeTasks,
     generate: generateCode,
     modify: modifyCode,
     reset: resetCode,
@@ -3582,7 +3581,6 @@ export default function ChatInterface() {
               onVfsChange={handleVfsChange}
               onRewritePrompt={handleRewritePrompt}
               onDeletePrompt={handleDeletePrompt}
-              tasks={codeTasks}
             />
             {agentTrace.tokenUsage && (
               <div className="border-t border-slate-200 bg-white px-3 py-1 text-[11px] text-slate-400">

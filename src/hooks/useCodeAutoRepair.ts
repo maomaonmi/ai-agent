@@ -20,7 +20,6 @@ import {
   type HookEvent,
   type TokenUsageEvent,
   type McpMode,
-  type TaskItem,
 } from '../lib/api';
 import { appendTimelineEvent } from '../Code/agentTimeline';
 import { parseProjectCode } from '../Code/fullstackBundler';
@@ -205,9 +204,6 @@ export default function useCodeAutoRepair() {
   });
   // 会话级（本次 tab session）的信任白名单，按 runId 分组，关页面就失效。
   const [trustedTerminalPrefixes, setTrustedTerminalPrefixes] = useState<Record<string, string[]>>({});
-  // Why: 全栈修改模式任务拆解——后端推送 task_list/task_update 事件，
-  // 前端用浮层卡片展示进度。每次新 run 开始时清空。
-  const [tasks, setTasks] = useState<TaskItem[]>([]);
 
   const codeRef = useRef('');
   const runIdRef = useRef('');
@@ -344,8 +340,6 @@ export default function useCodeAutoRepair() {
     // Why: 信任白名单按 runId 切分；每启动一次新 agent 自动初始化一个空数组，
     // 用户在这次 run 里勾选过“信任”的命令前缀就命中，关 tab 整体失效。
     setTrustedTerminalPrefixes((previous) => previous[id] ? previous : { ...previous, [id]: [] });
-    // Why: 每次 agent run 开始时清空任务列表，避免上一次的残留任务显示。
-    setTasks([]);
     appendTimeline({
       runId: id,
       actorId: `main:${id}`,
@@ -469,14 +463,11 @@ export default function useCodeAutoRepair() {
     // Why: 任务拆解事件——task_list 推送完整列表，task_update 更新单个任务状态。
     // 前端用浮层卡片展示进度，不进 agent_trace 大黑框。
     if (event.type === 'task_list') {
-      setTasks(event.tasks);
-      appendActivity(`已拆解 ${event.tasks.length} 个执行任务。`, event.done, 'observation', 'task_list');
+      const taskSummary = event.tasks.map((task) => `${task.id}. ${task.title}`).join('；');
+      appendActivity(`已拆解 ${event.tasks.length} 个执行任务${taskSummary ? `：${taskSummary}` : '。'}`, event.done, 'observation', 'task_list');
       return true;
     }
     if (event.type === 'task_update') {
-      setTasks((previous) => previous.map((t) =>
-        t.id === event.task_id ? { ...t, status: event.status } : t
-      ));
       appendActivity(`任务 ${event.task_id} · ${event.status}`, event.done, 'observation', event.status);
       // Why: 子任务完成时携带 delta，追加到执行记录的 fileChanges 里。
       if (event.status === 'completed' && event.delta) {
@@ -1148,7 +1139,6 @@ export default function useCodeAutoRepair() {
     agentRuns,
     terminalWorkspaceId,
     trustedTerminalPrefixes,
-    tasks,
     generate,
     modify,
     reset,

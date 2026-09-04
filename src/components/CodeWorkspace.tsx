@@ -55,7 +55,6 @@ import {
   type CodeAcceptanceReport,
   type CodeAgentRun,
   type CodeAgentTimelineEvent,
-  type TaskItem,
 } from '../lib/api';
 import {
   detectLanguage,
@@ -114,66 +113,6 @@ interface CodeWorkspaceProps {
   // 变更后需要把新 VFS 序列化为字符串同步回上层 ChatInterface 的 generatedCode，
   // 以便下次提交时Agent能看到完整一致的VFS快照。
   onVfsChange?: (serializedCode: string) => void;
-  // Why: 全栈修改模式任务拆解——后端推送子任务列表，
-  // 前端用浮层卡片展示进度（待办/进行中/完成/失败/跳过）。
-  tasks?: TaskItem[];
-}
-
-const TASK_STATUS_ICON: Record<TaskItem['status'], string> = {
-  pending: '\u23F3',
-  in_progress: '\u21BB',
-  completed: '\u2705',
-  failed: '\u274C',
-  skipped: '\u23ED\uFE0F',
-};
-
-const TASK_STATUS_COLOR: Record<TaskItem['status'], string> = {
-  pending: 'text-slate-400',
-  in_progress: 'text-blue-500',
-  completed: 'text-green-600',
-  failed: 'text-red-500',
-  skipped: 'text-amber-500',
-};
-
-function TaskProgressCard({ tasks }: { tasks: TaskItem[] }) {
-  const [expanded, setExpanded] = useState(true);
-  const completed = tasks.filter((t) => t.status === 'completed').length;
-  const failed = tasks.filter((t) => t.status === 'failed').length;
-  const inProgress = tasks.some((t) => t.status === 'in_progress');
-
-  return (
-    <div className="absolute right-3 top-3 z-30 w-80 max-w-[calc(100%-1.5rem)] rounded-lg border border-slate-200 bg-white/95 shadow-lg backdrop-blur-sm">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-center justify-between px-3 py-2 text-left"
-      >
-        <span className="flex items-center gap-2 text-sm font-medium text-slate-700">
-          {inProgress && (
-            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-blue-500" />
-          )}
-          任务进度 {completed}/{tasks.length}
-          {failed > 0 && <span className="text-xs text-red-400">({failed} 失败)</span>}
-        </span>
-        <span className="text-xs text-slate-400">{expanded ? '\u25BC' : '\u25B2'}</span>
-      </button>
-      {expanded && (
-        <ul className="max-h-60 overflow-y-auto px-3 pb-2">
-          {tasks.map((task) => (
-            <li key={task.id} className="flex items-start gap-2 py-1.5 text-xs">
-              <span className="mt-0.5 shrink-0">{TASK_STATUS_ICON[task.status]}</span>
-              <div className="min-w-0 flex-1">
-                <p className={`font-medium ${TASK_STATUS_COLOR[task.status]}`}>{task.title}</p>
-                {task.target_files.length > 0 && (
-                  <p className="mt-0.5 truncate text-slate-400">{task.target_files.join(', ')}</p>
-                )}
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  );
 }
 
 function getTimelineEvents(run: CodeAgentRun): CodeAgentTimelineEvent[] {
@@ -253,7 +192,6 @@ export default function CodeWorkspace({
   mentionedFiles = [],
   onMentionedFilesChange,
   onVfsChange,
-  tasks = [],
 }: CodeWorkspaceProps) {
   const [activeView, setActiveView] = useState<'preview' | 'source'>('preview');
   const [vfs, setVfs] = useState<VirtualFileSystem>({});
@@ -1734,10 +1672,6 @@ export default function CodeWorkspace({
         />
 
         <div className="relative min-h-[28rem] min-w-0 flex-1 bg-white lg:min-h-0 fullscreen:min-h-0">
-          {/* Why: 全栈修改模式任务拆解浮层卡片——展示子任务进度，可折叠。 */}
-          {tasks.length > 0 && (
-            <TaskProgressCard tasks={tasks} />
-          )}
           {!hasCode && status.state !== 'generating' && (
             <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-white px-6 text-center">
               <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-slate-100 text-2xl">
