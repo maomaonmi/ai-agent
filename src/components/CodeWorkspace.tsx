@@ -25,6 +25,10 @@ import {
   SelectedElementContext,
 } from '../lib/codeSandbox';
 import { SANDBOX_SET_INSPECT_MODE } from '../Code/inspectorScript';
+import {
+  getAcceptanceEligibility,
+  type AcceptanceEligibilityState,
+} from '../Code/acceptancePolicy';
 import { bundleVFS, splitHtmlToVFS, VirtualFileSystem } from '../Code/vfsBundler';
 import { VersionSnapshot } from '../Code/versionManager';
 import { VersionTimelineDrawer } from '../Code/VersionTimelineDrawer';
@@ -263,6 +267,10 @@ export default function CodeWorkspace({
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const acceptanceControllerRef = useRef<AbortController | null>(null);
   const testedRunIdRef = useRef('');
+  const acceptanceEligibilityRef = useRef<AcceptanceEligibilityState>({
+    candidateRunId: '',
+    testedRunId: '',
+  });
   const consoleEntriesRef = useRef<SandboxConsoleEntry[]>([]);
   const acceptancePreviewRef = useRef('');
   const promptsRef = useRef<string[]>([]);
@@ -824,14 +832,19 @@ export default function CodeWorkspace({
   }, [status.state, vfs]);
 
   useEffect(() => {
+    const eligibility = getAcceptanceEligibility(
+      acceptanceEligibilityRef.current,
+      { runId, status: status.state },
+    );
+    acceptanceEligibilityRef.current = eligibility.state;
     if (
-      status.state !== 'done' ||
-      !runId ||
+      !eligibility.shouldStart ||
       !acceptancePreviewRef.current.trim() ||
       testedRunIdRef.current === runId
     ) return;
 
-    testedRunIdRef.current = runId;
+    const acceptanceRunId = runId;
+    testedRunIdRef.current = acceptanceRunId;
     const controller = new AbortController();
     acceptanceControllerRef.current = controller;
     setAcceptanceState('running');
@@ -848,7 +861,7 @@ export default function CodeWorkspace({
         text: entry.args.join(' '),
       })),
     }, controller.signal).then((report) => {
-      if (controller.signal.aborted || testedRunIdRef.current !== runId) return;
+      if (controller.signal.aborted || testedRunIdRef.current !== acceptanceRunId) return;
       setAcceptanceReport(report);
       if (report.blocked) {
         setAcceptanceState('blocked');
@@ -865,7 +878,7 @@ export default function CodeWorkspace({
         .join('\n');
       onRuntimeErrorRef.current({
         type: 'code-sandbox-runtime-error',
-        runId,
+        runId: acceptanceRunId,
         source: 'python-playwright-test-agent',
         message: [
           `用户验收未通过：${report.plan?.summary ?? expectation}`,

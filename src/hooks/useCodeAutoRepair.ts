@@ -22,6 +22,8 @@ import {
   type McpMode,
 } from '../lib/api';
 import { appendTimelineEvent } from '../Code/agentTimeline';
+import { resetAgentRuns } from '../Code/agentRunLifecycle';
+import { canStartRuntimeRepair } from '../Code/acceptancePolicy';
 import { parseProjectCode } from '../Code/fullstackBundler';
 import {
   CodeGenerationStatus,
@@ -215,6 +217,7 @@ export default function useCodeAutoRepair() {
   const errorOccurrencesRef = useRef<Map<string, number>>(new Map());
   const recentErrorsRef = useRef<string[]>([]);
   const autoRepairStoppedRef = useRef(false);
+  const mainWorkCompletedRef = useRef(false);
   const hasAgentOutputRef = useRef(false);
   const agentTraceRef = useRef<CodeAgentTrace>(EMPTY_AGENT_TRACE);
   const currentAgentRunIdRef = useRef('');
@@ -646,6 +649,7 @@ export default function useCodeAutoRepair() {
 
   const beginRuntimeCheck = useCallback((nextCode: string) => {
     clearCheckTimer();
+    mainWorkCompletedRef.current = true;
     updateCode(nextCode);
     sequenceRef.current += 1;
     const nextRunId = `code-run-${Date.now()}-${sequenceRef.current}`;
@@ -663,7 +667,7 @@ export default function useCodeAutoRepair() {
     }, ERROR_CHECK_WINDOW_MS);
   }, [clearCheckTimer, updateCode]);
 
-  const reset = useCallback(() => {
+  const reset = useCallback((options: { preserveAgentRuns?: boolean } = {}) => {
     controllerRef.current?.abort();
     controllerRef.current = null;
     clearCheckTimer();
@@ -675,6 +679,7 @@ export default function useCodeAutoRepair() {
     errorOccurrencesRef.current.clear();
     recentErrorsRef.current = [];
     autoRepairStoppedRef.current = false;
+    mainWorkCompletedRef.current = false;
     setCodeState('');
     setRunId('');
     setRepairLogs([]);
@@ -683,14 +688,18 @@ export default function useCodeAutoRepair() {
     timelineSequenceRef.current = 0;
     thinkingStartedAtRef.current = {};
     setAgentTrace(EMPTY_AGENT_TRACE);
-    setAgentRuns([]);
+    setAgentRuns((previous) => resetAgentRuns(previous, {
+      preserveHistory: options.preserveAgentRuns,
+    }));
     // 终端信任白名单：reset 时一起清掉，避免之前的 run 信任污染新会话。
-    setTrustedTerminalPrefixes({});
+    if (!options.preserveAgentRuns) setTrustedTerminalPrefixes({});
     setStatus({ state: 'idle' });
   }, [clearCheckTimer, clearRepairRetryTimer]);
 
   const restore = useCallback((savedCode: string) => {
-    reset();
+    // Restoring a checkpoint/version changes the active code projection; it
+    // must not erase the conversation's completed AgentLoop history.
+    reset({ preserveAgentRuns: true });
     if (!savedCode) return;
     updateCode(savedCode);
     sequenceRef.current += 1;
@@ -730,7 +739,9 @@ export default function useCodeAutoRepair() {
   ) => {
     sessionIdRef.current = sessionId;
     mcpRef.current = mcp;
-    reset();
+    // A new request starts a new run, but completed runs remain visible and
+    // persistable as part of this conversation's single timeline history.
+    reset({ preserveAgentRuns: true });
     beginAgentTrace(projectKind === 'fullstack' ? '正在启动全栈代码智能体。' : '正在启动前端代码智能体。', prompt, projectKind);
     // 注意：beginAgentTrace 内部设置了 currentAgentRunIdRef，所以必须在它之后取 meta.run_id。
     const runIdForRequest = currentAgentRunIdRef.current;
@@ -808,6 +819,7 @@ export default function useCodeAutoRepair() {
     errorOccurrencesRef.current.clear();
     recentErrorsRef.current = [];
     autoRepairStoppedRef.current = false;
+    mainWorkCompletedRef.current = false;
     setRepairLogs([]);
     setStatus({ state: 'modifying', charCount: 0 });
     const currentVfs = parseProjectCode(currentCode);
@@ -884,6 +896,11 @@ export default function useCodeAutoRepair() {
   ) => {
     if (
       runtimeError.runId !== runIdRef.current ||
+      !canStartRuntimeRepair({
+        mainWorkCompleted: mainWorkCompletedRef.current,
+        currentRunId: runIdRef.current,
+        errorRunId: runtimeError.runId,
+      }) ||
       isRepairingRef.current ||
       autoRepairStoppedRef.current ||
       !codeRef.current
@@ -1085,6 +1102,7 @@ export default function useCodeAutoRepair() {
   const stopAutoRepair = useCallback(() => {
     autoRepairStoppedRef.current = true;
     isRepairingRef.current = false;
+    mainWorkCompletedRef.current = false;
     controllerRef.current?.abort();
     controllerRef.current = null;
     clearCheckTimer();

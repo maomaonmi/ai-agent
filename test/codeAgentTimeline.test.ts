@@ -5,6 +5,14 @@ import {
   appendTimelineEvent,
   type TimelineEventInput,
 } from '../src/Code/agentTimeline.ts';
+import {
+  getAcceptanceEligibility,
+  canStartRuntimeRepair,
+  type AcceptanceEligibilityState,
+} from '../src/Code/acceptancePolicy.ts';
+import {
+  resetAgentRuns,
+} from '../src/Code/agentRunLifecycle.ts';
 
 function input(overrides: Partial<TimelineEventInput> = {}): TimelineEventInput {
   return {
@@ -72,4 +80,58 @@ test('is idempotent when the same event is replayed after an SSE reconnect', () 
 
   assert.equal(replayed.length, 1);
   assert.equal(replayed[0]?.content, '重复事件不应再次出现');
+});
+
+test('does not start acceptance for a restored completed run', () => {
+  const state: AcceptanceEligibilityState = {
+    candidateRunId: '',
+    testedRunId: '',
+  };
+
+  const result = getAcceptanceEligibility(state, {
+    runId: 'restored-code-run',
+    status: 'done',
+  });
+
+  assert.equal(result.shouldStart, false);
+  assert.equal(result.state.candidateRunId, '');
+});
+
+test('starts acceptance only after a live generation reaches done', () => {
+  const initial: AcceptanceEligibilityState = {
+    candidateRunId: '',
+    testedRunId: '',
+  };
+  const running = getAcceptanceEligibility(initial, {
+    runId: 'live-code-run',
+    status: 'checking',
+  });
+  const completed = getAcceptanceEligibility(running.state, {
+    runId: 'live-code-run',
+    status: 'done',
+  });
+
+  assert.equal(running.shouldStart, false);
+  assert.equal(completed.shouldStart, true);
+  assert.equal(completed.state.candidateRunId, 'live-code-run');
+});
+
+test('preserves prior AgentLoop runs for a new request but clears them on explicit reset', () => {
+  const previous = [{ id: 'agent-run-1' }] as never[];
+
+  assert.strictEqual(resetAgentRuns(previous, { preserveHistory: true }), previous);
+  assert.deepEqual(resetAgentRuns(previous), []);
+});
+
+test('does not let runtime errors start ops while the main Agent is still streaming', () => {
+  assert.equal(canStartRuntimeRepair({
+    mainWorkCompleted: false,
+    currentRunId: 'code-run-1',
+    errorRunId: 'code-run-1',
+  }), false);
+  assert.equal(canStartRuntimeRepair({
+    mainWorkCompleted: true,
+    currentRunId: 'code-run-1',
+    errorRunId: 'code-run-1',
+  }), true);
 });
