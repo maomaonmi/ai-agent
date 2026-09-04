@@ -43,10 +43,18 @@ function parseProjectManifest(source: string): ProjectManifest | null {
       || !String((frontend as Record<string, unknown>).entry).trim()
     ) return null;
     const frontendRaw = frontend as Record<string, unknown>;
+    const isSafePath = (value: string): boolean => {
+      const normalized = value.replaceAll('\\', '/');
+      return Boolean(normalized)
+        && !normalized.startsWith('/')
+        && !normalized.split('/').some((part) => !part || part === '.' || part === '..');
+    };
+    if (!isSafePath(String(frontendRaw.entry))) return null;
     const isStringArray = (value: unknown): value is string[] =>
       value == null || (Array.isArray(value) && value.every((item) => typeof item === 'string' && item.trim()));
     if (!isStringArray(frontendRaw.asset_roots)) return null;
     const assetRoots: string[] = frontendRaw.asset_roots == null ? [] : frontendRaw.asset_roots as string[];
+    if (assetRoots.some((path) => !isSafePath(path))) return null;
 
     const backend = raw.backend;
     if (backend != null && (typeof backend !== 'object' || Array.isArray(backend))) return null;
@@ -54,12 +62,14 @@ function parseProjectManifest(source: string): ProjectManifest | null {
     if (backendRaw && backendRaw.entry != null && typeof backendRaw.entry !== 'string') return null;
     if (backendRaw && !isStringArray(backendRaw.source_roots)) return null;
     const backendRoots: string[] = backendRaw?.source_roots == null ? [] : backendRaw.source_roots as string[];
+    if ((backendRaw?.entry != null && !isSafePath(backendRaw.entry as string)) || backendRoots.some((path) => !isSafePath(path))) return null;
 
     const data = raw.data;
     if (data != null && (typeof data !== 'object' || Array.isArray(data))) return null;
     const dataRaw = data as Record<string, unknown> | undefined;
     if (dataRaw && !isStringArray(dataRaw.files)) return null;
     const dataFiles: string[] = dataRaw?.files == null ? [] : dataRaw.files as string[];
+    if (dataFiles.some((path) => !isSafePath(path))) return null;
     const preview = raw.preview;
     if (preview != null && (typeof preview !== 'object' || Array.isArray(preview))) return null;
     if (preview && (preview as Record<string, unknown>).api_mode != null && (preview as Record<string, unknown>).api_mode !== 'mock') return null;
