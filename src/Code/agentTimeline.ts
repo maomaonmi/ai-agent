@@ -103,6 +103,14 @@ export function completeTimelineEvent(
   return next;
 }
 
+export function shouldShowActorLabel(
+  events: Pick<CodeAgentTimelineEvent, 'actorKind'>[],
+  index: number,
+): boolean {
+  if (index <= 0) return index === 0 && events.length > 0;
+  return events[index - 1]?.actorKind !== events[index]?.actorKind;
+}
+
 export function timelineCharCount(events: CodeAgentTimelineEvent[]): number {
   return events.reduce((total, event) => total + event.content.length, 0);
 }

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   appendTimelineEvent,
   completeTimelineEvent,
+  shouldShowActorLabel,
   type TimelineEventInput,
 } from '../src/Code/agentTimeline.ts';
 import {
@@ -100,6 +101,24 @@ test('keeps main, test, and ops actors separate even when stages match', () => {
 
   assert.deepEqual(events.map((event) => event.actorKind), ['main', 'test', 'ops']);
   assert.deepEqual(events.map((event) => event.content), ['先检查页面结构', '制定验收计划', '诊断运行错误']);
+});
+
+test('shows an actor label only when the timeline switches lanes', () => {
+  const events = [
+    { actorKind: 'main' as const },
+    { actorKind: 'main' as const },
+    { actorKind: 'system' as const },
+    { actorKind: 'system' as const },
+    { actorKind: 'main' as const },
+  ];
+
+  assert.deepEqual(events.map((_, index) => shouldShowActorLabel(events, index)), [
+    true,
+    false,
+    true,
+    false,
+    true,
+  ]);
 });
 
 test('is idempotent when the same event is replayed after an SSE reconnect', () => {

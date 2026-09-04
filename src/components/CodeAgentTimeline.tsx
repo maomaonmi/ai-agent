@@ -6,6 +6,7 @@ import type {
   CodeAgentTimelineEvent,
 } from '../lib/api';
 import MarkdownMessage from './MarkdownMessage';
+import { shouldShowActorLabel } from '../Code/agentTimeline';
 
 type AcceptanceState = 'idle' | 'running' | 'passed' | 'failed' | 'blocked';
 
@@ -285,10 +286,10 @@ export default function CodeAgentTimeline({
         )}
       </div>
       <ol className="space-y-2.5">
-        {allEvents.map((event) => (
+        {allEvents.map((event, index) => (
           <li key={event.eventId} className="space-y-1.5">
-            <div className="flex items-center gap-2">
-              <ActorBadge kind={event.actorKind} />
+            <div className="flex min-h-4 items-center gap-2">
+              {shouldShowActorLabel(allEvents, index) && <ActorBadge kind={event.actorKind} />}
               <span className="text-[10px] text-slate-400">{STAGE_LABEL[event.stage]}</span>
               {event.status && <span className="text-[10px] text-slate-400">· {event.status}</span>}
             </div>

@@ -1320,8 +1320,8 @@ export default function CodeWorkspace({
             </div>
           )}
           <div className="mb-3 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-slate-800">用户需求</h3>
-            <span className="text-xs text-slate-400">{prompts.length} 条</span>
+            <h3 className="text-sm font-semibold text-slate-800">对话流</h3>
+            <span className="text-xs text-slate-400">{prompts.length} 条消息</span>
           </div>
 
           {prompts.length === 0 ? (
@@ -1334,100 +1334,98 @@ export default function CodeWorkspace({
                 const run = runsForPrompts[index];
                 const isExpanded = Boolean(run && expandedRunIds.has(run.id));
                 return (
-                  <li
-                    key={`${index}-${prompt.slice(0, 24)}`}
-                    className="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm"
-                  >
-                    {/* 问题块（用户） */}
-                    <div className="p-3">
-                      <div className="flex items-start gap-2">
-                        <div className="min-w-0 flex-1">
-                          <span className="mb-1 flex items-center justify-between gap-2 text-xs font-medium text-slate-400">
-                            <span>你 · 需求 {index + 1}</span>
-                            {run && (
-                              <button
-                                type="button"
-                                aria-expanded={isExpanded}
-                                onClick={() => setExpandedRunIds((previous) => {
-                                  const next = new Set(previous);
-                                  if (next.has(run.id)) next.delete(run.id);
-                                  else next.add(run.id);
-                                  return next;
-                                })}
-                                className="flex items-center gap-2 transition-colors hover:text-slate-600"
-                              >
-                                <span className={run.trace.isRunning ? 'text-emerald-600' : 'text-slate-400'}>
-                                  {run.trace.isRunning ? '执行中' : 'AgentLoop'}
-                                </span>
-                                <span aria-hidden="true">{isExpanded ? '⌃' : '⌄'}</span>
-                              </button>
-                            )}
-                          </span>
-                          <span className="block whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">
-                            {prompt}
-                          </span>
-                          {promptAttachments[index] && promptAttachments[index].length > 0 && (
-                            <div className="mt-2 flex flex-wrap gap-1.5">
-                              {promptAttachments[index]!.map((item, attachIndex) => (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img
-                                  key={`${item.url.slice(0, 24)}-${attachIndex}`}
-                                  src={item.url}
-                                  alt={item.name || '附件图片'}
-                                  className="h-12 w-12 cursor-zoom-in rounded border border-slate-200 object-cover"
-                                  onClick={() => setLightboxUrl(item.url)}
-                                />
-                              ))}
-                            </div>
+                  <li key={`${index}-${prompt.slice(0, 24)}`} className="space-y-3">
+                    {/* 用户消息：使用对话气泡，AgentLoop 记录紧随其后形成同一条时间线。 */}
+                    <article className="ml-auto max-w-[94%] rounded-2xl rounded-tr-md border border-sky-100 bg-sky-50/80 px-3.5 py-3 shadow-sm">
+                      <div className="mb-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs font-medium text-slate-400">
+                        <span>你 · 需求 {index + 1}</span>
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          {run && (
+                            <button
+                              type="button"
+                              aria-expanded={isExpanded}
+                              onClick={() => setExpandedRunIds((previous) => {
+                                const next = new Set(previous);
+                                if (next.has(run.id)) next.delete(run.id);
+                                else next.add(run.id);
+                                return next;
+                              })}
+                              className="rounded px-1.5 py-0.5 transition-colors hover:bg-white hover:text-slate-600"
+                            >
+                              <span className={run.trace.isRunning ? 'text-emerald-600' : 'text-slate-400'}>
+                                {run.trace.isRunning ? '执行中' : 'AgentLoop'}
+                              </span>
+                              <span className="ml-1" aria-hidden="true">{isExpanded ? '⌃' : '⌄'}</span>
+                            </button>
                           )}
-                        </div>
-                        <div className="flex shrink-0 flex-col items-end gap-1 text-slate-400">
                           <button
                             type="button"
                             title="复制问题"
+                            aria-label={`复制需求 ${index + 1}`}
                             onClick={() => copyText(prompt)}
-                            className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-slate-100 hover:text-slate-700"
+                            className="rounded px-1.5 py-0.5 transition-colors hover:bg-white hover:text-slate-700"
                           >
                             ⧉ 复制
                           </button>
                           <button
                             type="button"
                             title="重写（CTRL+Enter 发送，会清空其后记录）"
+                            aria-label={`重写需求 ${index + 1}`}
                             onClick={() => onRewritePrompt?.(index)}
-                            className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-slate-100 hover:text-slate-700"
+                            className="rounded px-1.5 py-0.5 transition-colors hover:bg-white hover:text-slate-700"
                           >
                             ✎ 重写
                           </button>
                           <button
                             type="button"
                             title="删除该条问答并关闭对应终端"
+                            aria-label={`删除需求 ${index + 1}`}
                             onClick={() => handleDeletePromptItem(index, run?.id)}
-                            className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-rose-100 hover:text-rose-600"
+                            className="rounded px-1.5 py-0.5 transition-colors hover:bg-white hover:text-rose-600"
                           >
                             🗑 删除
                           </button>
                         </div>
                       </div>
-                    </div>
+                      <div className="whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">
+                        {prompt}
+                      </div>
+                      {promptAttachments[index] && promptAttachments[index].length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1.5">
+                          {promptAttachments[index]!.map((item, attachIndex) => (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              key={`${item.url.slice(0, 24)}-${attachIndex}`}
+                              src={item.url}
+                              alt={item.name || '附件图片'}
+                              className="h-12 w-12 cursor-zoom-in rounded border border-sky-100 object-cover"
+                              onClick={() => setLightboxUrl(item.url)}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </article>
                     {run && isExpanded && (
-                      <CodeAgentTimeline
-                        events={getTimelineEvents(run)}
-                        runId={run.id}
-                        isRunning={run.trace.isRunning || (run.id === latestRunId && (
-                          acceptanceState === 'running' ||
-                          status.state === 'generating' ||
-                          status.state === 'modifying' ||
-                          status.state === 'checking' ||
-                          status.state === 'repairing'
-                        ))}
-                        acceptanceState={run.id === latestRunId ? acceptanceState : 'idle'}
-                        acceptanceReport={run.id === latestRunId ? acceptanceReport : null}
-                        acceptanceElapsedSeconds={run.id === latestRunId ? acceptanceElapsedSeconds : 0}
-                        onOpenDiff={(path) => {
-                          setActiveFile(path);
-                          setActiveView('source');
-                        }}
-                      />
+                      <div className="border-l-2 border-slate-200 pl-2">
+                        <CodeAgentTimeline
+                          events={getTimelineEvents(run)}
+                          runId={run.id}
+                          isRunning={run.trace.isRunning || (run.id === latestRunId && (
+                            acceptanceState === 'running' ||
+                            status.state === 'generating' ||
+                            status.state === 'modifying' ||
+                            status.state === 'checking' ||
+                            status.state === 'repairing'
+                          ))}
+                          acceptanceState={run.id === latestRunId ? acceptanceState : 'idle'}
+                          acceptanceReport={run.id === latestRunId ? acceptanceReport : null}
+                          acceptanceElapsedSeconds={run.id === latestRunId ? acceptanceElapsedSeconds : 0}
+                          onOpenDiff={(path) => {
+                            setActiveFile(path);
+                            setActiveView('source');
+                          }}
+                        />
+                      </div>
                     )}
                   </li>
                 );
@@ -1542,7 +1540,7 @@ export default function CodeWorkspace({
                   ))}
                 </div>
               )}
-              {isMultimodal ? (
+              {isMultimodal && (
                 <div className="flex items-center gap-2">
                   <input
                     ref={fileInputRef}
@@ -1563,10 +1561,6 @@ export default function CodeWorkspace({
                     + 图片
                   </button>
                   <span className="text-[11px] text-slate-400">支持粘贴、点击添加；多模态模型可用</span>
-                </div>
-              ) : (
-                <div className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-700">
-                  当前模型为纯文本模型，如需粘贴/上传图片，请切换到 <b>GLM-5V Turbo</b>。
                 </div>
               )}
             </div>
