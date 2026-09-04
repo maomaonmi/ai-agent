@@ -32,7 +32,9 @@ import { VersionTimelineDrawer } from '../Code/VersionTimelineDrawer';
 import {
   bundleFullstackVFS,
   FULLSTACK_DATABASE_UPDATED,
+  getProjectManifest,
   isFullstackVFS,
+  isManifestProjectVFS,
   parseProjectCode,
   serializeProjectVFS,
 } from '../Code/fullstackBundler';
@@ -256,6 +258,8 @@ export default function CodeWorkspace({
 }: CodeWorkspaceProps) {
   const [activeView, setActiveView] = useState<'preview' | 'source'>('preview');
   const [vfs, setVfs] = useState<VirtualFileSystem>({});
+  const vfsRef = useRef<VirtualFileSystem>({});
+  vfsRef.current = vfs;
   const [activeFile, setActiveFile] = useState('index.html');
   // Why: Agent Loop 刚写入的文件路径，用于文件树实时高亮。随 file_written 事件更新。
   const [writtenHighlight, setWrittenHighlight] = useState<string | null>(null);
@@ -556,7 +560,9 @@ export default function CodeWorkspace({
     () => injectErrorCatcher(
       isFullstackVFS(vfs)
         ? bundleFullstackVFS(vfs, { runId })
-        : bundleVFS(vfs, { injectInspector: false }),
+        : isManifestProjectVFS(vfs)
+          ? bundleFullstackVFS(vfs, { runId })
+          : bundleVFS(vfs, { injectInspector: false }),
       runId,
     ),
     [vfs, runId],
@@ -603,7 +609,7 @@ export default function CodeWorkspace({
   // code 变化时如果是自己提交的版本，不重新 parse 覆盖。
   const manualSerializationRef = useRef<string | null>(null);
   const serializeAndSyncVFS = useCallback((nextVfs: VirtualFileSystem) => {
-    const serialized = isFullstackVFS(nextVfs)
+    const serialized = isFullstackVFS(nextVfs) || isManifestProjectVFS(nextVfs)
       ? serializeProjectVFS(nextVfs)
       : bundleVFS(nextVfs, { injectInspector: false });
     manualSerializationRef.current = serialized;
@@ -626,7 +632,11 @@ export default function CodeWorkspace({
       // Why: reset 时清空 diff 历史快照，避免新对话的 diff 计算把旧会话的文件显示为"删除"。
       previousFileSnapshotsRef.current = {};
     } else if (projectVfs && Object.keys(projectVfs).length > 0 && !initialFileSetRef.current) {
-      setActiveFile('frontend/index.html');
+      const manifest = getProjectManifest(projectVfs);
+      const firstHtml = Object.keys(projectVfs).find((path) =>
+        path.toLowerCase().endsWith('.html') || path.toLowerCase().endsWith('.htm')
+      );
+      setActiveFile(manifest?.frontend.entry ?? firstHtml ?? Object.keys(projectVfs)[0] ?? '');
       initialFileSetRef.current = true;
     }
 
@@ -799,7 +809,12 @@ export default function CodeWorkspace({
         if (database && typeof database === 'object' && !Array.isArray(database)) {
           const serialized = JSON.stringify(database, null, 2);
           if (serialized.length <= 200_000) {
-            setVfs((previous) => ({ ...previous, 'backend/database.json': serialized }));
+            const currentVfs = vfsRef.current;
+            const targetPath = getProjectManifest(currentVfs)?.data?.files?.[0]
+              ?? (currentVfs['backend/database.json'] !== undefined ? 'backend/database.json' : null);
+            if (targetPath) {
+              setVfs((previous) => ({ ...previous, [targetPath]: serialized }));
+            }
           }
         }
       }

@@ -1,6 +1,6 @@
 import JSZip from 'jszip';
 
-import { buildInspectorScript } from './inspectorScript';
+import { buildInspectorScript } from './inspectorScript.ts';
 
 /** A project stored entirely in the browser until the user exports or archives it. */
 export type VirtualFileSystem = Record<string, string>;

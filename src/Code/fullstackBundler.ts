@@ -1,12 +1,104 @@
-import { bundleVFS, VirtualFileSystem } from './vfsBundler';
+import { bundleVFS } from './vfsBundler.ts';
+import type { VirtualFileSystem } from './vfsBundler.ts';
 
 export const FULLSTACK_DATABASE_UPDATED = 'code-sandbox-database-updated' as const;
+export const PROJECT_MANIFEST_PATH = 'project.manifest.json' as const;
+
+export interface ProjectManifest {
+  schema_version: 1;
+  kind: 'static' | 'fullstack';
+  frontend: {
+    entry: string;
+    asset_roots?: string[];
+  };
+  backend?: {
+    entry?: string;
+    source_roots?: string[];
+  };
+  data?: {
+    files?: string[];
+  };
+  preview?: {
+    api_mode?: 'mock';
+  };
+}
 
 export interface FullstackBundleOptions {
   runId?: string;
 }
 
+function parseProjectManifest(source: string): ProjectManifest | null {
+  try {
+    const candidate = JSON.parse(source) as unknown;
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+    const raw = candidate as Record<string, unknown>;
+    const frontend = raw.frontend;
+    if (
+      raw.schema_version !== 1
+      || (raw.kind !== 'static' && raw.kind !== 'fullstack')
+      || !frontend
+      || typeof frontend !== 'object'
+      || Array.isArray(frontend)
+      || typeof (frontend as Record<string, unknown>).entry !== 'string'
+      || !String((frontend as Record<string, unknown>).entry).trim()
+    ) return null;
+    const frontendRaw = frontend as Record<string, unknown>;
+    const isStringArray = (value: unknown): value is string[] =>
+      value == null || (Array.isArray(value) && value.every((item) => typeof item === 'string' && item.trim()));
+    if (!isStringArray(frontendRaw.asset_roots)) return null;
+    const assetRoots: string[] = frontendRaw.asset_roots == null ? [] : frontendRaw.asset_roots as string[];
+
+    const backend = raw.backend;
+    if (backend != null && (typeof backend !== 'object' || Array.isArray(backend))) return null;
+    const backendRaw = backend as Record<string, unknown> | undefined;
+    if (backendRaw && backendRaw.entry != null && typeof backendRaw.entry !== 'string') return null;
+    if (backendRaw && !isStringArray(backendRaw.source_roots)) return null;
+    const backendRoots: string[] = backendRaw?.source_roots == null ? [] : backendRaw.source_roots as string[];
+
+    const data = raw.data;
+    if (data != null && (typeof data !== 'object' || Array.isArray(data))) return null;
+    const dataRaw = data as Record<string, unknown> | undefined;
+    if (dataRaw && !isStringArray(dataRaw.files)) return null;
+    const dataFiles: string[] = dataRaw?.files == null ? [] : dataRaw.files as string[];
+    const preview = raw.preview;
+    if (preview != null && (typeof preview !== 'object' || Array.isArray(preview))) return null;
+    if (preview && (preview as Record<string, unknown>).api_mode != null && (preview as Record<string, unknown>).api_mode !== 'mock') return null;
+
+    return {
+      schema_version: 1,
+      kind: raw.kind as 'static' | 'fullstack',
+      frontend: { entry: String(frontendRaw.entry), asset_roots: assetRoots },
+      ...(backendRaw ? { backend: { entry: backendRaw.entry as string | undefined, source_roots: backendRoots } } : {}),
+      ...(dataRaw ? { data: { files: dataFiles } } : {}),
+      preview: { api_mode: 'mock' },
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Read the project contract without guessing from display names or file counts. */
+export function getProjectManifest(vfs: VirtualFileSystem): ProjectManifest | null {
+  const source = vfs[PROJECT_MANIFEST_PATH];
+  return typeof source === 'string' ? parseProjectManifest(source) : null;
+}
+
+export function isManifestProjectVFS(vfs: VirtualFileSystem): boolean {
+  return getProjectManifest(vfs) !== null;
+}
+
 export function isFullstackVFS(vfs: VirtualFileSystem): boolean {
+  const manifest = getProjectManifest(vfs);
+  if (manifest?.kind === 'fullstack') {
+    const frontendEntry = manifest.frontend.entry;
+    const backendEntry = manifest.backend?.entry;
+    const backendRoots = manifest.backend?.source_roots ?? [];
+    const hasBackendSource = Object.keys(vfs).some((path) =>
+      (backendEntry === path || backendRoots.some((root) => path.startsWith(`${root}/`)))
+    );
+    return Boolean(vfs[frontendEntry] && (backendEntry ? vfs[backendEntry] : hasBackendSource));
+  }
+  // Legacy projects remain previewable while they are migrated in place.
   return 'frontend/index.html' in vfs && 'backend/database.json' in vfs;
 }
 
@@ -105,7 +197,7 @@ function buildMockRestBridge(databaseSource: string, serverSource: string, runId
       var routePattern = '^' + item.path.replace(/\\{[^/]+\\}/g, '[^/]+') + '/?$';
       return new RegExp(routePattern).test(route.pathname);
     });
-    if (!routeAllowed) return response({ error: 'Route not declared by backend/server.py' }, 404);
+    if (!routeAllowed) return response({ error: 'Route not declared by manifest-declared backend source' }, 404);
     var rows = database[route.resource];
     if (!Array.isArray(rows)) return response({ error: 'Resource not found' }, 404);
     var index = route.id == null ? -1 : rows.findIndex(function (item) { return String(item.id) === route.id; });
@@ -187,22 +279,87 @@ function injectIntoHead(html: string, content: string): string {
   return `${content}\n${html}`;
 }
 
+function buildManifestFrontendVFS(
+  vfs: VirtualFileSystem,
+  manifest: ProjectManifest,
+): VirtualFileSystem {
+  const entry = manifest.frontend.entry;
+  const entryDirectory = entry.includes('/') ? entry.slice(0, entry.lastIndexOf('/')) : '';
+  const backendRoots = manifest.backend?.source_roots ?? [];
+  const backendEntry = manifest.backend?.entry;
+  const dataFiles = new Set(manifest.data?.files ?? []);
+  const isBackendPath = (path: string) =>
+    path === backendEntry || backendRoots.some((root) => path.startsWith(`${root}/`));
+  const toEntryRelativePath = (path: string): string => {
+    const from = entryDirectory ? entryDirectory.split('/') : [];
+    const target = path.split('/');
+    while (from.length > 0 && target.length > 0 && from[0] === target[0]) {
+      from.shift(); target.shift();
+    }
+    return [...from.map(() => '..'), ...target].join('/') || path.split('/').pop() || path;
+  };
+
+  const frontendVfs: VirtualFileSystem = { 'index.html': vfs[entry] || '' };
+  for (const [path, content] of Object.entries(vfs)) {
+    if (path === PROJECT_MANIFEST_PATH || path === entry || dataFiles.has(path) || isBackendPath(path)) continue;
+    frontendVfs[toEntryRelativePath(path)] = content;
+  }
+  return frontendVfs;
+}
+
 /** Bundles frontend files and injects an isolated in-memory REST server. */
 export function bundleFullstackVFS(
   vfs: VirtualFileSystem,
   options: FullstackBundleOptions = {},
 ): string {
-  const frontendVfs: VirtualFileSystem = {
-    'index.html': vfs['frontend/index.html'] || vfs['index.html'] || '',
-    'styles.css': vfs['frontend/styles.css'] || vfs['styles.css'] || '',
-    'app.js': vfs['frontend/app.js'] || vfs['app.js'] || vfs['main.js'] || '',
-  };
+  const manifest = getProjectManifest(vfs);
+  if (!manifest || manifest.kind !== 'fullstack') {
+    if (manifest?.kind === 'static') {
+      return bundleVFS(buildManifestFrontendVFS(vfs, manifest), { injectInspector: false });
+    }
+    const legacyFrontendVfs: VirtualFileSystem = {
+      'index.html': vfs['frontend/index.html'] || vfs['index.html'] || '',
+      'styles.css': vfs['frontend/styles.css'] || vfs['styles.css'] || '',
+      'app.js': vfs['frontend/app.js'] || vfs['app.js'] || vfs['main.js'] || '',
+    };
+    const html = bundleVFS(legacyFrontendVfs, { injectInspector: false });
+    return injectIntoHead(
+      html,
+      buildMockRestBridge(
+        vfs['backend/database.json'] || '{}',
+        vfs['backend/server.py'] || '',
+        options.runId || 'fullstack-preview',
+      ),
+    );
+  }
+
+  const entry = manifest.frontend.entry;
+  const backendRoots = manifest.backend?.source_roots ?? [];
+  const backendEntry = manifest.backend?.entry;
+  const dataFiles = new Set(manifest.data?.files ?? []);
+  const isBackendPath = (path: string) =>
+    path === backendEntry || backendRoots.some((root) => path.startsWith(`${root}/`));
+  const frontendVfs = buildManifestFrontendVFS(vfs, manifest);
+  const backendPaths = Object.keys(vfs).filter((path) => isBackendPath(path));
+  const backendSource = backendPaths.map((path) => vfs[path]).join('\n\n');
+  const database: Record<string, unknown> = {};
+  for (const dataPath of manifest.data?.files ?? []) {
+    try {
+      const parsed = JSON.parse(vfs[dataPath] || '{}') as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        Object.assign(database, parsed);
+      }
+    } catch {
+      // Backend validation reports malformed declared data before preview.
+    }
+  }
+  const databaseSource = JSON.stringify(database);
   const html = bundleVFS(frontendVfs, { injectInspector: false });
   return injectIntoHead(
     html,
     buildMockRestBridge(
-      vfs['backend/database.json'] || '{}',
-      vfs['backend/server.py'] || '',
+      databaseSource,
+      backendSource,
       options.runId || 'fullstack-preview',
     ),
   );

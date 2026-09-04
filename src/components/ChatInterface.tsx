@@ -116,7 +116,7 @@ import { documentFromV1Result } from '../features/ai-writing/writingDocumentType
 import useCodeAutoRepair from '../hooks/useCodeAutoRepair';
 import { SelectedElementContext } from '../lib/codeSandbox';
 import { bundleVFS, VirtualFileSystem } from '../Code/vfsBundler';
-import { isFullstackVFS, parseProjectCode, serializeProjectVFS } from '../Code/fullstackBundler';
+import { isFullstackVFS, isManifestProjectVFS, parseProjectCode, serializeProjectVFS } from '../Code/fullstackBundler';
 import {
   createSnapshot,
   deepCopyVFS,
@@ -1142,14 +1142,14 @@ export default function ChatInterface() {
     const restoredVfs = deepCopyVFS(version.vfs);
     setActiveCodeVersionId(version.versionId);
     setSelectedElement(null);
-    restoreCode(isFullstackVFS(restoredVfs)
+    restoreCode(isFullstackVFS(restoredVfs) || isManifestProjectVFS(restoredVfs)
       ? serializeProjectVFS(restoredVfs)
       : bundleVFS(restoredVfs, { injectInspector: false }));
   }, [restoreCode]);
 
   const saveManualCodeVersion = useCallback((vfs: VirtualFileSystem, summary: string) => {
     captureCodeVersion(vfs, summary);
-    restoreCode(isFullstackVFS(vfs)
+    restoreCode(isFullstackVFS(vfs) || isManifestProjectVFS(vfs)
       ? serializeProjectVFS(vfs)
       : bundleVFS(vfs, { injectInspector: false }));
   }, [captureCodeVersion, restoreCode]);
@@ -1210,7 +1210,7 @@ export default function ChatInterface() {
         const restored = await restoreMemoryVfs(session.session_id);
         if (restored.checkpoint_id !== null && Object.keys(restored.vfs).length > 0) {
           const restoredVfs = deepCopyVFS(restored.vfs);
-          restoreCode(isFullstackVFS(restoredVfs)
+          restoreCode(isFullstackVFS(restoredVfs) || isManifestProjectVFS(restoredVfs)
             ? serializeProjectVFS(restoredVfs)
             : bundleVFS(restoredVfs, { injectInspector: false }));
         }
@@ -1255,7 +1255,7 @@ export default function ChatInterface() {
       const detail = project.vfs ? project : await getCodeProject(project.project_id);
       const restoredVfs = deepCopyVFS(detail.vfs ?? {});
       if (Object.keys(restoredVfs).length > 0) {
-        restoreCode(isFullstackVFS(restoredVfs)
+        restoreCode(isFullstackVFS(restoredVfs) || isManifestProjectVFS(restoredVfs)
           ? serializeProjectVFS(restoredVfs)
           : bundleVFS(restoredVfs, { injectInspector: false }));
         setCodeProjectKind(detail.project_kind);
