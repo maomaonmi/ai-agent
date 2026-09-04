@@ -640,7 +640,6 @@ export default function ChatInterface() {
     code: generatedCode,
     status: codeStatus,
     runId: codeRunId,
-    repairLogs,
     agentTrace,
     agentRuns,
     terminalWorkspaceId,
@@ -3552,7 +3551,6 @@ export default function ChatInterface() {
               selectedElement={selectedElement}
               isLoading={isLoading}
               isSessionReady={isSessionReady}
-              repairLogs={repairLogs}
               runId={codeRunId}
               status={codeStatus}
               snapshots={codeVersions}

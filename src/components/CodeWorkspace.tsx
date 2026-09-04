@@ -20,7 +20,6 @@ import {
   isRuntimeErrorReport,
   isSandboxConsoleEntry,
   isSelectedElementContext,
-  RepairLog,
   RuntimeErrorReport,
   SandboxConsoleEntry,
   SelectedElementContext,
@@ -39,7 +38,7 @@ import {
   serializeProjectVFS,
 } from '../Code/fullstackBundler';
 import { FileTreeExplorer, buildTreeFromVFS, type FileTreeAction } from '../Code/FileTreeExplorer';
-import MarkdownMessage from './MarkdownMessage';
+import CodeAgentTimeline from './CodeAgentTimeline';
 // Why: Phase3 记忆面板——Code 工作台左侧 aside 的「记忆」Tab 内容。
 import MemoryPanel from './MemoryPanel';
 // Why: xterm.js 在模块顶层引用 self（浏览器全局），SSR 阶段 Node 环境下没有 self → ReferenceError。
@@ -55,6 +54,7 @@ import {
   type ChatAttachment,
   type CodeAcceptanceReport,
   type CodeAgentRun,
+  type CodeAgentTimelineEvent,
   type TaskItem,
 } from '../lib/api';
 import {
@@ -76,7 +76,6 @@ interface CodeWorkspaceProps {
   selectedElement: SelectedElementContext | null;
   isLoading: boolean;
   isSessionReady: boolean;
-  repairLogs: RepairLog[];
   runId: string;
   status: CodeGenerationStatus;
   snapshots: VersionSnapshot[];
@@ -177,39 +176,40 @@ function TaskProgressCard({ tasks }: { tasks: TaskItem[] }) {
   );
 }
 
-function formatModelOutput(output: string): string {
-  const trimmed = output.trim();
-  if (!trimmed) return '';
-  // Case 1: Complete, valid JSON → pretty-print with standard 2-space indent
-  try {
-    return JSON.stringify(JSON.parse(trimmed), null, 2);
-  } catch {
-    // fall through to incremental formatter below
+function getTimelineEvents(run: CodeAgentRun): CodeAgentTimelineEvent[] {
+  if (run.trace.timeline?.length) return run.trace.timeline;
+  const actorId = `main:${run.id}`;
+  const createdAt = Date.parse(run.createdAt) || 0;
+  let sequence = 0;
+  const next = (
+    stage: CodeAgentTimelineEvent['stage'],
+    content: string,
+    file?: CodeAgentTimelineEvent['file'],
+  ): CodeAgentTimelineEvent => {
+    sequence += 1;
+    return {
+      eventId: `legacy:${run.id}:${sequence}`,
+      runId: run.id,
+      actorId,
+      actorKind: 'main',
+      stage,
+      content,
+      done: true,
+      timestampMs: createdAt + sequence,
+      sequence,
+      file,
+      metadata: { source: 'legacy-trace' },
+    };
+  };
+  const events = run.trace.steps.map((step) => next('status', step));
+  if (run.trace.reasoning) events.push(next('thinking', run.trace.reasoning));
+  if (run.trace.output) events.push(next('output', run.trace.output));
+  if (run.trace.answer && !run.trace.summary) events.push(next('summary', run.trace.answer));
+  if (run.trace.summary) events.push(next('summary', run.trace.summary));
+  for (const change of run.trace.fileChanges ?? []) {
+    events.push(next('file_change', `已生成文件变更：${change.path}`, { ...change, operation: 'modify' }));
   }
-  // Case 2: Incomplete / still-streaming JSON (JSON.parse fails above).
-  // Insert strategic newlines around structural tokens so the display isn't a single wall of text.
-  // Why: models usually emit compact JSON (no whitespace) during json_object streaming mode;
-  // without any line breaks, the <pre> shows one 2000-char line and the diff engine reports
-  // "only 1 line changed" for every edit.  This heuristic is lossy but dramatically improves
-  // readability during the streaming window before the final valid JSON arrives.
-  let formatted = trimmed;
-  // Add newlines AFTER these structural patterns (keep the token, append \n + optional indent)
-  const openers = [
-    { re: /\},/g, sub: '},\n' },
-    { re: /\],/g, sub: '],\n' },
-    { re: /\{"/g, sub: '{\n"' },
-    { re: /\["/g, sub: '[\n"' },
-    { re: /":\{/g, sub: '": {' },
-    { re: /":\[/g, sub: '": [' },
-    { re: /\}\}/g, sub: '}\n}' },  // not perfect but prevents deeply-nested run-on lines
-    { re: /\}\]/g, sub: '}\n]' },
-  ];
-  for (const { re, sub } of openers) {
-    formatted = formatted.replace(re, sub);
-  }
-  // Also break lines after ", at top-level key positions that didn't match above
-  formatted = formatted.replace(/(\w)",(\s*)"/g, '$1",\n"');
-  return formatted;
+  return events;
 }
 
 const ACCEPTANCE_UI_TIMEOUT_MS = 50_000;
@@ -224,7 +224,6 @@ export default function CodeWorkspace({
   selectedElement,
   isLoading,
   isSessionReady,
-  repairLogs,
   runId,
   status,
   snapshots,
@@ -291,13 +290,11 @@ export default function CodeWorkspace({
   // Why: Day58 拖拽目标高亮——从文件树拖拽到表单区域时显示绿色边框。
   const [isDragOver, setIsDragOver] = useState(false);
   const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
-  const [expandedRepairAttempts, setExpandedRepairAttempts] = useState<Set<number>>(new Set());
   const [acceptanceState, setAcceptanceState] = useState<
     'idle' | 'running' | 'passed' | 'failed' | 'blocked'
   >('idle');
   const [acceptanceReport, setAcceptanceReport] = useState<CodeAcceptanceReport | null>(null);
   const [acceptanceElapsedSeconds, setAcceptanceElapsedSeconds] = useState(0);
-  const [isAcceptanceExpanded, setIsAcceptanceExpanded] = useState(true);
   const [leftPanelWidth, setLeftPanelWidth] = useState(360);
   // Why: 图片放大预览弹窗，点击缩略图后显示原图。
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
@@ -338,6 +335,7 @@ export default function CodeWorkspace({
   onRuntimeErrorRef.current = onRuntimeError;
   const hasCode = code.trim().length > 0;
   const hasProject = Object.keys(vfs).length > 0;
+  const latestRunId = agentRuns.at(-1)?.id ?? '';
 
   // 终端面板辅助：创建手动终端 / 关闭会话 / 判断是否手动终端 / 选中的 run_id
   const createManualTerminal = useCallback(() => {
@@ -830,7 +828,6 @@ export default function CodeWorkspace({
     acceptanceControllerRef.current = null;
     setAcceptanceState('idle');
     setAcceptanceReport(null);
-    setIsAcceptanceExpanded(true);
   }, [runId]);
 
   // Why: 切到 Terminal Tab 时，如果还没有选中具体 terminal run_id，自动切到"最近的 agent run（
@@ -1016,15 +1013,6 @@ export default function CodeWorkspace({
       return new Set(previous).add(latest.id);
     });
   }, [agentRuns]);
-
-  useEffect(() => {
-    const latest = repairLogs.at(-1);
-    if (!latest || latest.status !== 'repairing') return;
-    setExpandedRepairAttempts((previous) => {
-      if (previous.has(latest.attempt)) return previous;
-      return new Set(previous).add(latest.attempt);
-    });
-  }, [repairLogs]);
 
   // Why: 新一轮 code 请求开始时清空上一轮的 Skill 命中提示。
   useEffect(() => {
@@ -1307,6 +1295,11 @@ export default function CodeWorkspace({
           >
             保存到 workspace
           </button>
+          {archiveState && (
+            <span role="status" className="max-w-52 truncate text-[11px] text-slate-500" title={archiveState}>
+              {archiveState}
+            </span>
+          )}
           <button
             type="button"
             disabled={!hasProject || isLoading}
@@ -1413,7 +1406,7 @@ export default function CodeWorkspace({
                                 className="flex items-center gap-2 transition-colors hover:text-slate-600"
                               >
                                 <span className={run.trace.isRunning ? 'text-emerald-600' : 'text-slate-400'}>
-                                  {run.trace.isRunning ? '输出中' : '模型输出'}
+                                  {run.trace.isRunning ? '执行中' : 'AgentLoop'}
                                 </span>
                                 <span aria-hidden="true">{isExpanded ? '⌃' : '⌄'}</span>
                               </button>
@@ -1465,113 +1458,19 @@ export default function CodeWorkspace({
                         </div>
                       </div>
                     </div>
-                    {/* 答案块（智能体） */}
-                    {run && run.trace.summary && (
-                      <div className="border-t border-slate-100 bg-white px-3 py-2.5">
-                        <div className="mb-1 flex items-center justify-between gap-2">
-                          <span className="flex items-center gap-2">
-                            <span className="text-[10px] font-medium text-slate-400">智能体</span>
-                            <span className="inline-flex h-4 items-center rounded bg-emerald-50 px-1.5 text-[10px] font-semibold text-emerald-700">
-                              {run.trace.summaryIntent === 'answer'
-                                ? '回答'
-                                : run.trace.summaryIntent === 'ask_clarification'
-                                  ? '澄清'
-                                  : run.trace.summaryIntent === 'fullstack_bootstrap'
-                                    ? '全栈初始化'
-                                    : '变更总结'}
-                            </span>
-                          </span>
-                          <span className="flex items-center gap-1 text-slate-400">
-                            <button
-                              type="button"
-                              title="复制回答"
-                              onClick={() => copyText(run.trace.summary ?? '')}
-                              className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-slate-100 hover:text-slate-700"
-                            >
-                              ⧉ 复制
-                            </button>
-                            <button
-                              type="button"
-                              title="删除该条问答并关闭对应终端"
-                              onClick={() => handleDeletePromptItem(index, run.id)}
-                              className="rounded px-1.5 py-0.5 text-[11px] transition-colors hover:bg-rose-100 hover:text-rose-600"
-                            >
-                              🗑 删除
-                            </button>
-                          </span>
-                        </div>
-                        <MarkdownMessage
-                          className="text-[13px] leading-6 text-slate-700 [&_code]:rounded [&_code]:bg-slate-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-[11px] [&_code]:font-mono"
-                          content={run.trace.summary}
-                        />
-                      </div>
-                    )}
                     {run && isExpanded && (
-                      <section aria-label={`需求 ${index + 1} 的模型输出`} className="border-t border-slate-700 bg-slate-900 p-3 text-slate-200">
-                        <div className="mb-3 flex items-center justify-between gap-2">
-                          <h4 className="text-xs font-semibold">主代码 Agent · 执行记录</h4>
-                          <span className="text-[10px] text-slate-400">
-                            {run.projectKind === 'fullstack' ? '全栈' : '前端'} · {run.trace.isRunning ? '运行中' : '已结束'}
-                          </span>
-                        </div>
-                        <ol className="mb-3 space-y-1.5" aria-label="执行阶段">
-                          {run.trace.steps.map((step, stepIndex) => (
-                            <li key={`${stepIndex}-${step}`} className="flex items-start gap-2 text-[11px] leading-5 text-slate-300">
-                              <span aria-hidden="true" className="mt-1 text-emerald-400">›</span>
-                              <span>{step}</span>
-                            </li>
-                          ))}
-                        </ol>
-                        {run.trace.reasoning && (
-                          <details className="mb-3 rounded border border-slate-700 bg-slate-950/70" open>
-                            <summary className="cursor-pointer select-none px-2.5 py-2 text-[10px] font-medium uppercase tracking-wide text-slate-400">
-                              深度思考过程 · {run.trace.reasoning.length} 字
-                            </summary>
-                            <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words border-t border-slate-700 px-2.5 py-2 font-mono text-[10px] leading-4 text-slate-300">
-                              {run.trace.reasoning}
-                              {run.trace.isRunning && <span className="ml-1 animate-pulse text-cyan-400">▌</span>}
-                            </pre>
-                          </details>
-                        )}
-                        {run.trace.fileChanges && run.trace.fileChanges.length > 0 && (
-                          <div className="mb-3 border-t border-slate-700 pt-2">
-                            <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-500">
-                              文件修改 · {run.trace.fileChanges.length} 个文件
-                            </p>
-                            <ul className="space-y-1 rounded bg-slate-950 p-2 font-mono text-[10px]">
-                              {run.trace.fileChanges.map((change) => (
-                                <li key={change.path} className="flex items-center justify-between gap-3">
-                                  <span className="min-w-0 truncate text-slate-300" title={change.path}>{change.path}</span>
-                                  <span className="shrink-0">
-                                    <span className="text-emerald-400">+{change.additions}</span>
-                                    <span className="ml-2 text-red-400">-{change.deletions}</span>
-                                  </span>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                        <div className="border-t border-slate-700 pt-2">
-                          <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-500">完整模型输出</p>
-                          {/* Day59：回答/澄清类内容已经在折叠按钮下方的“正常文本气泡 summary”里渲染了，
-                              禁止再缩进渲染到完整模型输出大黑框里。只有在没有 summaryIntent 且
-                              trace.answer 存在的老版本数据里才继续显示缩进块。 */}
-                          {run.trace.answer && (!run.trace.summaryIntent || !['answer', 'ask_clarification'].includes(run.trace.summaryIntent)) ? (
-                            // Why: 问答分支返回 Markdown 文本，用 MarkdownMessage 渲染而非 <pre>。
-                            <div className="max-h-96 overflow-auto rounded bg-slate-950 p-3 text-xs leading-relaxed text-slate-200">
-                              <MarkdownMessage content={run.trace.answer} />
-                            </div>
-                          ) : run.trace.output ? (
-                            <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-950 p-2 font-mono text-[10px] leading-4 text-slate-300">
-                              {formatModelOutput(run.trace.output)}
-                            </pre>
-                          ) : (
-                            <p role="status" className="text-[11px] text-slate-500">
-                              {run.trace.isRunning ? '等待模型返回可展示内容…' : '本次执行没有额外的模型文本输出。'}
-                            </p>
-                          )}
-                        </div>
-                      </section>
+                      <CodeAgentTimeline
+                        events={getTimelineEvents(run)}
+                        runId={run.id}
+                        isRunning={run.trace.isRunning}
+                        acceptanceState={run.id === latestRunId ? acceptanceState : 'idle'}
+                        acceptanceReport={run.id === latestRunId ? acceptanceReport : null}
+                        acceptanceElapsedSeconds={run.id === latestRunId ? acceptanceElapsedSeconds : 0}
+                        onOpenDiff={(path) => {
+                          setActiveFile(path);
+                          setActiveView('source');
+                        }}
+                      />
                     )}
                   </li>
                 );
@@ -1579,227 +1478,6 @@ export default function CodeWorkspace({
             </ol>
           )}
 
-          {acceptanceState !== 'idle' && (
-            <section className="mt-5 overflow-hidden rounded-lg border border-slate-200 bg-white" aria-live="polite">
-              <button
-                type="button"
-                aria-expanded={isAcceptanceExpanded}
-                onClick={() => setIsAcceptanceExpanded((value) => !value)}
-                className="flex w-full items-center justify-between gap-2 p-3 text-left transition-colors hover:bg-slate-50"
-              >
-                <h3 className="text-sm font-semibold text-slate-800">Python 测试子 Agent</h3>
-                <span className="flex items-center gap-2">
-                  <span className={`text-xs font-medium ${
-                  acceptanceState === 'passed'
-                    ? 'text-emerald-600'
-                    : acceptanceState === 'running'
-                      ? 'text-blue-600'
-                      : acceptanceState === 'blocked'
-                        ? 'text-amber-600'
-                        : 'text-red-600'
-                  }`}>
-                  {acceptanceState === 'running' && `正在验证 · ${acceptanceElapsedSeconds}s / 50s`}
-                  {acceptanceState === 'passed' && '验收通过'}
-                  {acceptanceState === 'failed' && '验收失败，已交给运维 Agent'}
-                  {acceptanceState === 'blocked' && '测试已阻塞或终止'}
-                  </span>
-                  <span aria-hidden="true" className="text-xs text-slate-400">{isAcceptanceExpanded ? '⌃' : '⌄'}</span>
-                </span>
-              </button>
-              {isAcceptanceExpanded && (
-              <div className="space-y-3 border-t border-slate-200 p-3">
-              {acceptanceReport?.plan?.summary && (
-                <p className="mb-2 text-xs leading-5 text-slate-600">
-                  验收目标：{acceptanceReport.plan.summary}
-                </p>
-              )}
-              {acceptanceReport?.diagnostic && (
-                <p className="rounded-md bg-amber-50 p-2 text-xs leading-5 text-amber-800">
-                  {acceptanceReport.diagnostic}
-                </p>
-              )}
-              {acceptanceReport?.artifacts && acceptanceReport.artifacts.length > 0 && (
-                <div>
-                  <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-400">编写产物</p>
-                  <ul className="space-y-1 rounded-md bg-slate-950 p-2 font-mono text-[10px]">
-                    {acceptanceReport.artifacts.map((artifact) => (
-                      <li key={artifact.path} className="flex items-center justify-between gap-3">
-                        <span className="truncate text-slate-300" title={artifact.path}>{artifact.path}</span>
-                        <span className="shrink-0">
-                          <span className="text-emerald-400">+{artifact.additions}</span>
-                          <span className="ml-2 text-red-400">-{artifact.deletions}</span>
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {(acceptanceReport?.runner_stdout || acceptanceReport?.runner_stderr || acceptanceReport?.returncode != null) && (
-                <div>
-                  <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-400">
-                    测试执行器日志
-                    {acceptanceReport?.returncode != null && (
-                      <span className={`ml-2 rounded px-1.5 py-0.5 font-mono ${acceptanceReport.returncode === 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'}`}>
-                        exit {acceptanceReport.returncode}
-                      </span>
-                    )}
-                  </p>
-                  <div className="space-y-2">
-                    {acceptanceReport?.runner_stderr ? (
-                      <details className="rounded-md border border-rose-200 bg-rose-50">
-                        <summary className="cursor-pointer select-none px-2 py-1.5 text-[11px] font-medium text-rose-700">
-                          stderr（运行器错误输出）
-                        </summary>
-                        <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words border-t border-rose-200 bg-slate-950 p-2 font-mono text-[10px] leading-4 text-red-200">
-                          {acceptanceReport.runner_stderr}
-                        </pre>
-                      </details>
-                    ) : null}
-                    {acceptanceReport?.runner_stdout ? (
-                      <details className="rounded-md border border-slate-200 bg-slate-50">
-                        <summary className="cursor-pointer select-none px-2 py-1.5 text-[11px] font-medium text-slate-600">
-                          stdout（浏览器测试输出）
-                        </summary>
-                        <pre className="max-h-56 overflow-auto whitespace-pre-wrap break-words border-t border-slate-200 bg-slate-950 p-2 font-mono text-[10px] leading-4 text-slate-200">
-                          {acceptanceReport.runner_stdout}
-                        </pre>
-                      </details>
-                    ) : null}
-                  </div>
-                </div>
-              )}
-              {acceptanceReport?.network_failures && acceptanceReport.network_failures.length > 0 && (
-                <div>
-                  <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-400">
-                    沙盒网络失败 · {acceptanceReport.network_failures.length}
-                  </p>
-                  <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-2 font-mono text-[10px] leading-4 text-slate-300">
-                    {acceptanceReport.network_failures
-                      .map((item: { url?: string; error?: unknown }) =>
-                        `${item.url ?? 'N/A'} · ${String(item.error ?? '')}`,
-                      )
-                      .join('\n')}
-                  </pre>
-                </div>
-              )}
-              {acceptanceReport?.model_output && (
-                <div>
-                  <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-400">完整模型输出</p>
-                  <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-2 font-mono text-[10px] leading-4 text-slate-300">
-                    {formatModelOutput(acceptanceReport.model_output)}
-                  </pre>
-                </div>
-              )}
-              {acceptanceReport?.assertions && acceptanceReport.assertions.length > 0 && (
-                <ol className="space-y-1.5">
-                  {acceptanceReport.assertions.map((result, index) => (
-                    <li key={`${result.assertion.kind}-${index}`} className="rounded-md border border-slate-200 bg-white p-2 text-xs">
-                      <span className={result.passed ? 'text-emerald-600' : 'text-red-600'}>
-                        {result.passed ? '通过' : '失败'}
-                      </span>
-                      <span className="ml-2 break-all text-slate-600">
-                        {result.assertion.kind} {result.assertion.selector || result.assertion.expected}
-                      </span>
-                    </li>
-                  ))}
-                </ol>
-              )}
-              {acceptanceState === 'running' && (
-                <p role="status" className="text-xs text-slate-500">测试 Agent 正在生成验收计划并执行浏览器验证…</p>
-              )}
-              </div>
-              )}
-            </section>
-          )}
-
-          {repairLogs.length > 0 && (
-            <div className="mt-5 border-t border-slate-200 pt-4">
-              <h3 className="mb-3 text-sm font-semibold text-slate-800">
-                自动修复记录
-              </h3>
-              <ol className="space-y-2">
-                {repairLogs.map((log) => {
-                  const isExpanded = expandedRepairAttempts.has(log.attempt);
-                  return (
-                  <li
-                    key={log.attempt}
-                    className="overflow-hidden rounded-lg border border-slate-200 bg-white text-xs"
-                  >
-                    <button
-                      type="button"
-                      aria-expanded={isExpanded}
-                      onClick={() => setExpandedRepairAttempts((previous) => {
-                        const next = new Set(previous);
-                        if (next.has(log.attempt)) next.delete(log.attempt);
-                        else next.add(log.attempt);
-                        return next;
-                      })}
-                      className="flex w-full items-center justify-between gap-2 p-3 text-left hover:bg-slate-50"
-                    >
-                      <span className="font-medium text-slate-700">运维 Agent · 第 {log.attempt} 次</span>
-                      <span className="flex items-center gap-2">
-                        <span className={
-                        log.status === 'repairing'
-                          ? 'text-amber-600'
-                          : log.status === 'fixed'
-                            ? 'text-emerald-600'
-                            : 'text-red-600'
-                      }>
-                        {log.status === 'repairing'
-                          ? '修复中'
-                          : log.status === 'fixed'
-                            ? '已修复'
-                            : '失败'}
-                        </span>
-                        <span aria-hidden="true" className="text-slate-400">{isExpanded ? '⌃' : '⌄'}</span>
-                      </span>
-                    </button>
-                    {isExpanded && (
-                      <div className="space-y-3 border-t border-slate-200 p-3">
-                        {log.fileChanges && log.fileChanges.length > 0 && (
-                          <div>
-                            <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-400">文件修改 · {log.fileChanges.length} 个文件</p>
-                            <ul className="space-y-1 rounded-md bg-slate-950 p-2 font-mono text-[10px]">
-                              {log.fileChanges.map((change) => (
-                                <li key={change.path} className="flex items-center justify-between gap-3">
-                                  <span className="truncate text-slate-300" title={change.path}>{change.path}</span>
-                                  <span className="shrink-0"><span className="text-emerald-400">+{change.additions}</span><span className="ml-2 text-red-400">-{change.deletions}</span></span>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        )}
-                        {log.modelOutput && (
-                          <div>
-                            <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-400">完整模型输出</p>
-                            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950 p-2 font-mono text-[10px] leading-4 text-slate-300">{formatModelOutput(log.modelOutput)}</pre>
-                          </div>
-                        )}
-                        {log.consoleEntries && log.consoleEntries.length > 0 && (
-                          <div>
-                            <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-400">控制台与测试证据</p>
-                            <div className="max-h-56 overflow-auto rounded-md bg-slate-950 p-2 font-mono text-[10px] leading-4">
-                              {log.consoleEntries.map((entry, entryIndex) => (
-                                <p key={`${entryIndex}-${entry.text.slice(0, 20)}`} className={entry.level === 'error' ? 'text-red-300' : entry.level === 'warn' ? 'text-amber-300' : 'text-slate-300'}>
-                                  <span className="mr-2 text-slate-500">[{entry.level}]</span>{entry.text}
-                                </p>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                        <details className="rounded-md bg-slate-50 p-2">
-                          <summary className="cursor-pointer font-medium text-slate-600">诊断上下文</summary>
-                          <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-[10px] leading-4 text-slate-500">{log.diagnostic || log.error}</pre>
-                        </details>
-                        {log.status === 'repairing' && !log.modelOutput && <p role="status" className="text-slate-500">运维 Agent 正在诊断并生成补丁…</p>}
-                      </div>
-                    )}
-                  </li>
-                  );
-                })}
-              </ol>
-            </div>
-          )}
             </>
           ) : (
             /* Day58 方案一：资源管理器 Tab 内容——独立面板，不与需求面板混放 */

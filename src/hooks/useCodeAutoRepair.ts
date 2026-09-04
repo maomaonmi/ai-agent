@@ -11,7 +11,10 @@ import {
   modifyWebCode,
   type ChatAttachment,
   type CodeAgentRun,
+  type CodeAgentActorKind,
   type CodeAgentTrace,
+  type CodeAgentTimelineEvent,
+  type CodeAgentTimelineStage,
   type CodeFileChange,
   type CodeGenerationEvent,
   type HookEvent,
@@ -19,6 +22,7 @@ import {
   type McpMode,
   type TaskItem,
 } from '../lib/api';
+import { appendTimelineEvent } from '../Code/agentTimeline';
 import { parseProjectCode } from '../Code/fullstackBundler';
 import {
   CodeGenerationStatus,
@@ -46,6 +50,7 @@ const EMPTY_AGENT_TRACE: CodeAgentTrace = {
   summaryIntent: 'patch',
   terminalProposals: [],
   hookEvents: [],
+  timeline: [],
 };
 
 const ENVELOPE_TOP_KEYS: ReadonlySet<string> = new Set([
@@ -217,6 +222,8 @@ export default function useCodeAutoRepair() {
   const hasAgentOutputRef = useRef(false);
   const agentTraceRef = useRef<CodeAgentTrace>(EMPTY_AGENT_TRACE);
   const currentAgentRunIdRef = useRef('');
+  const timelineSequenceRef = useRef(0);
+  const thinkingStartedAtRef = useRef<Record<string, number>>({});
   const repairRetryTimerRef = useRef<number | null>(null);
   const repairHandlerRef = useRef<(error: RuntimeErrorReport) => void>(() => undefined);
   // Why: Phase3 记忆系统 session_id 引用——generate/modify 调用时传入并存储，
@@ -238,11 +245,62 @@ export default function useCodeAutoRepair() {
     }
   }, []);
 
+  const appendTimeline = useCallback((input: {
+    eventId?: string;
+    runId?: string;
+    actorId?: string;
+    actorKind: CodeAgentActorKind;
+    stage: CodeAgentTimelineStage;
+    content: string;
+    done?: boolean;
+    timestampMs?: number;
+    sequence?: number;
+    iteration?: number;
+    mergeKey?: string;
+    status?: string;
+    metrics?: CodeAgentTimelineEvent['metrics'];
+    file?: CodeAgentTimelineEvent['file'];
+    metadata?: Record<string, unknown>;
+  }) => {
+    const runId = input.runId ?? currentAgentRunIdRef.current;
+    const actorId = input.actorId ?? `${input.actorKind}:${runId || 'unbound'}`;
+    const sequence = input.sequence ?? (timelineSequenceRef.current + 1);
+    timelineSequenceRef.current = Math.max(timelineSequenceRef.current, sequence);
+    const event: CodeAgentTimelineEvent = {
+      eventId: input.eventId ?? `${runId || 'unbound'}:${actorId}:${sequence}:${input.stage}`,
+      runId,
+      actorId,
+      actorKind: input.actorKind,
+      stage: input.stage,
+      content: input.content,
+      done: input.done ?? true,
+      timestampMs: input.timestampMs ?? Date.now(),
+      sequence,
+      iteration: input.iteration,
+      mergeKey: input.mergeKey,
+      status: input.status,
+      metrics: input.metrics,
+      file: input.file,
+      metadata: input.metadata,
+    };
+    commitAgentTrace((previous) => ({
+      ...previous,
+      timeline: appendTimelineEvent(previous.timeline ?? [], event),
+    }));
+  }, [commitAgentTrace]);
+
   const beginAgentTrace = useCallback((message: string, request = '', projectKind: 'frontend' | 'fullstack' = 'frontend') => {
     hasAgentOutputRef.current = false;
-    const trace = { steps: [message], output: '', reasoning: '', phase: 'analyzing', isRunning: true };
     const id = `agent-run-${Date.now()}-${sequenceRef.current + 1}`;
+    timelineSequenceRef.current = 0;
+    thinkingStartedAtRef.current = {};
     currentAgentRunIdRef.current = id;
+    const trace: CodeAgentTrace = {
+      ...EMPTY_AGENT_TRACE,
+      steps: [message],
+      phase: 'analyzing',
+      isRunning: true,
+    };
     agentTraceRef.current = trace;
     setAgentTrace(trace);
     setAgentRuns((previous) => [...previous, {
@@ -257,21 +315,53 @@ export default function useCodeAutoRepair() {
     setTrustedTerminalPrefixes((previous) => previous[id] ? previous : { ...previous, [id]: [] });
     // Why: 每次 agent run 开始时清空任务列表，避免上一次的残留任务显示。
     setTasks([]);
-  }, []);
+    appendTimeline({
+      runId: id,
+      actorId: `main:${id}`,
+      actorKind: 'main',
+      stage: 'status',
+      content: message,
+      status: 'analyzing',
+    });
+  }, [appendTimeline]);
 
   const continueAgentTrace = useCallback((message: string) => {
-    hasAgentOutputRef.current = false;
-    commitAgentTrace((previous) => ({
-      ...previous,
-      steps: [...previous.steps, message],
-      output: `${previous.output}${previous.output ? '\n\n' : ''}--- ${message} ---\n`,
-      reasoning: '',
-      phase: 'diagnosing',
-      isRunning: true,
-    }));
-  }, [commitAgentTrace]);
+    appendTimeline({
+      actorId: `ops:${currentAgentRunIdRef.current}:repair`,
+      actorKind: 'ops',
+      stage: 'status',
+      content: message,
+      status: 'diagnosing',
+    });
+  }, [appendTimeline]);
 
-  const consumeAgentEvent = useCallback((event: CodeGenerationEvent) => {
+  const consumeAgentEvent = useCallback((event: CodeGenerationEvent, actorKind: CodeAgentActorKind = 'main', actorId?: string) => {
+    const resolvedActorId = actorId ?? `${actorKind}:${currentAgentRunIdRef.current || 'unbound'}`;
+    const appendActivity = (content: string, done: boolean, stage: CodeAgentTimelineStage, status?: string) => {
+      if (!content) return;
+      const mergeKey = stage === 'thinking' || stage === 'output' || stage === 'summary'
+        ? `${resolvedActorId}:${stage}`
+        : undefined;
+      const metrics: CodeAgentTimelineEvent['metrics'] = { charCount: content.length };
+      if (stage === 'thinking' && mergeKey) {
+        const startedAt = thinkingStartedAtRef.current[mergeKey] ?? Date.now();
+        thinkingStartedAtRef.current[mergeKey] = startedAt;
+        if (done) {
+          metrics.durationMs = Math.max(0, Date.now() - startedAt);
+          delete thinkingStartedAtRef.current[mergeKey];
+        }
+      }
+      appendTimeline({
+        actorKind,
+        actorId: resolvedActorId,
+        stage,
+        content,
+        done,
+        mergeKey,
+        status,
+        metrics,
+      });
+    };
     if (event.type === 'token_usage') {
       const usageEvent = event as TokenUsageEvent;
       commitAgentTrace((previous) => ({ ...previous, tokenUsage: usageEvent.usage }));
@@ -279,6 +369,12 @@ export default function useCodeAutoRepair() {
     }
     if (event.type === 'hook_event') {
       const hookEvent = event as HookEvent;
+      appendActivity(
+        hookEvent.summary || `${hookEvent.hook_name} · ${hookEvent.status}`,
+        hookEvent.event !== 'started',
+        hookEvent.status === 'failed' || hookEvent.status === 'blocked' ? 'error' : 'observation',
+        hookEvent.status,
+      );
       commitAgentTrace((previous) => ({
         ...previous,
         hookEvents: [...(previous.hookEvents ?? []), hookEvent].slice(-100),
@@ -298,6 +394,8 @@ export default function useCodeAutoRepair() {
       const { text: resolvedContent, intent: resolvedIntent } =
         stripEnvelopeFromAnswerText(event.content, eventIntent);
       const isAnswerIntent = resolvedIntent === 'answer' || resolvedIntent === 'ask_clarification';
+      appendActivity(resolvedContent || event.content, event.done, 'summary', resolvedIntent);
+      if (actorKind !== 'main') return true;
       commitAgentTrace((previous) => {
         const previousSummary = previous.summary ?? '';
         const incremental = event.done ? resolvedContent : `${previousSummary}${event.content}`;
@@ -316,13 +414,16 @@ export default function useCodeAutoRepair() {
     }
     if (event.type === 'terminal_proposal') {
       console.log('[terminal][sse] terminal_proposal event:', event);
-      commitAgentTrace((previous) => ({
-        ...previous,
-        terminalProposals: [
-          ...(previous.terminalProposals ?? []).filter((item) => item.command !== event.command),
-          { command: event.command, reason: event.reason, expected_output_hint: event.expected_output_hint },
-        ],
-      }));
+      appendActivity(event.command, false, 'tool_call', 'awaiting_approval');
+      if (actorKind === 'main') {
+        commitAgentTrace((previous) => ({
+          ...previous,
+          terminalProposals: [
+            ...(previous.terminalProposals ?? []).filter((item) => item.command !== event.command),
+            { command: event.command, reason: event.reason, expected_output_hint: event.expected_output_hint },
+          ],
+        }));
+      }
       // Why: 通知 CodeWorkspace 自动切到终端 Tab 并选中 agent 终端，
       // 否则用户看不到审批横幅，proposition 会 90s 超时。
       try {
@@ -338,12 +439,14 @@ export default function useCodeAutoRepair() {
     // 前端用浮层卡片展示进度，不进 agent_trace 大黑框。
     if (event.type === 'task_list') {
       setTasks(event.tasks);
+      appendActivity(`已拆解 ${event.tasks.length} 个执行任务。`, event.done, 'observation', 'task_list');
       return true;
     }
     if (event.type === 'task_update') {
       setTasks((previous) => previous.map((t) =>
         t.id === event.task_id ? { ...t, status: event.status } : t
       ));
+      appendActivity(`任务 ${event.task_id} · ${event.status}`, event.done, 'observation', event.status);
       // Why: 子任务完成时携带 delta，追加到执行记录的 fileChanges 里。
       if (event.status === 'completed' && event.delta) {
         const changes: CodeFileChange[] = Object.entries(event.delta).map(([path, d]) => ({
@@ -351,24 +454,44 @@ export default function useCodeAutoRepair() {
           additions: d.add,
           deletions: d.del,
         }));
-        commitAgentTrace((previous) => ({
-          ...previous,
-          fileChanges: [
-            ...(previous.fileChanges ?? []),
-            ...changes,
-          ],
+        changes.forEach((change) => appendTimeline({
+          actorKind,
+          actorId: resolvedActorId,
+          stage: 'file_change',
+          content: `已完成文件修改：${change.path}`,
+          status: 'completed',
+          file: { ...change, operation: 'modify' },
         }));
+        if (actorKind === 'main') {
+          commitAgentTrace((previous) => ({
+            ...previous,
+            fileChanges: [
+              ...(previous.fileChanges ?? []),
+              ...changes,
+            ],
+          }));
+        }
       }
       return true;
     }
     // Why: Agent Loop 工具循环每落盘一个文件即推送 file_written，通知文件树高亮该文件。
     if (event.type === 'file_written') {
+      appendTimeline({
+        actorKind,
+        actorId: resolvedActorId,
+        stage: 'file_change',
+        content: `已写入 ${event.path}`,
+        done: event.done,
+        status: 'written',
+        metadata: { path: event.path },
+      });
       window.dispatchEvent(new CustomEvent('code-file-written', { detail: { path: event.path } }));
       return true;
     }
     // Why: Phase3 记忆系统更新通知——档案卡/摘要/VFS/Skill 任一变更时推送。
     // 前端派发 window 事件，MemoryPanel 监听后自动刷新，让记忆面板实时反映后端状态。
     if (event.type === 'memory_update') {
+      appendActivity(`记忆已更新：${event.layer} · ${event.action}`, true, 'observation', 'memory_update');
       console.log('[memory][sse] memory_update layer=%s action=%s', event.layer, event.action);
       window.dispatchEvent(new CustomEvent('memory-updated', {
         detail: { layer: event.layer, action: event.action },
@@ -377,6 +500,7 @@ export default function useCodeAutoRepair() {
     }
     // Why: Phase3 Skill 匹配命中通知——展示"已命中 Skill"的实时反馈。
     if (event.type === 'skill_matched') {
+      appendActivity(`已匹配 Skill：${event.skill_name}`, true, 'observation', 'skill_matched');
       console.log('[memory][sse] skill_matched=%s confidence=%s', event.skill_name, event.confidence);
       window.dispatchEvent(new CustomEvent('skill-matched', {
         detail: { skill_name: event.skill_name },
@@ -384,6 +508,15 @@ export default function useCodeAutoRepair() {
       return true;
     }
     if (event.type !== 'agent_activity') return false;
+    const stage: CodeAgentTimelineStage = event.channel === 'answer'
+      ? 'summary'
+      : event.phase === 'thinking'
+        ? 'thinking'
+        : event.phase === 'validating'
+          ? 'validation'
+          : 'output';
+    appendActivity(event.content, event.done, stage, event.phase);
+    if (actorKind !== 'main') return true;
     // 思考增量只进入 reasoning，不应阻止随后真正的代码/JSON 输出更新。
     if (event.channel === 'output' && event.phase !== 'thinking') hasAgentOutputRef.current = true;
     if (event.channel === 'answer') {
@@ -434,25 +567,41 @@ export default function useCodeAutoRepair() {
       return { ...previous, steps, phase: event.phase, isRunning: !event.done };
     });
     return true;
-  }, [commitAgentTrace]);
+  }, [appendTimeline, commitAgentTrace]);
 
-  const recordFileChanges = useCallback((beforeCode: string, afterCode: string, append = false) => {
+  const recordFileChanges = useCallback((
+    beforeCode: string,
+    afterCode: string,
+    append = false,
+    actorKind: CodeAgentActorKind = 'main',
+    actorId = `${actorKind}:${currentAgentRunIdRef.current || 'unbound'}`,
+  ) => {
+    const changes = summarizeFileChanges(beforeCode, afterCode);
+    changes.forEach((change) => appendTimeline({
+      actorKind,
+      actorId,
+      stage: 'file_change',
+      content: `已生成文件变更：${change.path}`,
+      status: 'completed',
+      file: { ...change, operation: 'modify' },
+    }));
+    if (actorKind !== 'main') return;
     commitAgentTrace((previous) => ({
       ...previous,
       fileChanges: append
-        ? summarizeFileChanges(beforeCode, afterCode).reduce<CodeFileChange[]>((changes, current) => {
-            const existing = changes.find((change) => change.path === current.path);
+        ? changes.reduce<CodeFileChange[]>((nextChanges, current) => {
+            const existing = nextChanges.find((change) => change.path === current.path);
             if (existing) {
               existing.additions += current.additions;
               existing.deletions += current.deletions;
             } else {
-              changes.push({ ...current });
+              nextChanges.push({ ...current });
             }
-            return changes;
+            return nextChanges;
           }, (previous.fileChanges ?? []).map((change) => ({ ...change })))
-        : summarizeFileChanges(beforeCode, afterCode),
+        : changes,
     }));
-  }, [commitAgentTrace]);
+  }, [appendTimeline, commitAgentTrace]);
 
   const updateCode = useCallback((nextCode: string) => {
     codeRef.current = nextCode;
@@ -509,6 +658,8 @@ export default function useCodeAutoRepair() {
     setRepairLogs([]);
     agentTraceRef.current = EMPTY_AGENT_TRACE;
     currentAgentRunIdRef.current = '';
+    timelineSequenceRef.current = 0;
+    thinkingStartedAtRef.current = {};
     setAgentTrace(EMPTY_AGENT_TRACE);
     setAgentRuns([]);
     // 终端信任白名单：reset 时一起清掉，避免之前的 run 信任污染新会话。
@@ -536,6 +687,7 @@ export default function useCodeAutoRepair() {
     setAgentRuns(restoredRuns);
     currentAgentRunIdRef.current = latest?.id ?? '';
     agentTraceRef.current = latest?.trace ?? EMPTY_AGENT_TRACE;
+    timelineSequenceRef.current = Math.max(0, ...(agentTraceRef.current.timeline ?? []).map((event) => event.sequence));
     setAgentTrace(agentTraceRef.current);
   }, []);
 
@@ -786,7 +938,7 @@ export default function useCodeAutoRepair() {
       const hasVfs = currentVfs && Object.keys(currentVfs).length > 0;
       const handleEvent = (event: CodeGenerationEvent) => {
         if (event.type === 'agent_activity' || event.type === 'hook_event' || event.type === 'token_usage' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update' || event.type === 'file_written' || event.type === 'memory_update' || event.type === 'skill_matched') {
-            consumeAgentEvent(event);
+            consumeAgentEvent(event, 'ops', `ops:${currentAgentRunIdRef.current}:repair`);
             if (event.type === 'agent_activity' && event.channel === 'output' && event.phase !== 'thinking') {
               repairModelOutput += event.content;
               setRepairLogs((previous) => previous.map((log) =>
@@ -801,7 +953,6 @@ export default function useCodeAutoRepair() {
           }
           // 只剩 CodeUpdateEvent
           if (!hasAgentOutputRef.current) {
-            commitAgentTrace((previous) => ({ ...previous, output: `${previous.output}${event.code}`, phase: 'patching' }));
             repairModelOutput = event.code;
             setRepairLogs((previous) => previous.map((log) =>
               log.attempt === attempt ? { ...log, modelOutput: repairModelOutput } : log
@@ -809,7 +960,15 @@ export default function useCodeAutoRepair() {
           }
           fixedCode = event.code;
           didComplete = didComplete || event.done;
-          if (event.done) commitAgentTrace((previous) => ({ ...previous, isRunning: false }));
+          if (event.done) {
+            appendTimeline({
+              actorKind: 'ops',
+              actorId: `ops:${currentAgentRunIdRef.current}:repair`,
+              stage: 'status',
+              content: `第 ${attempt} 次修复补丁已生成，准备校验。`,
+              status: 'patch_ready',
+            });
+          }
           setStatus({
             state: 'repairing',
             attempt,
@@ -839,7 +998,14 @@ export default function useCodeAutoRepair() {
           : log
       ));
       isRepairingRef.current = false;
-      recordFileChanges(codeBeforeRepair, fixedCode, true);
+      recordFileChanges(codeBeforeRepair, fixedCode, true, 'ops', `ops:${currentAgentRunIdRef.current}:repair`);
+      appendTimeline({
+        actorKind: 'ops',
+        actorId: `ops:${currentAgentRunIdRef.current}:repair`,
+        stage: 'verification',
+        content: `第 ${attempt} 次修复已落盘，正在重新验证页面。`,
+        status: 'verifying',
+      });
       beginRuntimeCheck(fixedCode);
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return;
@@ -848,6 +1014,13 @@ export default function useCodeAutoRepair() {
       setRepairLogs((previous) => previous.map((log) =>
         log.attempt === attempt ? { ...log, status: 'failed' } : log
       ));
+      appendTimeline({
+        actorKind: 'ops',
+        actorId: `ops:${currentAgentRunIdRef.current}:repair`,
+        stage: 'error',
+        content: `第 ${attempt} 次自动修复失败：${message}`,
+        status: 'failed',
+      });
       recentErrorsRef.current = [
         ...recentErrorsRef.current.slice(-7),
         `Repair synthesis failed: ${message}`,
@@ -874,7 +1047,7 @@ export default function useCodeAutoRepair() {
         repairHandlerRef.current(runtimeError);
       }, 300);
     }
-  }, [beginRuntimeCheck, clearCheckTimer, clearRepairRetryTimer, commitAgentTrace, consumeAgentEvent, continueAgentTrace, recordFileChanges, terminalWorkspaceId]);
+  }, [appendTimeline, beginRuntimeCheck, clearCheckTimer, clearRepairRetryTimer, commitAgentTrace, consumeAgentEvent, continueAgentTrace, recordFileChanges, terminalWorkspaceId]);
 
   repairHandlerRef.current = (runtimeError) => {
     void handleRuntimeError(runtimeError);
