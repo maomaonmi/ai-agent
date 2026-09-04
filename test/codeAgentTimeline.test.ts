@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   appendTimelineEvent,
+  completeTimelineEvent,
   type TimelineEventInput,
 } from '../src/Code/agentTimeline.ts';
 import {
@@ -45,6 +46,37 @@ test('merges streamed deltas into one timeline item without losing metrics', () 
   assert.equal(events[0]?.metrics?.charCount, 7);
   assert.equal(events[0]?.sequence, 1);
   assert.equal(events[0]?.timestampMs, 200);
+});
+
+test('keeps separate AgentLoop thinking turns separate and closes only the completed turn', () => {
+  let events = appendTimelineEvent([], input({
+    eventId: 'turn-1-delta',
+    content: '先读取入口文件',
+    mergeKey: 'main-1:thinking:turn-1',
+  }));
+  events = completeTimelineEvent(events, {
+    actorId: 'main-1',
+    actorKind: 'main',
+    stage: 'thinking',
+    mergeKey: 'main-1:thinking:turn-1',
+    timestampMs: 200,
+    durationMs: 100,
+  });
+  events = appendTimelineEvent(events, input({
+    eventId: 'turn-2-delta',
+    content: '观察写入结果并继续修正',
+    sequence: 3,
+    mergeKey: 'main-1:thinking:turn-2',
+  }));
+
+  assert.equal(events.length, 2);
+  assert.equal(events[0]?.done, true);
+  assert.equal(events[0]?.metrics?.durationMs, 100);
+  assert.equal(events[1]?.done, false);
+  assert.deepEqual(events.map((event) => event.content), [
+    '先读取入口文件',
+    '观察写入结果并继续修正',
+  ]);
 });
 
 test('keeps main, test, and ops actors separate even when stages match', () => {

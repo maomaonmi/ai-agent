@@ -73,6 +73,36 @@ export function appendTimelineEvent(
   return [...events, input].sort((left, right) => left.sequence - right.sequence);
 }
 
+export function completeTimelineEvent(
+  events: CodeAgentTimelineEvent[],
+  matcher: Pick<CodeAgentTimelineEvent, 'actorId' | 'actorKind' | 'stage'> & {
+    mergeKey?: string;
+    timestampMs?: number;
+    durationMs?: number;
+  },
+): CodeAgentTimelineEvent[] {
+  const index = events.findLastIndex((event) => (
+    event.actorId === matcher.actorId
+    && event.actorKind === matcher.actorKind
+    && event.stage === matcher.stage
+    && event.mergeKey === matcher.mergeKey
+    && !event.done
+  ));
+  if (index < 0) return events;
+
+  const next = [...events];
+  const current = next[index];
+  next[index] = {
+    ...current,
+    done: true,
+    timestampMs: matcher.timestampMs ?? current.timestampMs,
+    metrics: matcher.durationMs == null
+      ? current.metrics
+      : { ...current.metrics, durationMs: matcher.durationMs },
+  };
+  return next;
+}
+
 export function timelineCharCount(events: CodeAgentTimelineEvent[]): number {
   return events.reduce((total, event) => total + event.content.length, 0);
 }

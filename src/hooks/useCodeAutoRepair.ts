@@ -12,6 +12,7 @@ import {
   type ChatAttachment,
   type CodeAgentRun,
   type CodeAgentActorKind,
+  type CodeAgentActivityEvent,
   type CodeAgentTrace,
   type CodeAgentTimelineEvent,
   type CodeAgentTimelineStage,
@@ -21,7 +22,7 @@ import {
   type TokenUsageEvent,
   type McpMode,
 } from '../lib/api';
-import { appendTimelineEvent } from '../Code/agentTimeline';
+import { appendTimelineEvent, completeTimelineEvent } from '../Code/agentTimeline';
 import { resetAgentRuns } from '../Code/agentRunLifecycle';
 import { canStartRuntimeRepair } from '../Code/acceptancePolicy';
 import { parseProjectCode } from '../Code/fullstackBundler';
@@ -299,7 +300,7 @@ export default function useCodeAutoRepair() {
           || !['thinking', 'output', 'validation', 'summary'].includes(event.stage)
         ) return event;
         const startedAt = event.stage === 'thinking'
-          ? thinkingStartedAtRef.current[`${event.actorId}:${event.stage}`]
+          ? thinkingStartedAtRef.current[event.mergeKey ?? `${event.actorId}:${event.stage}`]
           : undefined;
         return {
           ...event,
@@ -365,11 +366,47 @@ export default function useCodeAutoRepair() {
 
   const consumeAgentEvent = useCallback((event: CodeGenerationEvent, actorKind: CodeAgentActorKind = 'main', actorId?: string) => {
     const resolvedActorId = actorId ?? `${actorKind}:${currentAgentRunIdRef.current || 'unbound'}`;
-    const appendActivity = (content: string, done: boolean, stage: CodeAgentTimelineStage, status?: string) => {
-      if (!content) return;
+    const appendActivity = (
+      content: string,
+      done: boolean,
+      stage: CodeAgentTimelineStage,
+      status?: string,
+      options: {
+        runId?: string;
+        actorId?: string;
+        actorKind?: CodeAgentActorKind;
+        turnId?: string;
+        iteration?: number;
+        eventId?: string;
+        timestampMs?: number;
+        metadata?: Record<string, unknown>;
+      } = {},
+    ) => {
+      const activityActorKind = options.actorKind ?? actorKind;
+      const activityActorId = options.actorId ?? resolvedActorId;
       const mergeKey = stage === 'thinking' || stage === 'output' || stage === 'summary'
-        ? `${resolvedActorId}:${stage}`
+        ? `${activityActorId}:${stage}${options.turnId ? `:${options.turnId}` : ''}`
         : undefined;
+      // The backend sends an empty, done=true activity as an explicit model-turn
+      // boundary. It closes only this turn; it must not mark the whole AgentLoop
+      // as finished because another tool call / model turn may follow.
+      if (!content && done && mergeKey) {
+        const startedAt = stage === 'thinking' ? thinkingStartedAtRef.current[mergeKey] : undefined;
+        commitAgentTrace((previous) => ({
+          ...previous,
+          timeline: completeTimelineEvent(previous.timeline ?? [], {
+            actorId: activityActorId,
+            actorKind: activityActorKind,
+            stage,
+            mergeKey,
+            timestampMs: options.timestampMs,
+            durationMs: startedAt == null ? undefined : Math.max(0, Date.now() - startedAt),
+          }),
+        }));
+        if (stage === 'thinking') delete thinkingStartedAtRef.current[mergeKey];
+        return;
+      }
+      if (!content) return;
       const metrics: CodeAgentTimelineEvent['metrics'] = { charCount: content.length };
       if (stage === 'thinking' && mergeKey) {
         const startedAt = thinkingStartedAtRef.current[mergeKey] ?? Date.now();
@@ -380,14 +417,19 @@ export default function useCodeAutoRepair() {
         }
       }
       appendTimeline({
-        actorKind,
-        actorId: resolvedActorId,
+        runId: options.runId,
+        actorKind: activityActorKind,
+        actorId: activityActorId,
         stage,
         content,
         done,
         mergeKey,
         status,
         metrics,
+        eventId: options.eventId,
+        timestampMs: options.timestampMs,
+        iteration: options.iteration,
+        metadata: options.metadata,
       });
     };
     if (event.type === 'token_usage') {
@@ -397,11 +439,26 @@ export default function useCodeAutoRepair() {
     }
     if (event.type === 'hook_event') {
       const hookEvent = event as HookEvent;
+      const hookRunId = hookEvent.agent_run_id || currentAgentRunIdRef.current || 'unbound';
+      const hookActorId = `system:${hookRunId}:hook:${hookEvent.hook_id}`;
       appendActivity(
         hookEvent.summary || `${hookEvent.hook_name} · ${hookEvent.status}`,
         hookEvent.event !== 'started',
-        hookEvent.status === 'failed' || hookEvent.status === 'blocked' ? 'error' : 'observation',
+        hookEvent.status === 'failed' || hookEvent.status === 'blocked' ? 'error' : 'validation',
         hookEvent.status,
+        {
+          runId: hookRunId,
+          actorId: hookActorId,
+          actorKind: 'system',
+          eventId: `hook:${hookRunId}:${hookEvent.hook_id}:${hookEvent.sequence}:${hookEvent.event}`,
+          timestampMs: hookEvent.timestamp_ms,
+          metadata: {
+            source: 'hook',
+            hookId: hookEvent.hook_id,
+            hookName: hookEvent.hook_name,
+            lifecycle: hookEvent.lifecycle,
+          },
+        },
       );
       commitAgentTrace((previous) => ({
         ...previous,
@@ -533,14 +590,25 @@ export default function useCodeAutoRepair() {
       return true;
     }
     if (event.type !== 'agent_activity') return false;
-    const stage: CodeAgentTimelineStage = event.channel === 'answer'
-      ? 'summary'
-      : event.phase === 'thinking'
-        ? 'thinking'
-        : event.phase === 'validating'
-          ? 'validation'
-          : 'output';
-    appendActivity(event.content, event.done, stage, event.phase);
+    const activity = event as CodeAgentActivityEvent;
+    const stage: CodeAgentTimelineStage = event.channel === 'status'
+      ? 'status'
+      : event.channel === 'answer'
+        ? 'summary'
+        : event.phase === 'thinking'
+          ? 'thinking'
+          : event.phase === 'validating'
+            ? 'validation'
+            : 'output';
+    const isTurnBoundary = activity.boundary === 'turn_completed';
+    const traceDone = isTurnBoundary ? false : event.done;
+    appendActivity(event.content, event.done, stage, event.phase, {
+      actorId: activity.actor_id ?? resolvedActorId,
+      turnId: activity.turn_id,
+      iteration: activity.iteration,
+      eventId: activity.event_id,
+      timestampMs: activity.timestamp_ms,
+    });
     if (actorKind !== 'main') return true;
     // 思考增量只进入 reasoning，不应阻止随后真正的代码/JSON 输出更新。
     if (event.channel === 'output' && event.phase !== 'thinking') hasAgentOutputRef.current = true;
@@ -561,7 +629,7 @@ export default function useCodeAutoRepair() {
             : snippet || strippedAnswer.slice(0, 360),
           summaryIntent: previous.summaryIntent ?? resolvedForAnswer,
           phase: event.phase,
-          isRunning: !event.done,
+          isRunning: !traceDone,
         };
       });
       return true;
@@ -573,7 +641,7 @@ export default function useCodeAutoRepair() {
         ...previous,
         reasoning: `${previous.reasoning ?? ''}${event.content}`,
         phase: event.phase,
-        isRunning: !event.done,
+        isRunning: !traceDone,
       }));
       return true;
     }
@@ -581,15 +649,15 @@ export default function useCodeAutoRepair() {
       if (event.channel === 'output') {
         return {
           ...previous,
-          output: event.done ? event.content : `${previous.output}${event.content}`,
+          output: traceDone ? event.content : `${previous.output}${event.content}`,
           phase: event.phase,
-          isRunning: !event.done,
+          isRunning: !traceDone,
         };
       }
       const steps = previous.steps.at(-1) === event.content
         ? previous.steps
         : [...previous.steps, event.content];
-      return { ...previous, steps, phase: event.phase, isRunning: !event.done };
+      return { ...previous, steps, phase: event.phase, isRunning: !traceDone };
     });
     return true;
   }, [appendTimeline, commitAgentTrace]);

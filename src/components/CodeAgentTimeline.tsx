@@ -159,7 +159,8 @@ function makeTestEvents(
 function thoughtSummary(event: CodeAgentTimelineEvent, isRunning: boolean): string {
   const durationMs = event.metrics?.durationMs;
   const duration = durationMs == null ? (isRunning ? '计时中' : '已结束') : `${Math.max(0, Math.round(durationMs / 1_000))} 秒`;
-  return `思考 · ${duration} · ${event.content.length.toLocaleString()} 字`;
+  const iteration = event.iteration == null ? '' : `第 ${event.iteration} 轮 · `;
+  return `${iteration}思考 · ${duration} · ${event.content.length.toLocaleString()} 字`;
 }
 
 function ActorBadge({ kind }: { kind: CodeAgentActorKind }) {
@@ -176,6 +177,7 @@ function TimelineEventCard({ event, onOpenDiff, isRunning }: {
   isRunning: boolean;
 }) {
   const filePath = event.file?.path || (typeof event.metadata?.path === 'string' ? event.metadata.path : '');
+  const isHookEvent = event.actorKind === 'system' && event.metadata?.source === 'hook';
   if (event.stage === 'thinking') {
     return (
       <details className="rounded-lg border border-slate-200 bg-white" open={!event.done && isRunning}>
@@ -227,9 +229,9 @@ function TimelineEventCard({ event, onOpenDiff, isRunning }: {
   }
 
   return (
-    <div className={`rounded-lg border px-3 py-2.5 text-xs leading-5 ${event.stage === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+    <div className={`rounded-lg border px-3 py-2.5 text-xs leading-5 ${event.stage === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : isHookEvent ? 'border-slate-200 bg-slate-50/80 text-slate-500' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
       <span className="mr-2 rounded bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
-        {STAGE_LABEL[event.stage]}
+        {isHookEvent ? 'Hook' : STAGE_LABEL[event.stage]}
       </span>
       <span className="whitespace-pre-wrap break-words">{event.content}</span>
     </div>

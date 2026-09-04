@@ -1295,9 +1295,18 @@ export interface CodeErrorEvent {
 export interface CodeAgentActivityEvent {
   type: 'agent_activity';
   channel: 'status' | 'output' | 'answer';
-  phase: 'analyzing' | 'diagnosing' | 'thinking' | 'generating' | 'patching' | 'validating';
+  phase: 'analyzing' | 'diagnosing' | 'thinking' | 'generating' | 'patching' | 'validating' | 'planning' | 'done';
   content: string;
   done: boolean;
+  // AgentLoop 轮次边界：同一个 run 内的每个模型回合必须单独渲染，
+  // 不能把工具前后的 reasoning 增量合并到同一张卡片。
+  turn_id?: string;
+  iteration?: number;
+  boundary?: 'turn_completed' | string;
+  actor_id?: string;
+  event_id?: string;
+  sequence?: number;
+  timestamp_ms?: number;
 }
 
 export interface HookEvent {
