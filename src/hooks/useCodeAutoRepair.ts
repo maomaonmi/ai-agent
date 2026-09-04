@@ -978,7 +978,7 @@ export default function useCodeAutoRepair() {
             throw new Error(event.message);
           }
           // 只剩 CodeUpdateEvent
-          if (!hasAgentOutputRef.current) {
+          if (!repairModelOutput) {
             repairModelOutput = event.code;
             setRepairLogs((previous) => previous.map((log) =>
               log.attempt === attempt ? { ...log, modelOutput: repairModelOutput } : log
