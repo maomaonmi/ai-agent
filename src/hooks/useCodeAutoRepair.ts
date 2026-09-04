@@ -439,30 +439,17 @@ export default function useCodeAutoRepair() {
     }
     if (event.type === 'hook_event') {
       const hookEvent = event as HookEvent;
-      const hookRunId = hookEvent.agent_run_id || currentAgentRunIdRef.current || 'unbound';
-      const hookActorId = `system:${hookRunId}:hook:${hookEvent.hook_id}`;
-      appendActivity(
-        hookEvent.summary || `${hookEvent.hook_name} · ${hookEvent.status}`,
-        hookEvent.event !== 'started',
-        hookEvent.status === 'failed' || hookEvent.status === 'blocked' ? 'error' : 'validation',
-        hookEvent.status,
-        {
-          runId: hookRunId,
-          actorId: hookActorId,
-          actorKind: 'system',
-          eventId: `hook:${hookRunId}:${hookEvent.hook_id}:${hookEvent.sequence}:${hookEvent.event}`,
-          timestampMs: hookEvent.timestamp_ms,
-          metadata: {
-            source: 'hook',
-            hookId: hookEvent.hook_id,
-            hookName: hookEvent.hook_name,
-            lifecycle: hookEvent.lifecycle,
-          },
-        },
-      );
       commitAgentTrace((previous) => ({
         ...previous,
-        hookEvents: [...(previous.hookEvents ?? []), hookEvent].slice(-100),
+        hookEvents: [
+          ...(previous.hookEvents ?? []).filter((existing) => !(
+            existing.agent_run_id === hookEvent.agent_run_id
+            && existing.hook_id === hookEvent.hook_id
+            && existing.sequence === hookEvent.sequence
+            && existing.event === hookEvent.event
+          )),
+          hookEvent,
+        ].slice(-100),
       }));
       return true;
     }

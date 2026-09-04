@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   appendTimelineEvent,
   completeTimelineEvent,
+  filterHookTimelineEvents,
   shouldShowActorLabel,
   type TimelineEventInput,
 } from '../src/Code/agentTimeline.ts';
@@ -118,6 +119,27 @@ test('shows an actor label only when the timeline switches lanes', () => {
     true,
     false,
     true,
+  ]);
+});
+
+test('keeps Hook observations out of the AgentLoop timeline projection', () => {
+  const events = [
+    input({ eventId: 'main-status', stage: 'status', content: '开始执行' }),
+    input({
+      eventId: 'hook-started',
+      actorId: 'system:run-1:hook:pii',
+      actorKind: 'system',
+      stage: 'validation',
+      content: 'PII 脱敏 · running',
+      metadata: { source: 'hook', hookId: 'pii' },
+      sequence: 2,
+    }),
+    input({ eventId: 'main-output', stage: 'output', content: '完成写入', sequence: 3 }),
+  ];
+
+  assert.deepEqual(filterHookTimelineEvents(events).map((event) => event.content), [
+    '开始执行',
+    '完成写入',
   ]);
 });
 

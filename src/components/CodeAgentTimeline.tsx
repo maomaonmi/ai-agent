@@ -6,7 +6,7 @@ import type {
   CodeAgentTimelineEvent,
 } from '../lib/api';
 import MarkdownMessage from './MarkdownMessage';
-import { shouldShowActorLabel } from '../Code/agentTimeline';
+import { filterHookTimelineEvents, shouldShowActorLabel } from '../Code/agentTimeline';
 
 type AcceptanceState = 'idle' | 'running' | 'passed' | 'failed' | 'blocked';
 
@@ -178,7 +178,6 @@ function TimelineEventCard({ event, onOpenDiff, isRunning }: {
   isRunning: boolean;
 }) {
   const filePath = event.file?.path || (typeof event.metadata?.path === 'string' ? event.metadata.path : '');
-  const isHookEvent = event.actorKind === 'system' && event.metadata?.source === 'hook';
   if (event.stage === 'thinking') {
     return (
       <details className="rounded-lg border border-slate-200 bg-white" open={!event.done && isRunning}>
@@ -230,9 +229,9 @@ function TimelineEventCard({ event, onOpenDiff, isRunning }: {
   }
 
   return (
-    <div className={`rounded-lg border px-3 py-2.5 text-xs leading-5 ${event.stage === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : isHookEvent ? 'border-slate-200 bg-slate-50/80 text-slate-500' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
+    <div className={`rounded-lg border px-3 py-2.5 text-xs leading-5 ${event.stage === 'error' ? 'border-rose-200 bg-rose-50 text-rose-700' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
       <span className="mr-2 rounded bg-white/70 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
-        {isHookEvent ? 'Hook' : STAGE_LABEL[event.stage]}
+        {STAGE_LABEL[event.stage]}
       </span>
       <span className="whitespace-pre-wrap break-words">{event.content}</span>
     </div>
@@ -248,14 +247,15 @@ export default function CodeAgentTimeline({
   acceptanceElapsedSeconds = 0,
   onOpenDiff,
 }: CodeAgentTimelineProps) {
+  const visibleEvents = useMemo(() => filterHookTimelineEvents(events), [events]);
   const allEvents = useMemo(() => [
-    ...events,
-    ...makeTestEvents(events, runId, acceptanceState, acceptanceReport, acceptanceElapsedSeconds),
+    ...visibleEvents,
+    ...makeTestEvents(visibleEvents, runId, acceptanceState, acceptanceReport, acceptanceElapsedSeconds),
   ].sort((left, right) => left.sequence - right.sequence), [
     acceptanceElapsedSeconds,
     acceptanceReport,
     acceptanceState,
-    events,
+    visibleEvents,
     runId,
   ]);
   const thinkingChars = allEvents

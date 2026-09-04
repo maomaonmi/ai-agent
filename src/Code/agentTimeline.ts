@@ -111,6 +111,10 @@ export function shouldShowActorLabel(
   return events[index - 1]?.actorKind !== events[index]?.actorKind;
 }
 
+export function filterHookTimelineEvents(events: CodeAgentTimelineEvent[]): CodeAgentTimelineEvent[] {
+  return events.filter((event) => event.metadata?.source !== 'hook');
+}
+
 export function timelineCharCount(events: CodeAgentTimelineEvent[]): number {
   return events.reduce((total, event) => total + event.content.length, 0);
 }
