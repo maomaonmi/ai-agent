@@ -195,59 +195,12 @@ function ActorBadge({ kind }: { kind: CodeAgentActorKind }) {
   );
 }
 
-function contextUsageMeta(event: CodeAgentTimelineEvent) {
-  const metadata = event.metadata ?? {};
-  const contextTokens = Number(metadata.contextTokens ?? 0);
-  const contextLimitTokens = Math.max(1, Number(metadata.contextLimitTokens ?? 1));
-  const usageRatio = Math.max(0, Math.min(1, Number(metadata.usageRatio ?? 0)));
-  return {
-    contextTokens,
-    contextLimitTokens,
-    usageRatio,
-    phase: String(metadata.phase ?? ''),
-    messagesRemoved: Number(metadata.messagesRemoved ?? 0),
-  };
-}
-
 function TimelineEventCard({ event, onOpenDiff, isRunning }: {
   event: CodeAgentTimelineEvent;
   onOpenDiff?: (path: string) => void;
   isRunning: boolean;
 }) {
   const filePath = event.file?.path || (typeof event.metadata?.path === 'string' ? event.metadata.path : '');
-  if (event.metadata?.source === 'context_usage') {
-    const usage = contextUsageMeta(event);
-    const isCompressing = usage.phase === 'compressing';
-    const isCompressed = usage.phase === 'compressed';
-    const isSkipped = usage.phase === 'skipped';
-    return (
-      <div className="rounded-lg border border-sky-200 bg-sky-50/70 px-3 py-2.5 text-xs text-slate-600" role="status">
-        <div className="flex items-center justify-between gap-3">
-          <span className="font-medium text-slate-700">
-            {isCompressing ? '正在压缩上下文' : isCompressed ? '上下文压缩完成' : isSkipped ? '上下文无需压缩' : '当前上下文使用率'}
-          </span>
-          <span className="font-mono text-[11px] text-sky-700">
-            {Math.round(usage.usageRatio * 100)}% · {usage.contextTokens.toLocaleString()} / {usage.contextLimitTokens.toLocaleString()} token
-          </span>
-        </div>
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-sky-100" aria-label="上下文使用率">
-          <div
-            className={`h-full rounded-full transition-all ${isCompressing ? 'animate-pulse bg-amber-400' : 'bg-sky-500'}`}
-            style={{ width: `${Math.max(2, usage.usageRatio * 100)}%` }}
-          />
-        </div>
-        <div className="mt-1 text-[11px] text-slate-500">
-          {isCompressing
-            ? '正在折叠较早的 AgentLoop 消息，最近工具链保持不变。'
-            : isCompressed
-              ? `已折叠 ${usage.messagesRemoved} 条历史消息，继续执行。`
-              : isSkipped
-                ? '本次压缩没有产生有效缩减，已保持原上下文继续执行。'
-              : '指标来自本轮实际请求上下文，包含消息与工具定义估算。'}
-        </div>
-      </div>
-    );
-  }
   if (event.stage === 'thinking') {
     return (
       <details className="rounded-lg border border-slate-200 bg-white" open={!event.done && isRunning}>
@@ -317,7 +270,10 @@ export default function CodeAgentTimeline({
   acceptanceElapsedSeconds = 0,
   onOpenDiff,
 }: CodeAgentTimelineProps) {
-  const visibleEvents = useMemo(() => filterHookTimelineEvents(events), [events]);
+  const visibleEvents = useMemo(
+    () => filterHookTimelineEvents(events).filter((event) => event.metadata?.source !== 'context_usage'),
+    [events],
+  );
   const allEvents = useMemo(() => [
     ...visibleEvents,
     ...makeTestEvents(visibleEvents, runId, acceptanceState, acceptanceReport, acceptanceElapsedSeconds),
@@ -337,9 +293,6 @@ export default function CodeAgentTimeline({
   const fileCount = new Set(allEvents
     .map((event) => event.file?.path || (typeof event.metadata?.path === 'string' ? event.metadata.path : ''))
     .filter(Boolean)).size;
-  const latestContextEvent = [...allEvents].reverse().find((event) => event.metadata?.source === 'context_usage');
-  const latestContext = latestContextEvent ? contextUsageMeta(latestContextEvent) : null;
-
   if (allEvents.length === 0) return null;
 
   return (
@@ -349,7 +302,6 @@ export default function CodeAgentTimeline({
           <h4 className="text-xs font-semibold text-slate-800">AgentLoop · 执行时间线</h4>
           <p className="mt-1 text-[11px] text-slate-500">
             {isRunning ? '正在执行' : '已结束'} · 思考 {thinkingChars.toLocaleString()} 字 · 输出 {outputChars.toLocaleString()} 字 · 文件 {fileCount}
-            {latestContext && ` · 上下文 ${Math.round(latestContext.usageRatio * 100)}%`}
           </p>
         </div>
         {acceptanceState !== 'idle' && (

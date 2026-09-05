@@ -3610,7 +3610,7 @@ export default function ChatInterface() {
                       <>
                         {' · 上下文 '}
                         <span className="font-medium text-slate-600">
-                          {Math.round(Math.min(100, Math.max(0, agentTrace.contextUsage.usage_ratio * 100)))}%
+                          {(Math.round(Math.min(100, Math.max(0, agentTrace.contextUsage.usage_ratio * 1000))) / 10).toFixed(1)}%
                         </span>
                         {' · '}
                         {agentTrace.contextUsage.context_tokens.toLocaleString()}

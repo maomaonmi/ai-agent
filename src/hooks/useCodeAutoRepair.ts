@@ -471,37 +471,8 @@ export default function useCodeAutoRepair() {
     }
     if (event.type === 'context_usage') {
       const contextEvent = event as ContextUsageEvent;
-      const usagePercent = Math.round(Math.max(0, Math.min(1, contextEvent.usage_ratio)) * 100);
-      const tokenText = `${contextEvent.context_tokens.toLocaleString()} / ${contextEvent.context_limit_tokens.toLocaleString()} token`;
-      const content = contextEvent.phase === 'compressing'
-        ? `正在压缩上下文：当前使用率 ${usagePercent}%（${tokenText}），暂时折叠较早的 AgentLoop 历史。`
-        : contextEvent.phase === 'compressed'
-          ? `上下文压缩完成：${usagePercent}%（${tokenText}），已折叠 ${contextEvent.messages_removed ?? 0} 条历史消息。`
-          : `上下文使用率 ${usagePercent}%（${tokenText}），当前保留 ${contextEvent.message_count} 条消息。`;
-      appendActivity(
-        content,
-        true,
-        'observation',
-        contextEvent.phase === 'compressing' ? 'compressing' : 'context_usage',
-        {
-          runId: contextEvent.run_id,
-          actorId: actorId ?? resolvedActorId,
-          eventId: contextEvent.event_id,
-          iteration: contextEvent.iteration,
-          timestampMs: contextEvent.timestamp_ms,
-          metadata: {
-            source: 'context_usage',
-            phase: contextEvent.phase,
-            contextTokens: contextEvent.context_tokens,
-            contextLimitTokens: contextEvent.context_limit_tokens,
-            usageRatio: contextEvent.usage_ratio,
-            messageCount: contextEvent.message_count,
-            tokensBefore: contextEvent.tokens_before,
-            tokensAfter: contextEvent.tokens_after,
-            messagesRemoved: contextEvent.messages_removed,
-          },
-        },
-      );
+      // 上下文是运行指标，不再为每次 measured/compressing 事件创建时间线卡片；
+      // 底部 Token 状态栏消费同一份 trace.contextUsage，实时显示最新值。
       if (actorKind === 'main') {
         commitAgentTrace((previous) => ({ ...previous, contextUsage: contextEvent }));
       }
