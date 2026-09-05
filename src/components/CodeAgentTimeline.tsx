@@ -103,20 +103,43 @@ function makeTestEvents(
     ),
   ];
 
-  if (report?.plan?.summary) {
-    events.push(next('observation', `验收目标：${report.plan.summary}`, true, 'plan'));
-  }
-  if (report?.model_output) {
-    events.push(next(
-      'thinking',
-      report.model_output,
-      true,
-      'completed',
-      { charCount: report.model_output.length },
-    ));
-  }
-  if (report?.diagnostic) {
-    events.push(next('observation', report.diagnostic, true, report.blocked ? 'blocked' : 'diagnostic'));
+  const verificationAttempts = report?.verification_attempts ?? [];
+  if (verificationAttempts.length > 0) {
+    for (const attempt of verificationAttempts) {
+      events.push(next(
+        'status',
+        `测试 Agent 第 ${attempt.attempt} 轮：${attempt.phase === 'planning' ? '生成验收计划' : '执行浏览器验证'}`,
+        true,
+        attempt.status,
+      ));
+      if (attempt.plan?.summary) {
+        events.push(next('observation', `验收目标：${attempt.plan.summary}`, true, 'plan'));
+      }
+      if (attempt.diagnostic) {
+        events.push(next(
+          'observation',
+          attempt.diagnostic,
+          true,
+          attempt.blocked ? 'blocked' : attempt.status === 'failed' ? 'diagnostic' : attempt.status,
+        ));
+      }
+      for (const assertion of attempt.assertions ?? []) {
+        const target = assertion.assertion.selector || assertion.assertion.expected || assertion.assertion.kind;
+        events.push(next(
+          'verification',
+          `${assertion.passed ? '通过' : '失败'} · ${target}${assertion.actual ? ` · 实际：${assertion.actual}` : ''}`,
+          true,
+          assertion.passed ? 'passed' : 'failed',
+        ));
+      }
+    }
+  } else {
+    if (report?.plan?.summary) {
+      events.push(next('observation', `验收目标：${report.plan.summary}`, true, 'plan'));
+    }
+    if (report?.diagnostic) {
+      events.push(next('observation', report.diagnostic, true, report.blocked ? 'blocked' : 'diagnostic'));
+    }
   }
   for (const artifact of report?.artifacts ?? []) {
     events.push(next(

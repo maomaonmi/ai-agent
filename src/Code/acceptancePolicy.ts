@@ -19,10 +19,12 @@ interface AcceptanceEligibilityInput {
 
 export function canStartRuntimeRepair(input: {
   mainWorkCompleted: boolean;
+  runtimeCheckCompleted: boolean;
   currentRunId: string;
   errorRunId: string;
 }): boolean {
   return input.mainWorkCompleted
+    && input.runtimeCheckCompleted
     && Boolean(input.currentRunId)
     && input.currentRunId === input.errorRunId;
 }

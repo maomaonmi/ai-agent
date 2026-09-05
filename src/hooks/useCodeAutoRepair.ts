@@ -220,6 +220,9 @@ export default function useCodeAutoRepair() {
   const recentErrorsRef = useRef<string[]>([]);
   const autoRepairStoppedRef = useRef(false);
   const mainWorkCompletedRef = useRef(false);
+  // Console warnings/errors during iframe boot are evidence for Test Agent,
+  // not permission for Ops to patch before the runtime check reaches `done`.
+  const runtimeCheckCompletedRef = useRef(false);
   const hasAgentOutputRef = useRef(false);
   const agentTraceRef = useRef<CodeAgentTrace>(EMPTY_AGENT_TRACE);
   const currentAgentRunIdRef = useRef('');
@@ -737,6 +740,7 @@ export default function useCodeAutoRepair() {
   const beginRuntimeCheck = useCallback((nextCode: string) => {
     clearCheckTimer();
     mainWorkCompletedRef.current = true;
+    runtimeCheckCompletedRef.current = false;
     updateCode(nextCode);
     sequenceRef.current += 1;
     const nextRunId = `code-run-${Date.now()}-${sequenceRef.current}`;
@@ -751,6 +755,7 @@ export default function useCodeAutoRepair() {
         charCount: nextCode.length,
         repairCount: repairCountRef.current,
       });
+      runtimeCheckCompletedRef.current = true;
     }, ERROR_CHECK_WINDOW_MS);
   }, [clearCheckTimer, updateCode]);
 
@@ -767,6 +772,7 @@ export default function useCodeAutoRepair() {
     recentErrorsRef.current = [];
     autoRepairStoppedRef.current = false;
     mainWorkCompletedRef.current = false;
+    runtimeCheckCompletedRef.current = false;
     setCodeState('');
     setRunId('');
     setRepairLogs([]);
@@ -793,6 +799,7 @@ export default function useCodeAutoRepair() {
     const restoredRunId = `code-run-${Date.now()}-${sequenceRef.current}`;
     runIdRef.current = restoredRunId;
     setRunId(restoredRunId);
+    runtimeCheckCompletedRef.current = true;
     setStatus({ state: 'done', charCount: savedCode.length, repairCount: 0 });
   }, [reset, updateCode]);
 
@@ -909,6 +916,7 @@ export default function useCodeAutoRepair() {
     recentErrorsRef.current = [];
     autoRepairStoppedRef.current = false;
     mainWorkCompletedRef.current = false;
+    runtimeCheckCompletedRef.current = false;
     setRepairLogs([]);
     setStatus({ state: 'modifying', charCount: 0 });
     const currentVfs = parseProjectCode(currentCode);
@@ -988,6 +996,7 @@ export default function useCodeAutoRepair() {
       runtimeError.runId !== runIdRef.current ||
       !canStartRuntimeRepair({
         mainWorkCompleted: mainWorkCompletedRef.current,
+        runtimeCheckCompleted: runtimeCheckCompletedRef.current,
         currentRunId: runIdRef.current,
         errorRunId: runtimeError.runId,
       }) ||
@@ -1194,6 +1203,7 @@ export default function useCodeAutoRepair() {
     autoRepairStoppedRef.current = true;
     isRepairingRef.current = false;
     mainWorkCompletedRef.current = false;
+    runtimeCheckCompletedRef.current = false;
     controllerRef.current?.abort();
     controllerRef.current = null;
     clearCheckTimer();

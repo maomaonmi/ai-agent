@@ -718,7 +718,22 @@ export default function CodeWorkspace({
       if (event.source !== iframeRef.current?.contentWindow) return;
       const data = event.data;
       if (isRuntimeErrorReport(data) && data.runId === runId) {
-        onRuntimeError(data);
+        // Runtime exceptions are evidence for the pending verification run.
+        // Do not start Ops directly from an iframe boot error; Test Agent must
+        // observe the completed main run and decide whether it is actionable.
+        setConsoleEntries((previous) => [
+          ...previous.slice(-99),
+          {
+            level: 'error',
+            args: [
+              data.message,
+              data.source ? `source=${data.source}` : '',
+              data.line ? `line=${data.line}` : '',
+              data.stack ? data.stack.slice(0, 2_000) : '',
+            ].filter(Boolean),
+            timestamp: Date.now(),
+          },
+        ]);
         return;
       }
       if (isSelectedElementContext(data) && data.runId === runId && isInspectMode) {
@@ -731,17 +746,8 @@ export default function CodeWorkspace({
           ...previous.slice(-99),
           { level: data.level, args: data.args, timestamp: Date.now() },
         ]);
-        // Generated apps often catch functional failures and log them instead of
-        // throwing. Treat errors and warnings as diagnostics so important
-        // SecurityError/deprecation/contract warnings reach auto-repair too.
-        if (data.level === 'error' || data.level === 'warn') {
-      onRuntimeError({
-            type: 'code-sandbox-runtime-error',
-            runId,
-            message: data.args.join(' ') || `Sandbox console ${data.level}`,
-            source: `console.${data.level}`,
-          });
-        }
+        // Console output is collected as evidence for the completed Test Agent
+        // run. It must not independently start Ops while the test is pending.
         return;
       }
       if (
@@ -856,6 +862,7 @@ export default function CodeWorkspace({
     void runCodeAcceptanceTest({
       user_request: expectation,
       preview_html: previewHtml,
+      verification_run_id: acceptanceRunId,
       console_entries: consoleEntriesRef.current.map((entry) => ({
         level: entry.level,
         text: entry.args.join(' '),
@@ -1153,19 +1160,21 @@ export default function CodeWorkspace({
             aria-live="polite"
             className="mr-1 text-xs text-slate-500"
           >
-            {status.state === 'generating' &&
+            {acceptanceState === 'running' &&
+              `测试 Agent 验收中 · 已用 ${acceptanceElapsedSeconds} 秒，最多自动校正 1 次`}
+            {acceptanceState !== 'running' && status.state === 'generating' &&
               `正在生成 · ${status.charCount.toLocaleString()} 字符`}
-            {status.state === 'modifying' &&
+            {acceptanceState !== 'running' && status.state === 'modifying' &&
               `正在增量修改 · ${status.charCount.toLocaleString()} 字符`}
-            {status.state === 'checking' && '正在检测运行时错误...'}
-            {status.state === 'repairing' &&
+            {acceptanceState !== 'running' && status.state === 'checking' && '正在检测运行时错误...'}
+            {acceptanceState !== 'running' && status.state === 'repairing' &&
               `自动修复第 ${status.attempt} 次 · ${status.charCount.toLocaleString()} 字符`}
-            {status.state === 'done' &&
+            {acceptanceState !== 'running' && status.state === 'done' &&
               (status.repairCount > 0
                 ? `运行正常 · 已自动修复 ${status.repairCount} 次`
                 : `生成完成 · ${status.charCount.toLocaleString()} 字符`)}
-            {status.state === 'error' && status.message}
-            {status.state === 'idle' && '等待需求'}
+            {acceptanceState !== 'running' && status.state === 'error' && status.message}
+            {acceptanceState !== 'running' && status.state === 'idle' && '等待需求'}
           </div>
           {status.state === 'repairing' && (
             <button

@@ -203,11 +203,19 @@ test('preserves prior AgentLoop runs for a new request but clears them on explic
 test('does not let runtime errors start ops while the main Agent is still streaming', () => {
   assert.equal(canStartRuntimeRepair({
     mainWorkCompleted: false,
+    runtimeCheckCompleted: false,
     currentRunId: 'code-run-1',
     errorRunId: 'code-run-1',
   }), false);
   assert.equal(canStartRuntimeRepair({
     mainWorkCompleted: true,
+    runtimeCheckCompleted: false,
+    currentRunId: 'code-run-1',
+    errorRunId: 'code-run-1',
+  }), false);
+  assert.equal(canStartRuntimeRepair({
+    mainWorkCompleted: true,
+    runtimeCheckCompleted: true,
     currentRunId: 'code-run-1',
     errorRunId: 'code-run-1',
   }), true);

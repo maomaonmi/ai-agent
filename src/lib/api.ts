@@ -1639,9 +1639,27 @@ export interface AcceptanceAssertionResult {
   actual: string;
 }
 
+export interface AcceptanceVerificationAttempt {
+  attempt: number;
+  phase: 'planning' | 'browser';
+  status: 'passed' | 'failed' | 'blocked' | 'retrying' | string;
+  plan?: {
+    summary: string;
+    steps: Array<Record<string, unknown>>;
+    assertions: Array<Record<string, unknown>>;
+  };
+  diagnostic?: string;
+  passed?: boolean;
+  blocked?: boolean;
+  assertions?: AcceptanceAssertionResult[];
+}
+
 export interface CodeAcceptanceReport {
   passed: boolean;
   blocked: boolean;
+  verification_run_id?: string;
+  verification_attempts?: AcceptanceVerificationAttempt[];
+  attempt_count?: number;
   stage?: 'planning' | 'browser';
   diagnostic?: string;
   plan?: {
@@ -2646,6 +2664,7 @@ export async function runCodeAcceptanceTest(
     user_request: string;
     preview_html: string;
     console_entries: Array<{ level: 'log' | 'info' | 'warn' | 'error'; text: string }>;
+    verification_run_id: string;
   },
   signal?: AbortSignal,
 ): Promise<CodeAcceptanceReport> {
