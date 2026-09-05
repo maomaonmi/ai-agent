@@ -3055,6 +3055,30 @@ export async function getMemorySummaries(sessionId: string): Promise<{ summaries
   return response.json();
 }
 
+export interface CodeContextCompactionResult {
+  status: 'requested' | 'completed' | 'skipped' | 'unavailable' | string;
+  scope: 'active_loop' | 'session_memory' | 'none' | string;
+  run_id?: string;
+  session_id?: string;
+  message: string;
+}
+
+/** 请求活动 Code AgentLoop 在下一轮边界压缩，空闲时压缩已保存的会话记忆。 */
+export async function requestCodeContextCompaction(
+  input: { runId?: string | null; sessionId?: string | null },
+): Promise<CodeContextCompactionResult> {
+  const response = await fetch(`${API_BASE_URL}/api/code/context/compact`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      run_id: input.runId || undefined,
+      session_id: input.sessionId || undefined,
+    }),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json();
+}
+
 export async function restoreMemoryVfs(
   sessionId: string,
 ): Promise<{ vfs: Record<string, string>; checkpoint_id: number | null }> {

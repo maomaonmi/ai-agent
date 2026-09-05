@@ -55,7 +55,7 @@ import {
   getVideoTaskStatus,
   type VideoTask,
 } from '../lib/api';
-import { Image as ImageIcon, Paperclip, X, Bot, ArrowUp, Sparkles, SlidersHorizontal, Plus, FileText, Video, Menu, Code2, Languages, WandSparkles, Telescope, Presentation, Mic, Square } from 'lucide-react';
+import { Image as ImageIcon, Paperclip, X, Bot, ArrowUp, Sparkles, SlidersHorizontal, Plus, FileText, Video, Menu, Code2, Languages, WandSparkles, Telescope, Presentation, Mic, Square, RefreshCw } from 'lucide-react';
 import ResearchProgressPanel from './ResearchProgressPanel';
 import MarkdownMessage from './MarkdownMessage';
 import NodeProgressPanel from './NodeProgressPanel';
@@ -630,6 +630,8 @@ export default function ChatInterface() {
   const [codeVersions, setCodeVersions] = useState<VersionSnapshot[]>([]);
   const [activeCodeVersionId, setActiveCodeVersionId] = useState('');
   const [codeProjectKind, setCodeProjectKind] = useState<'frontend' | 'fullstack'>('frontend');
+  const [isCompactingCodeContext, setIsCompactingCodeContext] = useState(false);
+  const [codeContextActionMessage, setCodeContextActionMessage] = useState('');
   // Why: Day57 @file 剪枝——状态提升到此,提交时连同 instruction 一起传给 useCodeAutoRepair.modify。
   const [mentionedFiles, setMentionedFiles] = useState<string[]>([]);
   // Why: 重写消息——点"重写"把该条用户消息载回输入框，CTRL+Enter 发送；
@@ -651,8 +653,25 @@ export default function ChatInterface() {
     restoreAgentRuns,
     handleRuntimeError,
     stopAutoRepair,
+    compactContext,
     addTrustedTerminalPrefix,
   } = useCodeAutoRepair();
+
+  const handleCompactCodeContext = useCallback(async () => {
+    if (isCompactingCodeContext) return;
+    setIsCompactingCodeContext(true);
+    setCodeContextActionMessage('正在请求压缩…');
+    try {
+      const result = await compactContext();
+      setCodeContextActionMessage(result.message);
+    } catch (cause) {
+      setCodeContextActionMessage(
+        cause instanceof Error ? `压缩失败：${cause.message}` : '压缩失败，请稍后重试。',
+      );
+    } finally {
+      setIsCompactingCodeContext(false);
+    }
+  }, [compactContext, isCompactingCodeContext]);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -3582,12 +3601,41 @@ export default function ChatInterface() {
               onRewritePrompt={handleRewritePrompt}
               onDeletePrompt={handleDeletePrompt}
             />
-            {agentTrace.tokenUsage && (
-              <div className="border-t border-slate-200 bg-white px-3 py-1 text-[11px] text-slate-400">
-                Token · 合计 {agentTrace.tokenUsage.total_tokens}
-                {(agentTrace.tokenUsage.reasoning_tokens ?? 0) > 0 ? ` · 推理 ${agentTrace.tokenUsage.reasoning_tokens}` : ''}
+            <div className="border-t border-slate-200 bg-white px-3 py-1.5 text-[11px] text-slate-400">
+                <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+                  <span>
+                    Token · 合计 {agentTrace.tokenUsage?.total_tokens ?? 0}
+                    {(agentTrace.tokenUsage?.reasoning_tokens ?? 0) > 0 ? ` · 推理 ${agentTrace.tokenUsage?.reasoning_tokens}` : ''}
+                    {agentTrace.contextUsage ? (
+                      <>
+                        {' · 上下文 '}
+                        <span className="font-medium text-slate-600">
+                          {Math.round(Math.min(100, Math.max(0, agentTrace.contextUsage.usage_ratio * 100)))}%
+                        </span>
+                        {' · '}
+                        {agentTrace.contextUsage.context_tokens.toLocaleString()}
+                        {' / '}
+                        {agentTrace.contextUsage.context_limit_tokens.toLocaleString()}
+                      </>
+                    ) : ' · 上下文 未测量'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void handleCompactCodeContext()}
+                    disabled={isCompactingCodeContext || !isSessionReady}
+                    className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-2 py-1 font-medium text-slate-600 transition hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    title="在当前 AgentLoop 的下一轮边界压缩上下文；空闲时压缩已保存的会话记忆"
+                  >
+                    <RefreshCw size={11} className={isCompactingCodeContext ? 'animate-spin' : ''} aria-hidden="true" />
+                    {isCompactingCodeContext ? '压缩中…' : '压缩上下文'}
+                  </button>
+                </div>
+                {codeContextActionMessage && (
+                  <div className="mt-1 text-[10px] text-slate-500" role="status">
+                    {codeContextActionMessage}
+                  </div>
+                )}
               </div>
-            )}
             </>
           )}
 

@@ -9,6 +9,7 @@ import {
   generateWebCode,
   modifyFullstackCode,
   modifyWebCode,
+  requestCodeContextCompaction,
   type ChatAttachment,
   type CodeAgentRun,
   type CodeAgentActorKind,
@@ -1255,6 +1256,21 @@ export default function useCodeAutoRepair() {
     commitAgentTrace((previous) => ({ ...previous, isRunning: false }));
   }, [clearCheckTimer, clearRepairRetryTimer, commitAgentTrace]);
 
+  const compactContext = useCallback(async () => {
+    const result = await requestCodeContextCompaction({
+      runId: currentAgentRunIdRef.current || runIdRef.current || null,
+      sessionId: sessionIdRef.current,
+    });
+    const statusText = result.message || (
+      result.status === 'requested' ? '已请求压缩，当前模型轮次结束后执行。' : '上下文压缩请求已处理。'
+    );
+    commitAgentTrace((previous) => ({
+      ...previous,
+      steps: [...previous.steps, statusText],
+    }));
+    return result;
+  }, [commitAgentTrace]);
+
   useEffect(() => () => {
     controllerRef.current?.abort();
     clearCheckTimer();
@@ -1304,6 +1320,7 @@ export default function useCodeAutoRepair() {
     restoreAgentRuns,
     handleRuntimeError,
     stopAutoRepair,
+    compactContext,
     addTrustedTerminalPrefix,
   };
 }
