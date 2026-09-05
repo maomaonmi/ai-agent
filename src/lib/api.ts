@@ -1407,7 +1407,30 @@ export interface AgentLoopRoundEvent {
   consecutive_error_rounds?: number;
 }
 
-export type CodeGenerationEvent = CodeUpdateEvent | CodeErrorEvent | CodeAgentActivityEvent | HookEvent | TokenUsageEvent | RuntimeSummaryEvent | TerminalProposalEvent | TaskListEvent | TaskUpdateEvent | FileWrittenEvent | AgentLoopRoundEvent | MemoryUpdateEvent | SkillMatchedEvent;
+export interface ContextUsageEvent {
+  type: 'context_usage';
+  run_id?: string;
+  loop_id?: string;
+  turn_id?: string;
+  iteration?: number;
+  event_id?: string;
+  timestamp_ms?: number;
+  phase: 'measured' | 'compressing' | 'compressed' | 'skipped' | 'failed' | string;
+  context_tokens: number;
+  message_tokens?: number;
+  tool_tokens?: number;
+  context_limit_tokens: number;
+  usage_ratio: number;
+  message_count: number;
+  trigger_ratio?: number;
+  target_ratio?: number;
+  status?: 'running' | 'completed' | 'failed' | string;
+  tokens_before?: number;
+  tokens_after?: number;
+  messages_removed?: number;
+}
+
+export type CodeGenerationEvent = CodeUpdateEvent | CodeErrorEvent | CodeAgentActivityEvent | HookEvent | TokenUsageEvent | RuntimeSummaryEvent | TerminalProposalEvent | TaskListEvent | TaskUpdateEvent | FileWrittenEvent | AgentLoopRoundEvent | ContextUsageEvent | MemoryUpdateEvent | SkillMatchedEvent;
 
 export type PlanTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
@@ -1575,6 +1598,7 @@ export interface CodeAgentTrace {
   terminalProposals?: Array<{ command: string; reason?: string; expected_output_hint?: string }>;
   hookEvents?: HookEvent[];
   tokenUsage?: TokenUsage;
+  contextUsage?: ContextUsageEvent;
   timeline?: CodeAgentTimelineEvent[];
 }
 

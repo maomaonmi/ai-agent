@@ -18,6 +18,7 @@ import {
   type CodeAgentTimelineStage,
   type CodeFileChange,
   type CodeGenerationEvent,
+  type ContextUsageEvent,
   type HookEvent,
   type TokenUsageEvent,
   type McpMode,
@@ -465,6 +466,44 @@ export default function useCodeAutoRepair() {
           },
         },
       );
+      return true;
+    }
+    if (event.type === 'context_usage') {
+      const contextEvent = event as ContextUsageEvent;
+      const usagePercent = Math.round(Math.max(0, Math.min(1, contextEvent.usage_ratio)) * 100);
+      const tokenText = `${contextEvent.context_tokens.toLocaleString()} / ${contextEvent.context_limit_tokens.toLocaleString()} token`;
+      const content = contextEvent.phase === 'compressing'
+        ? `正在压缩上下文：当前使用率 ${usagePercent}%（${tokenText}），暂时折叠较早的 AgentLoop 历史。`
+        : contextEvent.phase === 'compressed'
+          ? `上下文压缩完成：${usagePercent}%（${tokenText}），已折叠 ${contextEvent.messages_removed ?? 0} 条历史消息。`
+          : `上下文使用率 ${usagePercent}%（${tokenText}），当前保留 ${contextEvent.message_count} 条消息。`;
+      appendActivity(
+        content,
+        true,
+        'observation',
+        contextEvent.phase === 'compressing' ? 'compressing' : 'context_usage',
+        {
+          runId: contextEvent.run_id,
+          actorId: actorId ?? resolvedActorId,
+          eventId: contextEvent.event_id,
+          iteration: contextEvent.iteration,
+          timestampMs: contextEvent.timestamp_ms,
+          metadata: {
+            source: 'context_usage',
+            phase: contextEvent.phase,
+            contextTokens: contextEvent.context_tokens,
+            contextLimitTokens: contextEvent.context_limit_tokens,
+            usageRatio: contextEvent.usage_ratio,
+            messageCount: contextEvent.message_count,
+            tokensBefore: contextEvent.tokens_before,
+            tokensAfter: contextEvent.tokens_after,
+            messagesRemoved: contextEvent.messages_removed,
+          },
+        },
+      );
+      if (actorKind === 'main') {
+        commitAgentTrace((previous) => ({ ...previous, contextUsage: contextEvent }));
+      }
       return true;
     }
     if (event.type === 'token_usage') {
