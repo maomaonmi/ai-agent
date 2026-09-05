@@ -23,6 +23,7 @@ import {
   type McpMode,
 } from '../lib/api';
 import { appendTimelineEvent, completeTimelineEvent } from '../Code/agentTimeline';
+import { classifyCodeGenerationEvent, summarizeAgentLoopRound } from '../Code/agentEventRouting';
 import { resetAgentRuns } from '../Code/agentRunLifecycle';
 import { canStartRuntimeRepair } from '../Code/acceptancePolicy';
 import { parseProjectCode } from '../Code/fullstackBundler';
@@ -432,6 +433,37 @@ export default function useCodeAutoRepair() {
         metadata: options.metadata,
       });
     };
+    if (event.type === 'agent_loop_round') {
+      const roundEvent = event;
+      const roundId = [
+        roundEvent.run_id ?? currentAgentRunIdRef.current,
+        roundEvent.loop_id ?? 'loop',
+        roundEvent.turn_id ?? roundEvent.iteration ?? 'round',
+      ].join(':');
+      appendActivity(
+        summarizeAgentLoopRound(roundEvent),
+        true,
+        'observation',
+        'loop_round',
+        {
+          runId: roundEvent.run_id,
+          actorId: actorId ?? resolvedActorId,
+          eventId: `agent-loop-round:${roundId}`,
+          iteration: roundEvent.iteration,
+          metadata: {
+            source: 'agent-loop',
+            loopId: roundEvent.loop_id,
+            turnId: roundEvent.turn_id,
+            stateHashBefore: roundEvent.state_hash_before,
+            stateHashAfter: roundEvent.state_hash_after,
+            filesChanged: roundEvent.files_changed ?? [],
+            testsChanged: roundEvent.tests_changed ?? [],
+            errorSignature: roundEvent.error_signature,
+          },
+        },
+      );
+      return true;
+    }
     if (event.type === 'token_usage') {
       const usageEvent = event as TokenUsageEvent;
       commitAgentTrace((previous) => ({ ...previous, tokenUsage: usageEvent.usage }));
@@ -806,7 +838,7 @@ export default function useCodeAutoRepair() {
     let didComplete = false;
 
     const handleEvent = (event: CodeGenerationEvent) => {
-      if (event.type === 'agent_activity' || event.type === 'hook_event' || event.type === 'token_usage' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update' || event.type === 'file_written' || event.type === 'memory_update' || event.type === 'skill_matched') {
+      if (classifyCodeGenerationEvent(event) === 'agent_event') {
         consumeAgentEvent(event);
         return;
       }
@@ -815,7 +847,9 @@ export default function useCodeAutoRepair() {
         commitAgentTrace((previous) => ({ ...previous, isRunning: false }));
         return;
       }
-      // 这里只有 CodeUpdateEvent 了：RuntimeSummaryEvent/TerminalProposalEvent 都在上层 return
+      // 这里只允许显式的 CodeUpdateEvent 进入代码/VFS 投影；未知事件不能
+      // 因为缺少 event.code 而把 undefined 写入 code state。
+      if (event.type !== 'code_update') return;
       if (!hasAgentOutputRef.current) {
         commitAgentTrace((previous) => ({ ...previous, output: event.code, phase: 'generating' }));
       }
@@ -899,7 +933,7 @@ export default function useCodeAutoRepair() {
           }
         : null;
     const handleEvent = (event: CodeGenerationEvent) => {
-      if (event.type === 'agent_activity' || event.type === 'hook_event' || event.type === 'token_usage' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update' || event.type === 'file_written' || event.type === 'memory_update' || event.type === 'skill_matched') {
+      if (classifyCodeGenerationEvent(event) === 'agent_event') {
         consumeAgentEvent(event);
         return;
       }
@@ -907,7 +941,8 @@ export default function useCodeAutoRepair() {
         commitAgentTrace((previous) => ({ ...previous, isRunning: false }));
         throw new Error(event.message);
       }
-      // 这里只剩下 CodeUpdateEvent：narrowing 后 event.code / event.done 都合法
+      // 这里只允许显式的 CodeUpdateEvent 进入代码/VFS 投影。
+      if (event.type !== 'code_update') return;
       if (!hasAgentOutputRef.current) {
         commitAgentTrace((previous) => ({ ...previous, output: event.code, phase: 'patching' }));
       }
@@ -1035,7 +1070,7 @@ export default function useCodeAutoRepair() {
       const currentVfs = parseProjectCode(codeRef.current);
       const hasVfs = currentVfs && Object.keys(currentVfs).length > 0;
       const handleEvent = (event: CodeGenerationEvent) => {
-        if (event.type === 'agent_activity' || event.type === 'hook_event' || event.type === 'token_usage' || event.type === 'runtime_summary' || event.type === 'terminal_proposal' || event.type === 'task_list' || event.type === 'task_update' || event.type === 'file_written' || event.type === 'memory_update' || event.type === 'skill_matched') {
+        if (classifyCodeGenerationEvent(event) === 'agent_event') {
             consumeAgentEvent(event, 'ops', `ops:${currentAgentRunIdRef.current}:repair`);
             if (event.type === 'agent_activity' && event.channel === 'output' && event.phase !== 'thinking') {
               repairModelOutput += event.content;
@@ -1049,7 +1084,8 @@ export default function useCodeAutoRepair() {
             commitAgentTrace((previous) => ({ ...previous, isRunning: false }));
             throw new Error(event.message);
           }
-          // 只剩 CodeUpdateEvent
+          // 这里只允许显式的 CodeUpdateEvent 进入修复代码投影。
+          if (event.type !== 'code_update') return;
           if (!repairModelOutput) {
             repairModelOutput = event.code;
             setRepairLogs((previous) => previous.map((log) =>

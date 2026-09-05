@@ -16,6 +16,10 @@ import {
 import {
   resetAgentRuns,
 } from '../src/Code/agentRunLifecycle.ts';
+import {
+  classifyCodeGenerationEvent,
+  summarizeAgentLoopRound,
+} from '../src/Code/agentEventRouting.ts';
 
 function input(overrides: Partial<TimelineEventInput> = {}): TimelineEventInput {
   return {
@@ -207,4 +211,20 @@ test('does not let runtime errors start ops while the main Agent is still stream
     currentRunId: 'code-run-1',
     errorRunId: 'code-run-1',
   }), true);
+});
+
+test('routes AgentLoop round metrics away from the code-update path', () => {
+  assert.equal(classifyCodeGenerationEvent({ type: 'agent_loop_round' }), 'agent_event');
+  assert.equal(classifyCodeGenerationEvent({ type: 'code_update' }), 'code_update');
+  assert.equal(classifyCodeGenerationEvent({ type: 'future_metadata_event' }), 'agent_event');
+});
+
+test('summarizes a round with no effective VFS change without requiring event.code', () => {
+  assert.equal(summarizeAgentLoopRound({
+    iteration: 1,
+    tool_calls_count: 1,
+    files_changed: [],
+    state_hash_before: 'same',
+    state_hash_after: 'same',
+  }), 'AgentLoop 第 1 轮完成：工具调用 1 次，本轮没有有效文件变化。');
 });

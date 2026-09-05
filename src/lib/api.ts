@@ -1385,7 +1385,29 @@ export interface FileWrittenEvent {
   done: boolean;
 }
 
-export type CodeGenerationEvent = CodeUpdateEvent | CodeErrorEvent | CodeAgentActivityEvent | HookEvent | TokenUsageEvent | RuntimeSummaryEvent | TerminalProposalEvent | TaskListEvent | TaskUpdateEvent | FileWrittenEvent | MemoryUpdateEvent | SkillMatchedEvent;
+// Why: AgentLoop 每轮结束后推送的运行指标不是代码内容，不能落入
+// CodeUpdateEvent 分支，否则前端会把缺失的 event.code 写进 code state。
+export interface AgentLoopRoundEvent {
+  type: 'agent_loop_round';
+  run_id?: string;
+  loop_id?: string;
+  turn_id?: string;
+  iteration?: number;
+  state_hash_before?: string;
+  state_hash_after?: string;
+  previous_state_hash?: string;
+  same_as_previous_state?: boolean;
+  tool_calls_count?: number;
+  files_changed?: string[];
+  tests_changed?: string[];
+  stdout_hash?: string;
+  error_signature?: string;
+  mutation_attempted?: boolean;
+  consecutive_no_progress_rounds?: number;
+  consecutive_error_rounds?: number;
+}
+
+export type CodeGenerationEvent = CodeUpdateEvent | CodeErrorEvent | CodeAgentActivityEvent | HookEvent | TokenUsageEvent | RuntimeSummaryEvent | TerminalProposalEvent | TaskListEvent | TaskUpdateEvent | FileWrittenEvent | AgentLoopRoundEvent | MemoryUpdateEvent | SkillMatchedEvent;
 
 export type PlanTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
