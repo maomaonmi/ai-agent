@@ -74,6 +74,28 @@ test('Code 工作台在调用写入 AgentLoop 之前必须先经过意图路由'
   assert.match(workspaceSource, /conversationAnswer/);
 });
 
+test('新 Code 请求继承任务范围但不携带上一 run 的运行时错误证据', () => {
+  assert.doesNotMatch(
+    chatInterfaceSource,
+    /runtimeEvidence: decision\.active_scope \? routerActiveRun\?\.last_verification : undefined/,
+  );
+  assert.match(
+    chatInterfaceSource,
+    /runtimeEvidence:\s*decision\.intent\s*===\s*'resume'\s*\?\s*routerActiveRun\?\.last_verification\s*:\s*undefined/,
+  );
+  assert.match(
+    chatInterfaceSource,
+    /last_verification:\s*latestCodeRun\.trace\.resumeEligible\s*\?\s*latestCodeRun\.trace\.runtimeEvidence\s*:\s*undefined/,
+  );
+});
+
+test('普通新修改不把 hook 内上一轮的错误历史当成当前诊断', () => {
+  assert.match(
+    autoRepairSource,
+    /const pendingDiagnostics = \[\s*\.\.\.\(isResume \? \[recentErrorsRef\.current\.join\('\\n'\)\] : \[\]\)/,
+  );
+});
+
 test('可恢复的非终态 VFS 检查点不得被当成增量接口缺少完整代码', () => {
   assert.match(
     autoRepairSource,

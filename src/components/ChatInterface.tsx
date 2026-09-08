@@ -2174,9 +2174,9 @@ export default function ChatInterface() {
 
     let codeIntentDecision: CodeWorkbenchIntentDecision | null = null;
     if (mode === 'code') {
-      // The newest run is the durable task checkpoint.  An unfinished run is
-      // only needed to decide whether resume is legal; completed runs still
-      // carry the sticky scope and the last runtime evidence for the next turn.
+      // The newest run is the durable task checkpoint.  Scope is sticky across
+      // turns, but runtime evidence belongs only to an unfinished run that may
+      // be explicitly resumed.
       const latestCodeRun = [...agentRuns].reverse()[0];
       const latestUnfinishedRun = [...agentRuns].reverse().find(isCodeAgentRunUnfinished);
       try {
@@ -2199,7 +2199,9 @@ export default function ChatInterface() {
               scope_version: latestCodeRun.trace.scopeVersion,
               allowed_next_action: latestCodeRun.trace.allowedNextAction,
               target_files: latestCodeRun.trace.fileChanges?.map((change) => change.path),
-              last_verification: latestCodeRun.trace.runtimeEvidence,
+              last_verification: latestCodeRun.trace.resumeEligible
+                ? latestCodeRun.trace.runtimeEvidence
+                : undefined,
             }
           : undefined;
         codeIntentDecision = await classifyCodeWorkbenchIntent(userMessage, {
@@ -2578,7 +2580,9 @@ export default function ChatInterface() {
               scope_version: latestCodeRun.trace.scopeVersion,
               allowed_next_action: latestCodeRun.trace.allowedNextAction,
               target_files: latestCodeRun.trace.fileChanges?.map((change) => change.path),
-              last_verification: latestCodeRun.trace.runtimeEvidence,
+              last_verification: latestCodeRun.trace.resumeEligible
+                ? latestCodeRun.trace.runtimeEvidence
+                : undefined,
             }
           : undefined;
         const mutationResult = decision.intent === 'resume'
@@ -2599,7 +2603,9 @@ export default function ChatInterface() {
                   scopeVersion: decision.scope_version,
                   scopeSource: decision.scope_source,
                   allowedNextAction: decision.allowed_next_action,
-                  runtimeEvidence: decision.active_scope ? routerActiveRun?.last_verification : undefined,
+                  runtimeEvidence: decision.intent === 'resume'
+                    ? routerActiveRun?.last_verification
+                    : undefined,
                 },
                 codeConsoleEntries,
               )
@@ -2631,7 +2637,7 @@ export default function ChatInterface() {
                   scopeVersion: decision.scope_version,
                   scopeSource: decision.scope_source,
                   allowedNextAction: decision.allowed_next_action,
-                  runtimeEvidence: decision.active_scope ? routerActiveRun?.last_verification : undefined,
+                  runtimeEvidence: undefined,
                 },
                 codeConsoleEntries,
               )

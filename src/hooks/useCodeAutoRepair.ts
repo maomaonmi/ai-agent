@@ -1166,13 +1166,14 @@ export default function useCodeAutoRepair() {
     mcpRef.current = mcp;
     const currentCode = codeRef.current;
     if (!currentCode || !instruction.trim()) return false;
+    const isResume = Boolean(options.resumeFromRun);
     const consoleDiagnostics = consoleEntries
       .filter((entry) => entry.level === 'error' || entry.level === 'warn')
       .slice(-100)
       .map((entry) => `[browser console ${entry.level}] ${entry.args.join(' ')}`)
       .join('\n');
     const pendingDiagnostics = [
-      recentErrorsRef.current.join('\n'),
+      ...(isResume ? [recentErrorsRef.current.join('\n')] : []),
       consoleDiagnostics,
     ].filter(Boolean).join('\n');
     let effectiveDiagnostics = pendingDiagnostics;
@@ -1195,7 +1196,6 @@ export default function useCodeAutoRepair() {
     // Why: parseProjectCode('{}') 返回空对象，在 JS 中是 truthy；
     //   必须检查是否包含真实文件，否则会把空 VFS 传给后端触发 422。
     const hasVfs = Object.keys(currentVfs).length > 0;
-    const isResume = Boolean(options.resumeFromRun);
     beginAgentTrace(
       isResume
         ? '正在恢复上一次未完成的 Code AgentLoop。'
@@ -1208,7 +1208,7 @@ export default function useCodeAutoRepair() {
         scopeVersion: options.scopeVersion,
         scopeSource: options.scopeSource,
         allowedNextAction: options.allowedNextAction,
-        runtimeEvidence: options.runtimeEvidence,
+        runtimeEvidence: isResume ? options.runtimeEvidence : undefined,
       },
     );
     const runIdForRequest = currentAgentRunIdRef.current;
@@ -1250,7 +1250,11 @@ export default function useCodeAutoRepair() {
           })),
         }, controller.signal);
         const reportDiagnostics = formatRuntimePreflightDiagnostics(report);
-        effectiveDiagnostics = [effectiveDiagnostics, reportDiagnostics].filter(Boolean).join('\n\n');
+        if (!report.passed) {
+          effectiveDiagnostics = [effectiveDiagnostics, reportDiagnostics]
+            .filter(Boolean)
+            .join('\n\n');
+        }
         appendTimeline({
           actorKind: 'system',
           actorId: `deterministic-preflight:${runIdForRequest}:result`,
