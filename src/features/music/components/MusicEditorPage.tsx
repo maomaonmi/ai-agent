@@ -61,7 +61,9 @@ import { SINGER_PRESETS, type SingerPreset } from '../lib/singerPresets';
 import { sendChatMessage } from '../../../lib/api';
 import { buildLyricsPolishPrompt } from '../lib/musicEditorLyrics';
 import { BEAT_PRESETS, type BeatPreset } from '../lib/musicEditorBeats';
+import { calculatePeakDb, calculateRmsDb, meterColorFromDb, meterDisplayLevel, normalizeCountInBars, selectAudioInputDevices, visualMeterLevelFromDb, type AudioInputDeviceOption } from '../lib/musicEditorRecording';
 import { buildWaveformValues, formatTransportTime, moveClipWithInsertion, resizeClip, splitClipAtPosition, timelineDurationSeconds, type ClipResizeEdge } from '../lib/musicEditorTransport';
+import { buildVocalEffectParameters, clampVocalEffectIntensity, getVocalEffect, listVocalEffects, vocalEffectIntensityFromAngle, type VocalEffectCategory, type VocalEffectId } from '../lib/musicEditorVocalEffects';
 
 interface MusicEditorPageProps {
   activeTab: MusicTab;
@@ -114,6 +116,29 @@ const EDITOR_TABS: { id: EditorTab; label: string }[] = [
 ];
 
 const STYLE_PRESETS = ['流行抒情', '民谣吉他', '电子舞曲', 'R&B 慢板', '古风', '摇滚', '爵士', '嘻哈'];
+
+const VOCAL_EFFECT_ICONS: Record<string, typeof Mic> = {
+  mic: Mic,
+  music: Music,
+  zap: Zap,
+  disc: Disc,
+  layers: Layers,
+  wind: Wind,
+  clarity: AudioLines,
+  texture: Sparkles,
+  minion: Bot,
+  monster: Wand2,
+  surround: Circle,
+  radio: Music2,
+  disco: Disc,
+};
+
+const VOCAL_EFFECT_TABS: Array<{ key: VocalEffectCategory; label: string }> = [
+  { key: 'recommend', label: '推荐' },
+  { key: 'enhance', label: '人声增强' },
+  { key: 'special', label: '特殊效果' },
+  { key: 'style', label: '音乐风格' },
+];
 
 function WaveformCanvas({
   values,
@@ -279,14 +304,27 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
   const clipClipboardRef = useRef<{ trackId: string; clip: AudioClip } | null>(null);
   // 麦克风音量检测相关状态
   const [isMicEnabled, setIsMicEnabled] = useState(false);
-  const [micVolume, setMicVolume] = useState(0.52); // 0-1，初始值对应-31.7 dB
+  const [micPeakVolume, setMicPeakVolume] = useState(0);
+  const [micDb, setMicDb] = useState(-60);
+  const [audioInputDevices, setAudioInputDevices] = useState<AudioInputDeviceOption[]>([]);
+  const [selectedAudioInputId, setSelectedAudioInputId] = useState('');
+  const [micError, setMicError] = useState<string | null>(null);
+  const [metronomeEnabled, setMetronomeEnabled] = useState(false);
+  const [countInBars, setCountInBars] = useState<0 | 1 | 2>(0);
+  const [recordingCountdownBeat, setRecordingCountdownBeat] = useState<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const animationIdRef = useRef<number | null>(null);
+  const metronomeTimerRef = useRef<number | null>(null);
 
-  // 计算显示音量（-60dB 到 0dB）
-  const displayDb = Math.max(-60, Math.min(0, micVolume * 60 - 60));
+  // 录音时显示真实 dBFS（-60dB 到 0dB），而不是固定的模拟数值。
+  const micActive = isMicEnabled || isRecording;
+  const displayDb = micDb;
+  // 彩色填充直接由真实 dB 推导，避免独立的显示 state 与 dB 读数不同步。
+  const micVolume = visualMeterLevelFromDb(micDb);
+  const micDisplayLevel = meterDisplayLevel(micVolume, micPeakVolume);
+  const micMeterColor = meterColorFromDb(displayDb);
   // Autotune 调式选择弹窗
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [selectedKey, setSelectedKey] = useState('D小调');
@@ -296,9 +334,10 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
   // 上滑面板状态：vocalEffect | key | reverb
   const [slideUpPanel, setSlideUpPanel] = useState<'vocalEffect' | 'key' | 'reverb' | null>(null);
   const [slideUpPosition, setSlideUpPosition] = useState({ top: 0, left: 0, width: 0 });
-  // 人声效果器选中项
-  const [selectedVocalEffect, setSelectedVocalEffect] = useState('说唱 Rap');
-  const [vocalEffectTab, setVocalEffectTab] = useState<'recommend' | 'enhance' | 'special' | 'style'>('recommend');
+  // 人声效果器选中项与强度（ID 是唯一真相，显示名由效果目录派生）
+  const [selectedVocalEffectId, setSelectedVocalEffectId] = useState<VocalEffectId>('rap');
+  const [vocalEffectIntensity, setVocalEffectIntensity] = useState(100);
+  const [vocalEffectTab, setVocalEffectTab] = useState<VocalEffectCategory>('recommend');
   const historyRef = useRef<{ current: string | null; past: string[]; future: string[]; applying: boolean }>({ current: null, past: [], future: [], applying: false });
 
   useEffect(() => {
@@ -636,102 +675,120 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
     setSlideUpPanel(panel);
   };
 
-  // 麦克风音量检测 useEffect
+  // 浏览器只会在获得麦克风权限后暴露设备名称；面板打开时先枚举一次，
+  // 获得权限后再刷新，这样外接耳机麦克风会真实出现在下拉框里。
   useEffect(() => {
-    let isActive = true;
-
-    const startMic = async () => {
-      if (!isMicEnabled || !isActive) return;
-
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.enumerateDevices) return;
+    let active = true;
+    const refreshAudioInputs = async () => {
       try {
-        // 申请麦克风权限
-        const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
-
-        if (!isActive) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
-
-        mediaStreamRef.current = stream;
-
-        // 初始化 AudioContext
-        if (!audioContextRef.current) {
-          audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-        }
-
-        const ctx = audioContextRef.current;
-        if (ctx.state === 'suspended') await ctx.resume();
-
-        const analyser = ctx.createAnalyser();
-        analyser.fftSize = 512;
-        analyserRef.current = analyser;
-
-        const source = ctx.createMediaStreamSource(stream);
-        source.connect(analyser);
-
-        const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-        const animate = () => {
-          if (!isActive || !isMicEnabled) return;
-          if (!analyser) {
-            animationIdRef.current = requestAnimationFrame(animate);
-            return;
-          }
-
-          analyser.getByteFrequencyData(dataArray);
-
-          // 简单计算音量平均值
-          let sum = 0;
-          for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-          const average = sum / dataArray.length / 255;
-
-          setMicVolume(average);
-
-          animationIdRef.current = requestAnimationFrame(animate);
-        };
-
-        animate();
-      } catch (err) {
-        console.error('麦克风权限申请失败', err);
-        setIsMicEnabled(false);
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        if (!active) return;
+        const inputs = selectAudioInputDevices(devices);
+        setAudioInputDevices(inputs);
+        setSelectedAudioInputId((current) => current && inputs.some((device) => device.deviceId === current) ? current : '');
+      } catch (error) {
+        console.warn('枚举录音设备失败', error);
       }
     };
+    void refreshAudioInputs();
+    navigator.mediaDevices.addEventListener?.('devicechange', refreshAudioInputs);
+    return () => {
+      active = false;
+      navigator.mediaDevices.removeEventListener?.('devicechange', refreshAudioInputs);
+    };
+  }, [activeBottomPanel]);
+
+  // 使用 MediaStream + AnalyserNode 读取实时 PCM RMS 与瞬时峰值。
+  // 监听打开或正在录音时才申请权限，避免页面加载就弹出系统授权。
+  useEffect(() => {
+    let isActive = true;
+    const micActive = isMicEnabled || isRecording;
 
     const stopMic = () => {
       if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
         mediaStreamRef.current = null;
       }
-
-      if (animationIdRef.current) {
+      if (animationIdRef.current !== null) {
         cancelAnimationFrame(animationIdRef.current);
         animationIdRef.current = null;
       }
-
       analyserRef.current = null;
-
       if (audioContextRef.current) {
-        audioContextRef.current.close().catch(() => {});
+        audioContextRef.current.close().catch(() => undefined);
         audioContextRef.current = null;
       }
-
-      setMicVolume(0.52); // 恢复初始值
+      setMicPeakVolume(0);
+      setMicDb(-60);
     };
 
-    if (isMicEnabled) startMic();
-    else stopMic();
+    const startMic = async () => {
+      if (!micActive || !isActive || !navigator.mediaDevices?.getUserMedia) return;
+      try {
+        const audio: MediaTrackConstraints = {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        };
+        if (selectedAudioInputId) audio.deviceId = { exact: selectedAudioInputId };
+        const stream = await navigator.mediaDevices.getUserMedia({ audio });
+        if (!isActive) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        mediaStreamRef.current = stream;
+        setMicError(null);
 
+        // 权限通过后重新枚举，设备 label 会从“未知”变成系统真实名称。
+        if (navigator.mediaDevices.enumerateDevices) {
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          if (isActive) setAudioInputDevices(selectAudioInputDevices(devices));
+        }
+
+        if (!audioContextRef.current) {
+          const AudioContextConstructor = window.AudioContext
+            || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+          if (!AudioContextConstructor) throw new Error('当前浏览器不支持音频分析');
+          audioContextRef.current = new AudioContextConstructor();
+        }
+        const context = audioContextRef.current;
+        if (context.state === 'suspended') await context.resume();
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 1024;
+        // Keep the analyser responsive so speech/transients are visible in the meter.
+        analyser.smoothingTimeConstant = 0.2;
+        analyserRef.current = analyser;
+        context.createMediaStreamSource(stream).connect(analyser);
+        const samples = new Float32Array(analyser.fftSize);
+        const animate = () => {
+          if (!isActive || !micActive) return;
+          analyser.getFloatTimeDomainData(samples);
+          const db = calculateRmsDb(samples);
+          const peakDb = calculatePeakDb(samples);
+          setMicDb(db);
+          // Hold the latest real peak briefly, then decay it so movement remains readable.
+          setMicPeakVolume((currentPeak) => Math.max(visualMeterLevelFromDb(peakDb), currentPeak - 0.025));
+          animationIdRef.current = requestAnimationFrame(animate);
+        };
+        animate();
+      } catch (error) {
+        console.error('麦克风权限申请失败', error);
+        if (!isActive) return;
+        const name = error instanceof DOMException ? error.name : '';
+        setMicError(name === 'NotAllowedError' ? '请允许浏览器访问麦克风' : '无法访问所选录音设备');
+        setIsMicEnabled(false);
+        setIsRecording(false);
+      }
+    };
+
+    if (micActive) void startMic();
+    else stopMic();
     return () => {
       isActive = false;
       stopMic();
     };
-  }, [isMicEnabled]);
+  }, [isMicEnabled, isRecording, selectedAudioInputId]);
 
   // 时间轴右侧区域引用（不含左侧固定面板，用于计算播放头比例与点击定位）
   const timelineAreaRef = useRef<HTMLDivElement>(null);
@@ -1074,7 +1131,68 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
     audioPlayersRef.current.forEach((player) => player.src = '');
     audioPlayersRef.current.clear();
   }, [stopPlayback]);
-  const toggleRecord = () => setIsRecording((r) => !r);
+  const clearRecordingCountdown = () => {
+    if (metronomeTimerRef.current !== null) {
+      window.clearInterval(metronomeTimerRef.current);
+      metronomeTimerRef.current = null;
+    }
+    setRecordingCountdownBeat(null);
+  };
+
+  const playMetronomeClick = (isAccent: boolean) => {
+    try {
+      if (!audioContextRef.current) {
+        const AudioContextConstructor = window.AudioContext
+          || (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+        if (!AudioContextConstructor) return;
+        audioContextRef.current = new AudioContextConstructor();
+      }
+      const context = audioContextRef.current;
+      if (context.state === 'suspended') void context.resume();
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = 'sine';
+      oscillator.frequency.value = isAccent ? 1_100 : 760;
+      gain.gain.setValueAtTime(0.0001, context.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.16, context.currentTime + 0.005);
+      gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.08);
+      oscillator.connect(gain).connect(context.destination);
+      oscillator.start();
+      oscillator.stop(context.currentTime + 0.09);
+    } catch {
+      // A browser may block Web Audio until a user gesture; recording still works.
+    }
+  };
+
+  const toggleRecord = () => {
+    if (isRecording || recordingCountdownBeat !== null) {
+      clearRecordingCountdown();
+      setIsRecording(false);
+      return;
+    }
+    const totalCountInBeats = countInBars * timeSignatureNumerator;
+    if (totalCountInBeats <= 0) {
+      setIsRecording(true);
+      return;
+    }
+    let beat = 0;
+    setRecordingCountdownBeat(1);
+    if (metronomeEnabled) playMetronomeClick(true);
+    metronomeTimerRef.current = window.setInterval(() => {
+      beat += 1;
+      if (beat >= totalCountInBeats) {
+        clearRecordingCountdown();
+        setIsRecording(true);
+        return;
+      }
+      setRecordingCountdownBeat(beat + 1);
+      if (metronomeEnabled) playMetronomeClick((beat + 1) % timeSignatureNumerator === 1);
+    }, 60_000 / Math.max(20, bpm));
+  };
+
+  useEffect(() => () => {
+    if (metronomeTimerRef.current !== null) window.clearInterval(metronomeTimerRef.current);
+  }, []);
 
   // 点击时间轴空白处定位播放头 - 立即提交到 state
   const setPlayheadFromEvent = useCallback((clientX: number) => {
@@ -1327,9 +1445,9 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
   const startClipProcessing = async (
     trackId: string,
     clipId: string,
-    operationType: 'denoise' | 'beautify' | 'pitch_shift' | 'stem_separation',
+    operationType: 'denoise' | 'beautify' | 'pitch_shift' | 'stem_separation' | 'vocal_effect',
     label: string,
-    options: { pitchSemitones?: number; stemCount?: 2 | 3 | 4 } = {},
+    options: { pitchSemitones?: number; stemCount?: 2 | 3 | 4; effectId?: VocalEffectId; intensity?: number } = {},
   ) => {
     if (clipProcessing || generationState === 'submitting' || generationState === 'processing') return;
     const current = tracks.find((track) => track.id === trackId)?.clips.find((clip) => clip.id === clipId);
@@ -1351,6 +1469,8 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
         clientRequestId: requestId,
         pitchSemitones: options.pitchSemitones,
         stemCount: options.stemCount,
+        effectId: options.effectId,
+        intensity: options.intensity,
       });
       setClipProcessing({ clipId, operationId: operation.id, label });
       for (let attempt = 0; attempt < 300 && !['SUCCESS', 'FAILED', 'TIMED_OUT'].includes(operation.status); attempt += 1) {
@@ -1449,6 +1569,51 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       setClipProcessing(null);
       setClipNotice(error instanceof Error ? error.message : `${label}失败`);
     }
+  };
+
+  const adjustVocalEffectIntensity = (delta: number) => {
+    setVocalEffectIntensity((current) => clampVocalEffectIntensity(current + delta));
+  };
+
+  const updateVocalEffectIntensityFromPointer = (event: React.PointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+    const angle = Math.atan2(event.clientY - centerY, event.clientX - centerX) * (180 / Math.PI);
+    setVocalEffectIntensity(vocalEffectIntensityFromAngle(angle));
+  };
+
+  const handleVocalEffectDialKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+      event.preventDefault();
+      adjustVocalEffectIntensity(-1);
+    } else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      adjustVocalEffectIntensity(1);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      setVocalEffectIntensity(0);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      setVocalEffectIntensity(100);
+    }
+  };
+
+  const handleApplyVocalEffect = () => {
+    const location = findClipLocation();
+    if (!location || location.track.type !== 'vocal') {
+      setClipNotice('请选择人声音轨中的片段后再应用效果');
+      return;
+    }
+    const effect = getVocalEffect(selectedVocalEffectId);
+    const parameters = buildVocalEffectParameters(effect.id, vocalEffectIntensity);
+    void startClipProcessing(
+      location.track.id,
+      location.clip.id,
+      'vocal_effect',
+      `${effect.name} ${parameters.intensity}%`,
+      parameters,
+    );
   };
 
   const handleClipPitch = (trackId: string, clipId: string, delta: number) => {
@@ -1771,6 +1936,12 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       && contextMenuPlayheadBars > contextMenuClip.start
       && contextMenuPlayheadBars < contextMenuClip.start + contextMenuClip.duration,
   );
+  const selectedVocalEffect = getVocalEffect(selectedVocalEffectId);
+  const selectedVocalClip = findClipLocation();
+  const canApplyVocalEffect = Boolean(selectedVocalClip?.track.type === 'vocal' && selectedVocalClip.clip.assetId && !selectedVocalClip.clip.pending);
+  const viewportWidth = typeof window === 'undefined' ? 1280 : window.innerWidth;
+  const vocalEffectPanelWidth = Math.min(760, Math.max(280, viewportWidth - 24));
+  const vocalEffectPanelLeft = Math.max(12, Math.min(slideUpPosition.left, viewportWidth - vocalEffectPanelWidth - 12));
 
   return (
     <div className="flex h-full flex-col gap-3 p-3">
@@ -1800,7 +1971,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
             className={`flex h-8 w-8 items-center justify-center rounded-md transition ${
               isRecording ? 'bg-rose-500 text-white' : 'text-slate-500 hover:bg-slate-100 hover:text-rose-500 dark:text-neutral-400 dark:hover:bg-neutral-800'
             }`}
-            title="录制"
+            title={recordingCountdownBeat !== null ? '取消预备拍' : isRecording ? '停止录制' : '录制'}
           >
             <Circle size={10} fill="currentColor" />
           </button>
@@ -1808,6 +1979,11 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
             <Timer size={12} className="text-slate-400" />
             <span>{formatTransportTime(currentTimeSeconds)}</span>
           </div>
+          {recordingCountdownBeat !== null && (
+            <span className="rounded-md bg-amber-100 px-2 py-1 text-[11px] font-medium text-amber-700" role="status">
+              预备拍 {recordingCountdownBeat}
+            </span>
+          )}
         </div>
 
         {/* 中间节拍器 / 拍号 / 音量 */}
@@ -2869,24 +3045,50 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                     <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                       <div className="mb-4 text-sm font-semibold text-slate-900">音量检测</div>
                       <div className="mb-3 flex items-center gap-2">
-                        <div className="relative h-2 flex-1 overflow-hidden rounded-full bg-slate-200">
-                          <div
-                            className="absolute inset-y-0 left-0 rounded-full bg-green-500 transition-all duration-75"
-                            style={{ width: `${Math.min(100, micVolume * 120)}%` }}
-                          />
+                        <div
+                          className="relative h-3 flex-1 rounded-full bg-slate-200"
+                          role="meter"
+                          aria-label="麦克风输入电平"
+                          aria-valuemin={-60}
+                          aria-valuemax={0}
+                          aria-valuenow={Number(displayDb.toFixed(1))}
+                          style={{
+                            backgroundImage: 'repeating-linear-gradient(90deg, transparent 0, transparent calc(10% - 1px), rgba(100, 116, 139, 0.2) calc(10% - 1px), rgba(100, 116, 139, 0.2) 10%)',
+                          }}
+                        >
+                          <div className="absolute inset-0 overflow-hidden rounded-full">
+                            <div
+                              className="absolute inset-y-0 left-0 z-10 rounded-full transition-[width] duration-75"
+                              style={{
+                                width: `${micDisplayLevel * 100}%`,
+                                backgroundColor: micMeterColor,
+                                boxShadow: `0 0 10px ${micMeterColor}66`,
+                              }}
+                            />
+                          </div>
                         </div>
                       </div>
                       <div className="flex items-center justify-between text-xs text-slate-600">
                         <span>{displayDb.toFixed(1)} dB</span>
-                        <span className="text-green-600">音量正常</span>
+                        <span className={micError ? 'text-rose-500' : micActive ? 'text-emerald-600' : 'text-slate-400'}>
+                          {micError || (micActive ? (micDb > -6 ? '音量偏高' : micDb > -48 ? '音量正常' : '等待输入') : '未检测')}
+                        </span>
                       </div>
                     </div>
                     {/* 录音设备 */}
                     <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
                       <div className="mb-4 text-sm font-semibold text-slate-900">录音设备</div>
                       <div className="mb-4">
-                        <select className="w-full rounded-md border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-700 outline-none focus:border-sky-500">
-                          <option>默认：麦克风阵列 (Realtek(R) Audio)</option>
+                        <select
+                          aria-label="选择录音设备"
+                          value={selectedAudioInputId}
+                          onChange={(event) => setSelectedAudioInputId(event.target.value)}
+                          className="w-full rounded-md border border-slate-300 bg-slate-50 px-3 py-2 text-xs text-slate-700 outline-none focus:border-sky-500"
+                        >
+                          <option value="">默认录音设备</option>
+                          {audioInputDevices.filter((device) => device.deviceId !== 'default').map((device) => (
+                            <option key={device.deviceId} value={device.deviceId}>{device.label}</option>
+                          ))}
                         </select>
                       </div>
                       <div className="flex items-center justify-between">
@@ -2894,6 +3096,8 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                         <button
                           type="button"
                           onClick={() => setIsMicEnabled(!isMicEnabled)}
+                          aria-pressed={isMicEnabled}
+                          aria-label={isMicEnabled ? '关闭麦克风监听' : '开启麦克风监听'}
                           className={`relative h-6 w-11 rounded-full transition-colors ${
                             isMicEnabled ? 'bg-sky-500' : 'bg-slate-200'
                           }`}
@@ -2911,16 +3115,27 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                       <div className="mb-4 text-sm font-semibold text-slate-900">节拍器</div>
                       <div className="mb-4 flex items-center justify-between">
                         <span className="text-xs text-slate-600">开关</span>
-                        <button type="button" className="relative h-6 w-11 rounded-full bg-sky-500">
-                          <div className="absolute top-1 right-1 h-4 w-4 rounded-full bg-white shadow" />
+                        <button
+                          type="button"
+                          onClick={() => setMetronomeEnabled((enabled) => !enabled)}
+                          aria-pressed={metronomeEnabled}
+                          aria-label={metronomeEnabled ? '关闭节拍器' : '开启节拍器'}
+                          className={`relative h-6 w-11 rounded-full transition-colors ${metronomeEnabled ? 'bg-sky-500' : 'bg-slate-200'}`}
+                        >
+                          <div className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow transition-transform ${metronomeEnabled ? 'right-1' : 'left-1'}`} />
                         </button>
                       </div>
                       <div className="flex items-center justify-between">
-                        <span className="text-xs text-slate-600">预拍：关闭</span>
-                        <select className="rounded-md border border-slate-300 bg-slate-50 px-3 py-1.5 text-xs text-slate-700 outline-none focus:border-sky-500">
-                          <option>关闭</option>
-                          <option>1 小节</option>
-                          <option>2 小节</option>
+                        <span className="text-xs text-slate-600">预拍：{countInBars === 0 ? '关闭' : `${countInBars} 小节`}</span>
+                        <select
+                          aria-label="选择节拍器预备拍"
+                          value={countInBars}
+                          onChange={(event) => setCountInBars(normalizeCountInBars(Number(event.target.value)))}
+                          className="rounded-md border border-slate-300 bg-slate-50 px-3 py-1.5 text-xs text-slate-700 outline-none focus:border-sky-500"
+                        >
+                          <option value={0}>关闭</option>
+                          <option value={1}>1 小节</option>
+                          <option value={2}>2 小节</option>
                         </select>
                       </div>
                     </div>
@@ -2941,19 +3156,69 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                           onClick={(e) => slideUpPanel === 'vocalEffect' ? setSlideUpPanel(null) : openSlideUpPanel('vocalEffect', e)}
                           className="flex w-full items-center justify-between rounded-md border border-slate-300 bg-slate-50 px-3 py-2 text-left text-xs text-slate-700 outline-none focus:border-sky-500"
                         >
-                          <span>{selectedVocalEffect}</span>
+                          <span>{selectedVocalEffect.name}</span>
                           <ChevronDown size={14} className="text-slate-400" />
                         </button>
                       </div>
-                      <div className="flex flex-col items-center gap-2">
-                        <div className="relative h-20 w-20">
-                          <div className="absolute inset-0 rounded-full border-2 border-slate-200" />
-                          <div className="absolute inset-2 rounded-full border border-slate-300" />
-                          <div className="absolute left-1/2 top-1/2 h-1 w-12 -translate-x-1/2 -translate-y-1/2 origin-left rotate-[135deg] rounded-full bg-slate-400" />
-                          <div className="absolute left-1/2 top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full bg-slate-300" />
+                      <div className="flex items-center justify-between gap-2">
+                        <button
+                          type="button"
+                          onClick={() => adjustVocalEffectIntensity(-1)}
+                          disabled={vocalEffectIntensity <= 0}
+                          aria-label="降低人声效果强度"
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-300 bg-slate-50 text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <Minus size={14} />
+                        </button>
+                        <div className="flex flex-col items-center gap-1">
+                          <div
+                            className="relative h-20 w-20 cursor-pointer touch-none"
+                            aria-label="人声效果强度"
+                            role="slider"
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={vocalEffectIntensity}
+                            aria-valuetext={`${vocalEffectIntensity}%`}
+                            tabIndex={0}
+                            onKeyDown={handleVocalEffectDialKeyDown}
+                            onPointerDown={(event) => {
+                              event.preventDefault();
+                              event.currentTarget.setPointerCapture(event.pointerId);
+                              updateVocalEffectIntensityFromPointer(event);
+                            }}
+                            onPointerMove={(event) => {
+                              if (event.buttons === 1) updateVocalEffectIntensityFromPointer(event);
+                            }}
+                          >
+                            <div className="absolute inset-0 rounded-full border-2 border-slate-200" />
+                            <div className="absolute inset-2 rounded-full border border-slate-300" />
+                            <div
+                              className="absolute left-1/2 top-1/2 h-1 w-12 origin-left rounded-full bg-sky-500 transition-transform"
+                              style={{ transform: `translate(-1px, -50%) rotate(${135 + (vocalEffectIntensity / 100) * 270}deg)` }}
+                            />
+                            <div className="absolute left-1/2 top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full bg-slate-300" />
+                          </div>
+                          <div className="text-xs font-medium text-slate-700">强度 {vocalEffectIntensity}%</div>
                         </div>
-                        <div className="text-xs text-slate-600">强度 100%</div>
+                        <button
+                          type="button"
+                          onClick={() => adjustVocalEffectIntensity(1)}
+                          disabled={vocalEffectIntensity >= 100}
+                          aria-label="提高人声效果强度"
+                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-slate-300 bg-slate-50 text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+                        >
+                          <Plus size={14} />
+                        </button>
                       </div>
+                      <button
+                        type="button"
+                        onClick={handleApplyVocalEffect}
+                        disabled={!canApplyVocalEffect || Boolean(clipProcessing)}
+                        className="mt-4 w-full rounded-md bg-sky-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-sky-600 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400"
+                      >
+                        {clipProcessing?.label.startsWith(selectedVocalEffect.name) ? '处理中…' : '应用到当前片段'}
+                      </button>
+                      {!canApplyVocalEffect && <div className="mt-2 text-center text-[10px] text-slate-400">先选择人声音轨片段</div>}
                     </div>
                     {/* Autotune */}
                     <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -3294,25 +3559,22 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       {/* 上滑面板：人声效果器 */}
       {slideUpPanel === 'vocalEffect' && (
         <div
+          role="dialog"
+          aria-label="人声效果器"
           className="fixed z-50 rounded-xl border border-slate-200 bg-white p-4 shadow-xl"
           style={{
             bottom: `${window.innerHeight - slideUpPosition.top + 8}px`,
-            left: `${slideUpPosition.left}px`,
-            width: `${slideUpPosition.width}px`,
+            left: `${vocalEffectPanelLeft}px`,
+            width: `${vocalEffectPanelWidth}px`,
           }}
         >
           <div className="mb-3 text-sm font-semibold text-slate-900">人声效果器</div>
           <div className="mb-3 flex rounded-lg bg-slate-100 p-1">
-            {[
-              { key: 'recommend', label: '推荐' },
-              { key: 'enhance', label: '人声增强' },
-              { key: 'special', label: '特殊效果' },
-              { key: 'style', label: '音乐风格' },
-            ].map((tab) => (
+            {VOCAL_EFFECT_TABS.map((tab) => (
               <button
                 key={tab.key}
                 type="button"
-                onClick={() => setVocalEffectTab(tab.key as any)}
+                onClick={() => setVocalEffectTab(tab.key)}
                 className={`flex-1 rounded-md py-1 text-xs font-medium transition ${
                   vocalEffectTab === tab.key ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'
                 }`}
@@ -3322,36 +3584,32 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
             ))}
           </div>
           <div className="grid max-h-[300px] grid-cols-2 gap-2 overflow-y-auto">
-            {[
-              { name: '说唱 Rap', desc: '集中呈现说唱风格的人声，增强声线颗粒度', icon: Mic },
-              { name: '流行', desc: '经典流行音乐风格，使人声更加明亮突出', icon: Music },
-              { name: '朋克', desc: '增强朋克音乐特有的表现效果，强化失真以突出自由、亢奋的风格特征', icon: Zap },
-              { name: '复古', desc: '拥有唱片与磁带效果，可以给人声增加复古感与年代感', icon: Disc },
-              { name: '一键和声', desc: '一键增加人声整体的厚度及声场宽度，使人声更加饱满', icon: Layers },
-              { name: '空气人声', desc: '增加人声通透度与空气感，增强个性化表，适用于各类曲风', icon: Wind },
-            ].map((effect) => (
-              <button
-                key={effect.name}
-                type="button"
-                onClick={() => {
-                  setSelectedVocalEffect(effect.name);
-                  setSlideUpPanel(null);
-                }}
-                className={`flex items-start gap-2 rounded-lg border p-2 text-left transition ${
-                  selectedVocalEffect === effect.name
-                    ? 'border-sky-500 bg-sky-50'
-                    : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
-                }`}
-              >
-                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100">
-                  <effect.icon size={14} className="text-slate-600" />
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="text-xs font-medium text-slate-900">{effect.name}</div>
-                  <div className="mt-0.5 line-clamp-2 text-[10px] leading-relaxed text-slate-500">{effect.desc}</div>
-                </div>
-              </button>
-            ))}
+            {listVocalEffects(vocalEffectTab).map((effect) => {
+              const EffectIcon = VOCAL_EFFECT_ICONS[effect.iconKey] || Mic;
+              return (
+                <button
+                  key={`${effect.category}:${effect.id}`}
+                  type="button"
+                  onClick={() => {
+                    setSelectedVocalEffectId(effect.id);
+                    setSlideUpPanel(null);
+                  }}
+                  className={`flex items-start gap-2 rounded-lg border p-2 text-left transition ${
+                    selectedVocalEffectId === effect.id
+                      ? 'border-sky-500 bg-sky-50'
+                      : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'
+                  }`}
+                >
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-slate-100">
+                    <EffectIcon size={14} className="text-slate-600" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-medium text-slate-900">{effect.name}</div>
+                    <div className="mt-0.5 line-clamp-2 text-[10px] leading-relaxed text-slate-500">{effect.description}</div>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         </div>
       )}

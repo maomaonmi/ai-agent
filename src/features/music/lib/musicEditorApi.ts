@@ -173,11 +173,13 @@ export function importEditorOperationResult(operationId: string, clipId: string)
 }
 
 export interface EditorAudioProcessingRequest {
-  type: 'denoise' | 'beautify' | 'pitch_shift' | 'stem_separation';
+  type: 'denoise' | 'beautify' | 'pitch_shift' | 'stem_separation' | 'vocal_effect';
   inputAssetId: string;
   clientRequestId: string;
   pitchSemitones?: number;
   stemCount?: 2 | 3 | 4;
+  effectId?: string;
+  intensity?: number;
 }
 
 export function createEditorAudioProcessing(projectId: string, body: EditorAudioProcessingRequest) {
