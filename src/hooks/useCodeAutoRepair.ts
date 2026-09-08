@@ -10,6 +10,8 @@ import {
   modifyFullstackCode,
   modifyWebCode,
   requestCodeContextCompaction,
+  runCodeAcceptanceTest,
+  verifyFullstackRuntime,
   type ChatAttachment,
   type CodeAgentRun,
   type CodeAgentActorKind,
@@ -18,31 +20,95 @@ import {
   type CodeAgentTimelineEvent,
   type CodeAgentTimelineStage,
   type CodeFileChange,
+  type CodeIntentActiveRun,
+  type CodeIntentTurn,
+  type CodeTaskScope,
   type CodeGenerationEvent,
   type ContextUsageEvent,
   type HookEvent,
   type TokenUsageEvent,
   type McpMode,
+  type RuntimeVerificationEvidence,
 } from '../lib/api';
 import { appendTimelineEvent, completeTimelineEvent } from '../Code/agentTimeline';
 import { classifyCodeGenerationEvent, summarizeAgentLoopRound } from '../Code/agentEventRouting';
+import { applyCodeTaskEvent } from '../Code/codeTaskPlan';
 import { resetAgentRuns } from '../Code/agentRunLifecycle';
 import { canStartRuntimeRepair } from '../Code/acceptancePolicy';
-import { parseProjectCode } from '../Code/fullstackBundler';
+import {
+  bundleFullstackVFS,
+  isFullstackVFS,
+  isManifestProjectVFS,
+  parseProjectCode,
+} from '../Code/fullstackBundler';
+import { bundleVFS } from '../Code/vfsBundler';
 import {
   CodeGenerationStatus,
   RepairLog,
   RuntimeErrorReport,
+  SandboxConsoleEntry,
   SelectedElementContext,
 } from '../lib/codeSandbox';
 
 const ERROR_CHECK_WINDOW_MS = 1200;
+const MAX_REPAIR_DIAGNOSTIC_CHARS = 3_900;
+const MAX_REPAIR_INFRASTRUCTURE_FAILURES = 3;
+
+function clipRepairText(value: string | undefined, limit: number): string | undefined {
+  if (value == null) return undefined;
+  return value.length <= limit ? value : `${value.slice(0, Math.max(0, limit - 18))}\n...[truncated]`;
+}
+
+function normalizeRuntimeVerificationEvidence(
+  evidence: RuntimeVerificationEvidence,
+): RuntimeVerificationEvidence {
+  return {
+    ...evidence,
+    target_error: evidence.target_error ? {
+      ...evidence.target_error,
+      type: clipRepairText(evidence.target_error.type, 120) ?? 'RuntimeError',
+      message: clipRepairText(evidence.target_error.message, 2_000) ?? 'Runtime error',
+      source: clipRepairText(evidence.target_error.source, 500),
+      stack: clipRepairText(evidence.target_error.stack, 4_000),
+    } : undefined,
+    changed_files: evidence.changed_files.slice(0, 50),
+    new_errors: evidence.new_errors.slice(0, 20).map((item) => clipRepairText(item, 2_000) ?? ''),
+    console_errors: evidence.console_errors.slice(0, 20).map((item) => clipRepairText(item, 2_000) ?? ''),
+    diagnostic: clipRepairText(evidence.diagnostic, 2_000) ?? '',
+  };
+}
+
+function buildBoundedRepairDiagnostic(
+  runtimeError: RuntimeErrorReport,
+  occurrence: number,
+  recentErrors: string[],
+): string {
+  const diagnostic = [
+    formatRuntimeError(runtimeError),
+    `This error has occurred ${occurrence} time(s) in the current repair cycle.`,
+    occurrence >= 2
+      ? 'The previous approach did not solve this error. Do not repeat it. Re-diagnose from a different layer before choosing a new minimal patch.'
+      : '',
+    recentErrors.length > 1
+      ? `Recent error history (oldest to newest):\n${recentErrors.slice(-5).map((item, index) => `${index + 1}. ${clipRepairText(item, 500)}`).join('\n')}`
+      : '',
+  ].filter(Boolean).join('\n\n');
+  return diagnostic.length <= MAX_REPAIR_DIAGNOSTIC_CHARS
+    ? diagnostic
+    : `${diagnostic.slice(0, MAX_REPAIR_DIAGNOSTIC_CHARS - 18)}\n...[truncated]`;
+}
+
+function isRepairInfrastructureFailure(message: string): boolean {
+  return /at most 4000 characters|max_length|validation error|HTTP 422|Failed to fetch|NetworkError/i.test(message);
+}
 
 // Why: MCP 会话级注入配置。generate/modify 调用时传入并缓存到 ref，
 //   handleRuntimeError 自动修复复用，与 sessionIdRef 同一生命周期模式。
 export interface McpRequestContext {
   mode: McpMode;
   serverIds: string[];
+  intent?: 'action' | 'runtime_fix' | 'resume';
+  resume?: boolean;
 }
 
 const EMPTY_AGENT_TRACE: CodeAgentTrace = {
@@ -53,6 +119,8 @@ const EMPTY_AGENT_TRACE: CodeAgentTrace = {
   isRunning: false,
   summary: '',
   summaryIntent: 'patch',
+  status: 'completed',
+  resumeEligible: false,
   terminalProposals: [],
   hookEvents: [],
   timeline: [],
@@ -214,6 +282,7 @@ export default function useCodeAutoRepair() {
   const codeRef = useRef('');
   const runIdRef = useRef('');
   const repairCountRef = useRef(0);
+  const repairInfrastructureFailureCountRef = useRef(0);
   const isRepairingRef = useRef(false);
   const controllerRef = useRef<AbortController | null>(null);
   const checkTimerRef = useRef<number | null>(null);
@@ -231,6 +300,7 @@ export default function useCodeAutoRepair() {
   const timelineSequenceRef = useRef(0);
   const thinkingStartedAtRef = useRef<Record<string, number>>({});
   const repairRetryTimerRef = useRef<number | null>(null);
+  const runtimeVerificationAttemptsRef = useRef<Set<string>>(new Set());
   const repairHandlerRef = useRef<(error: RuntimeErrorReport) => void>(() => undefined);
   // Why: Phase3 记忆系统 session_id 引用——generate/modify 调用时传入并存储，
   // handleRuntimeError 自动复用，无需每次调用都显式传参。
@@ -326,27 +396,51 @@ export default function useCodeAutoRepair() {
     }
   }, [commitAgentTrace]);
 
-  const beginAgentTrace = useCallback((message: string, request = '', projectKind: 'frontend' | 'fullstack' = 'frontend') => {
+  const beginAgentTrace = useCallback((
+    message: string,
+    request = '',
+    projectKind: 'frontend' | 'fullstack' = 'frontend',
+    options: {
+      resumeRun?: CodeAgentRun;
+      activeScope?: CodeTaskScope;
+      scopeVersion?: number;
+      scopeSource?: 'orchestrator' | 'inherited' | 'explicit';
+      allowedNextAction?: string;
+      runtimeEvidence?: RuntimeVerificationEvidence;
+    } = {},
+  ) => {
     hasAgentOutputRef.current = false;
-    const id = `agent-run-${Date.now()}-${sequenceRef.current + 1}`;
-    timelineSequenceRef.current = 0;
+    const resumedRun = options.resumeRun;
+    const id = resumedRun?.id ?? `agent-run-${Date.now()}-${sequenceRef.current + 1}`;
+    timelineSequenceRef.current = resumedRun
+      ? Math.max(0, ...(resumedRun.trace.timeline ?? []).map((event) => event.sequence))
+      : 0;
     thinkingStartedAtRef.current = {};
     currentAgentRunIdRef.current = id;
     const trace: CodeAgentTrace = {
-      ...EMPTY_AGENT_TRACE,
-      steps: [message],
-      phase: 'analyzing',
+      ...(resumedRun?.trace ?? EMPTY_AGENT_TRACE),
+      steps: [...(resumedRun?.trace.steps ?? []), message],
+      phase: resumedRun ? 'resuming' : 'analyzing',
       isRunning: true,
+      status: 'running',
+      resumeEligible: false,
+      activeScope: options.activeScope ?? resumedRun?.trace.activeScope,
+      scopeVersion: options.scopeVersion ?? resumedRun?.trace.scopeVersion,
+      scopeSource: options.scopeSource ?? resumedRun?.trace.scopeSource,
+      allowedNextAction: options.allowedNextAction ?? resumedRun?.trace.allowedNextAction,
+      runtimeEvidence: options.runtimeEvidence ?? resumedRun?.trace.runtimeEvidence,
     };
     agentTraceRef.current = trace;
     setAgentTrace(trace);
-    setAgentRuns((previous) => [...previous, {
-      id,
-      request,
-      projectKind,
-      createdAt: new Date().toISOString(),
-      trace,
-    }]);
+    setAgentRuns((previous) => resumedRun
+      ? previous.map((run) => run.id === id ? { ...run, request, projectKind, trace } : run)
+      : [...previous, {
+          id,
+          request,
+          projectKind,
+          createdAt: new Date().toISOString(),
+          trace,
+        }]);
     // Why: 信任白名单按 runId 切分；每启动一次新 agent 自动初始化一个空数组，
     // 用户在这次 run 里勾选过“信任”的命令前缀就命中，关 tab 整体失效。
     setTrustedTerminalPrefixes((previous) => previous[id] ? previous : { ...previous, [id]: [] });
@@ -463,6 +557,10 @@ export default function useCodeAutoRepair() {
             stateHashAfter: roundEvent.state_hash_after,
             filesChanged: roundEvent.files_changed ?? [],
             testsChanged: roundEvent.tests_changed ?? [],
+            diffAdditions: roundEvent.diff_additions ?? 0,
+            diffDeletions: roundEvent.diff_deletions ?? 0,
+            progressScore: roundEvent.progress_score ?? 0,
+            progressFacts: roundEvent.progress_facts ?? [],
             errorSignature: roundEvent.error_signature,
           },
         },
@@ -525,7 +623,25 @@ export default function useCodeAutoRepair() {
           summary: finalSummary,
           summaryIntent: resolvedIntent,
           answer: isAnswerIntent ? finalSummary : previous.answer,
-          isRunning: !event.done,
+          isRunning: event.status === 'awaiting_runtime_verification' || !event.done,
+          status: event.status === 'needs_attention'
+            ? 'needs_attention'
+            : event.status === 'awaiting_runtime_verification'
+              ? 'awaiting_runtime_verification'
+            : event.done ? 'completed' : 'running',
+          resumeEligible: event.resume_eligible ?? previous.resumeEligible,
+          runtimeVerification: event.run_id && event.base_revision && event.candidate_revision
+            ? {
+                runId: event.run_id,
+                baseRevision: event.base_revision,
+                candidateRevision: event.candidate_revision,
+              }
+            : previous.runtimeVerification,
+          activeScope: event.active_scope ?? previous.activeScope,
+          scopeVersion: event.scope_version ?? previous.scopeVersion,
+          scopeSource: event.scope_source ?? previous.scopeSource,
+          allowedNextAction: event.allowed_next_action ?? previous.allowedNextAction,
+          runtimeEvidence: event.runtime_evidence ?? previous.runtimeEvidence,
         };
       });
       return true;
@@ -553,15 +669,27 @@ export default function useCodeAutoRepair() {
       } catch (e) { console.log('[terminal][sse] dispatch error:', e); }
       return true;
     }
-    // Why: 任务拆解事件——task_list 推送完整列表，task_update 更新单个任务状态。
-    // 前端用浮层卡片展示进度，不进 agent_trace 大黑框。
+    // Why: 任务拆解事件是 AgentLoop 状态投影，不是普通文字活动。
+    // 由稳定 event_id/sequence 去重后写入 trace.taskPlan，卡片和历史运行
+    // 都从这一份状态渲染，不能再把它拼进黑色模型输出框。
     if (event.type === 'task_list') {
-      const taskSummary = event.tasks.map((task) => `${task.id}. ${task.title}`).join('；');
-      appendActivity(`已拆解 ${event.tasks.length} 个执行任务${taskSummary ? `：${taskSummary}` : '。'}`, event.done, 'observation', 'task_list');
+      if (actorKind !== 'main') return true;
+      commitAgentTrace((previous) => {
+        const nextTaskPlan = applyCodeTaskEvent(previous.taskPlan ?? null, event);
+        return nextTaskPlan === previous.taskPlan
+          ? previous
+          : { ...previous, taskPlan: nextTaskPlan };
+      });
       return true;
     }
     if (event.type === 'task_update') {
-      appendActivity(`任务 ${event.task_id} · ${event.status}`, event.done, 'observation', event.status);
+      if (actorKind !== 'main') return true;
+      commitAgentTrace((previous) => {
+        const nextTaskPlan = applyCodeTaskEvent(previous.taskPlan ?? null, event);
+        return nextTaskPlan === previous.taskPlan
+          ? previous
+          : { ...previous, taskPlan: nextTaskPlan };
+      });
       // Why: 子任务完成时携带 delta，追加到执行记录的 fileChanges 里。
       if (event.status === 'completed' && event.delta) {
         const changes: CodeFileChange[] = Object.entries(event.delta).map(([path, d]) => ({
@@ -595,9 +723,15 @@ export default function useCodeAutoRepair() {
         actorKind,
         actorId: resolvedActorId,
         stage: 'file_change',
-        content: `已写入 ${event.path}`,
+        content: event.operation === 'delete' ? `已删除 ${event.path}` : `已写入 ${event.path}`,
         done: event.done,
         status: 'written',
+        file: {
+          path: event.path,
+          additions: event.additions ?? 0,
+          deletions: event.deletions ?? 0,
+          operation: event.operation ?? 'modify',
+        },
         metadata: { path: event.path },
       });
       window.dispatchEvent(new CustomEvent('code-file-written', { detail: { path: event.path } }));
@@ -641,6 +775,7 @@ export default function useCodeAutoRepair() {
       iteration: activity.iteration,
       eventId: activity.event_id,
       timestampMs: activity.timestamp_ms,
+      metadata: activity.metadata,
     });
     if (actorKind !== 'main') return true;
     // 思考增量只进入 reasoning，不应阻止随后真正的代码/JSON 输出更新。
@@ -663,6 +798,7 @@ export default function useCodeAutoRepair() {
           summaryIntent: previous.summaryIntent ?? resolvedForAnswer,
           phase: event.phase,
           isRunning: !traceDone,
+          resumeEligible: activity.resume_eligible ?? previous.resumeEligible,
         };
       });
       return true;
@@ -679,18 +815,34 @@ export default function useCodeAutoRepair() {
       return true;
     }
     commitAgentTrace((previous) => {
+      const scopePatch = {
+        activeScope: activity.active_scope ?? previous.activeScope,
+        scopeVersion: activity.scope_version ?? previous.scopeVersion,
+        scopeSource: activity.scope_source ?? previous.scopeSource,
+        allowedNextAction: activity.allowed_next_action ?? previous.allowedNextAction,
+        runtimeEvidence: activity.runtime_evidence ?? previous.runtimeEvidence,
+      };
       if (event.channel === 'output') {
         return {
           ...previous,
+          ...scopePatch,
           output: traceDone ? event.content : `${previous.output}${event.content}`,
           phase: event.phase,
           isRunning: !traceDone,
+          resumeEligible: activity.resume_eligible ?? previous.resumeEligible,
         };
       }
       const steps = previous.steps.at(-1) === event.content
         ? previous.steps
         : [...previous.steps, event.content];
-      return { ...previous, steps, phase: event.phase, isRunning: !traceDone };
+      return {
+        ...previous,
+        ...scopePatch,
+        steps,
+        phase: event.phase,
+        isRunning: !traceDone,
+        resumeEligible: activity.resume_eligible ?? previous.resumeEligible,
+      };
     });
     return true;
   }, [appendTimeline, commitAgentTrace]);
@@ -770,6 +922,78 @@ export default function useCodeAutoRepair() {
     }, ERROR_CHECK_WINDOW_MS);
   }, [clearCheckTimer, updateCode]);
 
+  const verifyRuntimeCandidate = useCallback(async (
+    consoleEntries: SandboxConsoleEntry[],
+    bootCompleted = true,
+    deterministicVerifierPassed = false,
+  ) => {
+    const candidate = agentTraceRef.current.runtimeVerification;
+    if (!candidate) return null;
+    const evidence = consoleEntries.slice(-100).map((entry) => ({
+      level: entry.level,
+      text: entry.args.join(' ').slice(0, 2_000),
+    }));
+    const errorEvidence = evidence
+      .filter((entry) => entry.level === 'error')
+      .map((entry) => entry.text)
+      .join('\n');
+    const attemptKey = `${candidate.runId}:${candidate.candidateRevision}:${bootCompleted}:${deterministicVerifierPassed}:${errorEvidence}`;
+    if (runtimeVerificationAttemptsRef.current.has(attemptKey)) return null;
+    runtimeVerificationAttemptsRef.current.add(attemptKey);
+    const changedFiles = (agentTraceRef.current.fileChanges ?? []).map((change) => change.path);
+    const diffSummary = (agentTraceRef.current.fileChanges ?? []).reduce(
+      (summary, change) => ({
+        additions: summary.additions + change.additions,
+        deletions: summary.deletions + change.deletions,
+      }),
+      { additions: 0, deletions: 0 },
+    );
+    const targetError = agentTraceRef.current.runtimeEvidence?.target_error
+      ?? (evidence.find((entry) => entry.level === 'error')
+        ? { type: 'RuntimeError', message: evidence.find((entry) => entry.level === 'error')?.text ?? '' }
+        : undefined);
+    try {
+      const result = await verifyFullstackRuntime({
+        run_id: candidate.runId,
+        base_revision: candidate.baseRevision,
+        candidate_revision: candidate.candidateRevision,
+        boot_completed: bootCompleted,
+        deterministic_verifier_passed: deterministicVerifierPassed,
+        console_entries: evidence,
+        target_error: targetError,
+        changed_files: changedFiles,
+        diff_summary: `+${diffSummary.additions}/-${diffSummary.deletions}`,
+      });
+      const completed = result.status === 'completed' && result.verified && result.committed;
+      commitAgentTrace((previous) => ({
+        ...previous,
+        isRunning: false,
+        status: completed ? 'completed' : 'needs_attention',
+        resumeEligible: !completed,
+        runtimeEvidence: result.runtime_evidence ?? previous.runtimeEvidence,
+      }));
+      appendTimeline({
+        actorKind: 'system',
+        actorId: `runtime-verify:${candidate.runId}`,
+        runId: candidate.runId,
+        stage: completed ? 'verification' : 'error',
+        status: completed ? 'completed' : 'needs_attention',
+        content: result.reason,
+        metadata: {
+          candidateRevision: candidate.candidateRevision,
+          consoleErrorCount: result.console_errors?.length ?? 0,
+          runtimeEvidence: result.runtime_evidence,
+        },
+      });
+      return result;
+    } catch (error) {
+      // A transport failure is retryable; never turn an unconfirmed
+      // candidate into a completed run or consume its retry key permanently.
+      runtimeVerificationAttemptsRef.current.delete(attemptKey);
+      throw error;
+    }
+  }, [appendTimeline, commitAgentTrace]);
+
   const reset = useCallback((options: { preserveAgentRuns?: boolean } = {}) => {
     controllerRef.current?.abort();
     controllerRef.current = null;
@@ -778,12 +1002,14 @@ export default function useCodeAutoRepair() {
     codeRef.current = '';
     runIdRef.current = '';
     repairCountRef.current = 0;
+    repairInfrastructureFailureCountRef.current = 0;
     isRepairingRef.current = false;
     errorOccurrencesRef.current.clear();
     recentErrorsRef.current = [];
     autoRepairStoppedRef.current = false;
     mainWorkCompletedRef.current = false;
     runtimeCheckCompletedRef.current = false;
+    runtimeVerificationAttemptsRef.current.clear();
     setCodeState('');
     setRunId('');
     setRepairLogs([]);
@@ -847,7 +1073,19 @@ export default function useCodeAutoRepair() {
     // A new request starts a new run, but completed runs remain visible and
     // persistable as part of this conversation's single timeline history.
     reset({ preserveAgentRuns: true });
-    beginAgentTrace(projectKind === 'fullstack' ? '正在启动全栈代码智能体。' : '正在启动前端代码智能体。', prompt, projectKind);
+    beginAgentTrace(
+      projectKind === 'fullstack' ? '正在启动全栈代码智能体。' : '正在启动前端代码智能体。',
+      prompt,
+      projectKind,
+      {
+        activeScope: projectKind === 'fullstack'
+          ? 'fullstack_bootstrap'
+          : 'frontend_patch',
+        allowedNextAction: projectKind === 'fullstack'
+          ? 'fullstack_bootstrap'
+          : 'minimal_frontend_patch',
+      },
+    );
     // 注意：beginAgentTrace 内部设置了 currentAgentRunIdRef，所以必须在它之后取 meta.run_id。
     const runIdForRequest = currentAgentRunIdRef.current;
     const controller = new AbortController();
@@ -911,17 +1149,39 @@ export default function useCodeAutoRepair() {
     mentionedFiles: string[] = [],
     sessionId: string | null = null,
     mcp: McpRequestContext | null = null,
+    options: {
+      resumeFromRun?: CodeAgentRun;
+      intentRouteId?: string;
+      recentTurns?: CodeIntentTurn[];
+      activeRun?: CodeIntentActiveRun;
+      activeScope?: CodeTaskScope;
+      scopeVersion?: number;
+      scopeSource?: 'orchestrator' | 'inherited' | 'explicit';
+      allowedNextAction?: string;
+      runtimeEvidence?: RuntimeVerificationEvidence;
+    } = {},
+    consoleEntries: SandboxConsoleEntry[] = [],
   ) => {
     sessionIdRef.current = sessionId;
     mcpRef.current = mcp;
     const currentCode = codeRef.current;
     if (!currentCode || !instruction.trim()) return false;
-    const pendingDiagnostics = recentErrorsRef.current.join('\n');
+    const consoleDiagnostics = consoleEntries
+      .filter((entry) => entry.level === 'error' || entry.level === 'warn')
+      .slice(-100)
+      .map((entry) => `[browser console ${entry.level}] ${entry.args.join(' ')}`)
+      .join('\n');
+    const pendingDiagnostics = [
+      recentErrorsRef.current.join('\n'),
+      consoleDiagnostics,
+    ].filter(Boolean).join('\n');
+    let effectiveDiagnostics = pendingDiagnostics;
 
     controllerRef.current?.abort();
     clearCheckTimer();
     clearRepairRetryTimer();
     repairCountRef.current = 0;
+    repairInfrastructureFailureCountRef.current = 0;
     isRepairingRef.current = false;
     errorOccurrencesRef.current.clear();
     recentErrorsRef.current = [];
@@ -930,15 +1190,105 @@ export default function useCodeAutoRepair() {
     runtimeCheckCompletedRef.current = false;
     setRepairLogs([]);
     setStatus({ state: 'modifying', charCount: 0 });
-    const currentVfs = parseProjectCode(currentCode);
+    const parsedVfs = parseProjectCode(currentCode);
+    const currentVfs = parsedVfs ?? {};
     // Why: parseProjectCode('{}') 返回空对象，在 JS 中是 truthy；
     //   必须检查是否包含真实文件，否则会把空 VFS 传给后端触发 422。
-    const hasVfs = currentVfs && Object.keys(currentVfs).length > 0;
-    beginAgentTrace(hasVfs ? '正在启动全栈增量修改智能体。' : '正在启动前端增量修改智能体。', instruction, hasVfs ? 'fullstack' : 'frontend');
+    const hasVfs = Object.keys(currentVfs).length > 0;
+    const isResume = Boolean(options.resumeFromRun);
+    beginAgentTrace(
+      isResume
+        ? '正在恢复上一次未完成的 Code AgentLoop。'
+        : (hasVfs ? '正在启动全栈增量修改智能体。' : '正在启动前端增量修改智能体。'),
+      instruction,
+      hasVfs ? 'fullstack' : 'frontend',
+      {
+        resumeRun: options.resumeFromRun,
+        activeScope: options.activeScope,
+        scopeVersion: options.scopeVersion,
+        scopeSource: options.scopeSource,
+        allowedNextAction: options.allowedNextAction,
+        runtimeEvidence: options.runtimeEvidence,
+      },
+    );
     const runIdForRequest = currentAgentRunIdRef.current;
 
     const controller = new AbortController();
     controllerRef.current = controller;
+    const shouldRunRuntimePreflight = Boolean(
+      hasVfs && (
+        options.activeScope === 'frontend_runtime'
+        || options.activeRun?.runtime_verification === true
+        || options.activeRun?.status === 'awaiting_runtime_verification'
+        || options.runtimeEvidence?.status === 'runtime_verification_failed'
+        || options.runtimeEvidence?.status === 'needs_attention'
+        || consoleEntries.some((entry) => entry.level === 'error' || entry.level === 'warn')
+      ),
+    );
+    if (shouldRunRuntimePreflight) {
+      try {
+        const previewHtml = isFullstackVFS(currentVfs)
+          || isManifestProjectVFS(currentVfs)
+          ? bundleFullstackVFS(currentVfs, { runId: runIdForRequest })
+          : bundleVFS(currentVfs, { runId: runIdForRequest, injectInspector: false });
+        appendTimeline({
+          actorKind: 'system',
+          actorId: `deterministic-preflight:${runIdForRequest}`,
+          runId: runIdForRequest,
+          stage: 'verification',
+          status: 'running',
+          content: '正在启动确定性浏览器预检，先采集页面可见数据、Console 和页面异常。',
+          metadata: { source: 'deterministic-browser-preflight' },
+        });
+        const report = await runCodeAcceptanceTest({
+          user_request: instruction.trim(),
+          preview_html: previewHtml,
+          verification_run_id: `${runIdForRequest}:preflight`.slice(0, 64),
+          console_entries: consoleEntries.slice(-100).map((entry) => ({
+            level: entry.level,
+            text: entry.args.join(' ').slice(0, 2_000),
+          })),
+        }, controller.signal);
+        const reportDiagnostics = formatRuntimePreflightDiagnostics(report);
+        effectiveDiagnostics = [effectiveDiagnostics, reportDiagnostics].filter(Boolean).join('\n\n');
+        appendTimeline({
+          actorKind: 'system',
+          actorId: `deterministic-preflight:${runIdForRequest}:result`,
+          runId: runIdForRequest,
+          stage: 'verification',
+          status: report.blocked ? 'blocked' : report.passed ? 'passed' : 'failed',
+          content: report.diagnostic
+            || (report.passed ? '确定性浏览器预检通过。' : '确定性浏览器预检未通过。'),
+          metadata: {
+            source: 'deterministic-browser-preflight',
+            deterministic: true,
+            passed: report.passed,
+            blocked: report.blocked,
+            diagnostic: report.diagnostic,
+            deterministicFindings: report.deterministic_findings ?? [],
+            pageText: report.page_text ?? '',
+            console: report.console ?? [],
+            pageErrors: report.page_errors ?? [],
+          },
+        });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') throw error;
+        const message = error instanceof Error ? error.message : '确定性浏览器预检失败。';
+        effectiveDiagnostics = [
+          effectiveDiagnostics,
+          `[deterministic-browser-preflight]\nstatus=blocked\n${message}`,
+        ].filter(Boolean).join('\n\n');
+        appendTimeline({
+          actorKind: 'system',
+          actorId: `deterministic-preflight:${runIdForRequest}:blocked`,
+          runId: runIdForRequest,
+          stage: 'verification',
+          status: 'blocked',
+          content: `确定性浏览器预检暂不可用：${message}`,
+          metadata: { source: 'deterministic-browser-preflight', blocked: true },
+        });
+      }
+    }
     let modifiedCode = '';
     let didComplete = false;
 
@@ -969,7 +1319,9 @@ export default function useCodeAutoRepair() {
       didComplete = didComplete || event.done;
       if (event.done) {
         finishTimeline('main');
-        commitAgentTrace((previous) => ({ ...previous, isRunning: false }));
+        if (!event.candidate) {
+          commitAgentTrace((previous) => ({ ...previous, isRunning: false }));
+        }
       }
       setStatus({ state: 'modifying', charCount: event.code.length });
     };
@@ -977,14 +1329,14 @@ export default function useCodeAutoRepair() {
       // Why: fullstack 和 frontend 单文件路径都已支持视觉模型分析附件。
       if (hasVfs) {
         await modifyFullstackCode(
-          currentVfs, instruction, targetElement, handleEvent, controller.signal, pendingDiagnostics, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds },
+          currentVfs, instruction, targetElement, handleEvent, controller.signal, effectiveDiagnostics, attachments,
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, intent: mcp?.intent ?? (isResume ? 'resume' : 'action'), intent_route_id: options.intentRouteId, resume: isResume, recent_turns: options.recentTurns, active_run: options.activeRun, active_scope: options.activeScope, runtime_evidence: options.runtimeEvidence },
           mentionedFiles,
         );
       } else {
         await modifyWebCode(
-          currentCode, instruction, targetElement, handleEvent, controller.signal, pendingDiagnostics, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds },
+          currentCode, instruction, targetElement, handleEvent, controller.signal, effectiveDiagnostics, attachments,
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, intent: mcp?.intent ?? (isResume ? 'resume' : 'action'), intent_route_id: options.intentRouteId, resume: isResume, recent_turns: options.recentTurns, active_run: options.activeRun, active_scope: options.activeScope, runtime_evidence: options.runtimeEvidence },
         );
       }
     } catch (error) {
@@ -993,12 +1345,31 @@ export default function useCodeAutoRepair() {
     }
 
     if (!modifiedCode || !didComplete) {
+      if (agentTraceRef.current.status === 'needs_attention') {
+        if (modifiedCode) updateCode(modifiedCode);
+        finishTimeline('main');
+        setStatus({ state: 'idle' });
+        return false;
+      }
+      // A needs_attention response still carries the last durable VFS
+      // checkpoint in a non-final code_update. Keep that checkpoint visible
+      // and available to the next "继续" request instead of reverting to the
+      // pre-run code in codeRef.
+      if (modifiedCode && agentTraceRef.current.resumeEligible) {
+        updateCode(modifiedCode);
+        finishTimeline('main');
+        setStatus({ state: 'idle' });
+        return false;
+      }
       throw new Error('增量修改接口没有返回完整代码。');
     }
     recordFileChanges(currentCode, modifiedCode);
     beginRuntimeCheck(modifiedCode);
-    return true;
-  }, [addTrustedTerminalPrefix, beginAgentTrace, beginRuntimeCheck, clearCheckTimer, clearRepairRetryTimer, commitAgentTrace, consumeAgentEvent, finishTimeline, recordFileChanges, terminalWorkspaceId]);
+    return {
+      completed: true,
+      candidate: agentTraceRef.current.status === 'awaiting_runtime_verification',
+    };
+  }, [addTrustedTerminalPrefix, beginAgentTrace, beginRuntimeCheck, clearCheckTimer, clearRepairRetryTimer, commitAgentTrace, consumeAgentEvent, finishTimeline, recordFileChanges, terminalWorkspaceId, updateCode]);
 
   const handleRuntimeError = useCallback(async (
     runtimeError: RuntimeErrorReport,
@@ -1025,6 +1396,30 @@ export default function useCodeAutoRepair() {
       runtimeError.line ?? 0,
       runtimeError.column ?? 0,
     ].join('|');
+    const initialRuntimeEvidence = normalizeRuntimeVerificationEvidence({
+      status: 'runtime_verification_failed',
+      run_id: runtimeError.runId,
+      base_revision: '',
+      candidate_revision: '',
+      target_error: {
+        type: 'RuntimeError',
+        message: clipRepairText(runtimeError.message, 2_000) ?? 'Runtime error',
+        source: clipRepairText(runtimeError.source, 500),
+        line: runtimeError.line,
+        column: runtimeError.column,
+        stack: clipRepairText(runtimeError.stack, 4_000),
+      },
+      changed_files: (agentTraceRef.current.fileChanges ?? []).map((change) => change.path),
+      diff_summary: '',
+      new_errors: [],
+      same_error_persisted: true,
+      boot_completed: false,
+      console_errors: (runtimeError.consoleEntries ?? [])
+        .filter((entry) => entry.level === 'error')
+        .map((entry) => clipRepairText(entry.text, 2_000) ?? ''),
+      diagnostic: clipRepairText(formatRuntimeError(runtimeError), 2_000) ?? '',
+    });
+    commitAgentTrace((previous) => ({ ...previous, runtimeEvidence: initialRuntimeEvidence }));
     const occurrence = (errorOccurrencesRef.current.get(errorSignature) ?? 0) + 1;
     errorOccurrencesRef.current.set(errorSignature, occurrence);
     recentErrorsRef.current = [
@@ -1055,16 +1450,11 @@ export default function useCodeAutoRepair() {
     isRepairingRef.current = true;
     repairCountRef.current += 1;
     const attempt = repairCountRef.current;
-    const diagnostic = [
-      formatRuntimeError(runtimeError),
-      `This error has occurred ${occurrence} time(s) in the current repair cycle.`,
-      occurrence >= 2
-        ? 'The previous approach did not solve this error. Do not repeat it. Re-diagnose from a different layer: inspect syntax boundaries, event wiring, request URL, frontend/backend/database contracts, and possible sandbox bridge failures before choosing a new minimal patch.'
-        : '',
-      recentErrorsRef.current.length > 1
-        ? `Recent error history (oldest to newest):\n${recentErrorsRef.current.map((item, index) => `${index + 1}. ${item}`).join('\n')}`
-        : '',
-    ].filter(Boolean).join('\n\n');
+    const diagnostic = buildBoundedRepairDiagnostic(
+      runtimeError,
+      occurrence,
+      recentErrorsRef.current,
+    );
     setRepairLogs((previous) => [
       ...previous,
       {
@@ -1133,12 +1523,30 @@ export default function useCodeAutoRepair() {
       if (hasVfs) {
         await fixFullstackCode(
           currentVfs, diagnostic, handleEvent, controller.signal,
-          { workspace_id: terminalWorkspaceId, run_id: currentAgentRunIdRef.current, session_id: sessionIdRef.current ?? undefined, mcp_mode: mcpRef.current?.mode, mcp_server_ids: mcpRef.current?.serverIds },
+          {
+            workspace_id: terminalWorkspaceId,
+            run_id: currentAgentRunIdRef.current,
+            session_id: sessionIdRef.current ?? undefined,
+            mcp_mode: mcpRef.current?.mode,
+            mcp_server_ids: mcpRef.current?.serverIds,
+            intent: 'runtime_fix',
+            active_scope: agentTraceRef.current.activeScope ?? 'frontend_runtime',
+            runtime_evidence: agentTraceRef.current.runtimeEvidence,
+          },
         );
       } else {
         await fixWebCode(
           codeRef.current, diagnostic, handleEvent, controller.signal,
-          { workspace_id: terminalWorkspaceId, run_id: currentAgentRunIdRef.current, session_id: sessionIdRef.current ?? undefined, mcp_mode: mcpRef.current?.mode, mcp_server_ids: mcpRef.current?.serverIds },
+          {
+            workspace_id: terminalWorkspaceId,
+            run_id: currentAgentRunIdRef.current,
+            session_id: sessionIdRef.current ?? undefined,
+            mcp_mode: mcpRef.current?.mode,
+            mcp_server_ids: mcpRef.current?.serverIds,
+            intent: 'runtime_fix',
+            active_scope: agentTraceRef.current.activeScope ?? 'frontend_runtime',
+            runtime_evidence: agentTraceRef.current.runtimeEvidence,
+          },
         );
       }
 
@@ -1167,6 +1575,13 @@ export default function useCodeAutoRepair() {
       if (error instanceof DOMException && error.name === 'AbortError') return;
       isRepairingRef.current = false;
       const message = error instanceof Error ? error.message : '自动修复失败。';
+      const infrastructureFailure = isRepairInfrastructureFailure(message);
+      if (infrastructureFailure) {
+        repairCountRef.current = Math.max(0, repairCountRef.current - 1);
+        repairInfrastructureFailureCountRef.current += 1;
+        errorOccurrencesRef.current.set(errorSignature, Math.max(0, occurrence - 1));
+        recentErrorsRef.current = recentErrorsRef.current.slice(0, -1);
+      }
       finishTimeline('ops');
       setRepairLogs((previous) => previous.map((log) =>
         log.attempt === attempt ? { ...log, status: 'failed' } : log
@@ -1175,14 +1590,26 @@ export default function useCodeAutoRepair() {
         actorKind: 'ops',
         actorId: `ops:${currentAgentRunIdRef.current}:repair`,
         stage: 'error',
-        content: `第 ${attempt} 次自动修复失败：${message}`,
+        content: infrastructureFailure
+          ? `基础设施协议失败（不消耗修复次数）：${message}`
+          : `第 ${attempt} 次自动修复失败：${message}`,
         status: 'failed',
       });
-      recentErrorsRef.current = [
-        ...recentErrorsRef.current.slice(-7),
-        `Repair synthesis failed: ${message}`,
-      ];
-      if (occurrence >= 2) {
+      if (!infrastructureFailure) {
+        recentErrorsRef.current = [
+          ...recentErrorsRef.current.slice(-7),
+          `Repair synthesis failed: ${message}`,
+        ];
+      }
+      if (infrastructureFailure && repairInfrastructureFailureCountRef.current >= MAX_REPAIR_INFRASTRUCTURE_FAILURES) {
+        const blockedMessage = '修复协议连续失败，已停止基础设施重试；该失败未消耗模型补丁次数。';
+        autoRepairStoppedRef.current = true;
+        clearRepairRetryTimer();
+        setStatus({ state: 'error', message: blockedMessage });
+        commitAgentTrace((previous) => ({ ...previous, phase: 'blocked', isRunning: false }));
+        return;
+      }
+      if (!infrastructureFailure && occurrence >= 2) {
         const blockedMessage = '补丁生成或校验连续两次没有产生可验证进展，已停止自动重试并保留当前页面。';
         autoRepairStoppedRef.current = true;
         clearRepairRetryTimer();
@@ -1293,5 +1720,32 @@ export default function useCodeAutoRepair() {
     stopAutoRepair,
     compactContext,
     addTrustedTerminalPrefix,
+    verifyRuntimeCandidate,
   };
+}
+
+function formatRuntimePreflightDiagnostics(report: Awaited<ReturnType<typeof runCodeAcceptanceTest>>): string {
+  const findings = (report.deterministic_findings ?? []).slice(0, 8).map((finding) =>
+    `${finding.kind} selector=${finding.selector} actual=${finding.actual}`,
+  );
+  const consoleErrors = (report.console ?? [])
+    .filter((entry) => entry.level === 'error' || entry.level === 'warn')
+    .slice(-12)
+    .map((entry) => `console.${entry.level}: ${entry.text}`);
+  const pageErrors = (report.page_errors ?? [])
+    .slice(-8)
+    .map((entry) => `pageerror: ${entry.type}: ${entry.text}`);
+  const networkFailures = (report.network_failures ?? [])
+    .slice(-8)
+    .map((entry) => `network-failure: ${entry.url} (${entry.error})`);
+  return [
+    '[deterministic-browser-preflight]',
+    `status=${report.blocked ? 'blocked' : report.passed ? 'passed' : 'failed'}`,
+    report.diagnostic ?? '',
+    ...findings,
+    ...consoleErrors,
+    ...pageErrors,
+    ...networkFailures,
+    !report.passed && report.page_text ? `页面可见文本：${report.page_text.slice(0, 3000)}` : '',
+  ].filter(Boolean).join('\n');
 }

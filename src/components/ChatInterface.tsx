@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useMemo, useReducer, type CSSProperties } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useReducer, type CSSProperties } from 'react';
 import {
   sendChatMessage,
   sendDeepResearch,
@@ -48,6 +48,10 @@ import {
   publishCodeProject,
   PublishedCodeProject,
   getCodeProject,
+  classifyCodeWorkbenchIntent,
+  type CodeWorkbenchIntentDecision,
+  type CodeIntentActiveRun,
+  type CodeIntentTurn,
   createImageGeneration,
   type ImageBatch,
   createVideoTask,
@@ -60,6 +64,7 @@ import ResearchProgressPanel from './ResearchProgressPanel';
 import MarkdownMessage from './MarkdownMessage';
 import NodeProgressPanel from './NodeProgressPanel';
 import ModeSelector, { ModeType, normalizeMode } from './ModeSelector';
+import { chooseMenuPlacement, type MenuPlacement } from './menuPlacement';
 import AgentDrawer from './AgentDrawer';
 import SessionSidebar from './SessionSidebar';
 import RuntimeSettingsDrawer from './RuntimeSettingsDrawer';
@@ -114,9 +119,10 @@ import { createMusicArtifactInput, isMusicGenerationCommand, readMusicArtifactPa
 import type { Artifact, ArtifactSummary, ArtifactVersion, MessageArtifactLink } from '../features/omni/types';
 import { documentFromV1Result } from '../features/ai-writing/writingDocumentTypes';
 import useCodeAutoRepair from '../hooks/useCodeAutoRepair';
-import { SelectedElementContext } from '../lib/codeSandbox';
+import { SelectedElementContext, SandboxConsoleEntry } from '../lib/codeSandbox';
 import { bundleVFS, VirtualFileSystem } from '../Code/vfsBundler';
 import { isFullstackVFS, isManifestProjectVFS, parseProjectCode, serializeProjectVFS } from '../Code/fullstackBundler';
+import { buildCodeReadOnlyPrompt, isCodeAgentRunUnfinished } from '../lib/codeWorkbenchConversation';
 import {
   createSnapshot,
   deepCopyVFS,
@@ -481,6 +487,25 @@ export default function ChatInterface() {
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachmentMenuOpen, setAttachmentMenuOpen] = useState(false);
   const [moreToolsOpen, setMoreToolsOpen] = useState(false);
+  const [moreToolsPlacement, setMoreToolsPlacement] = useState<MenuPlacement>('top');
+  const moreToolsRef = useRef<HTMLDivElement>(null);
+  const moreToolsMenuRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (!moreToolsOpen) return;
+    const updatePlacement = () => {
+      const anchor = moreToolsRef.current?.getBoundingClientRect();
+      if (!anchor) return;
+      const menuHeight = Math.min(moreToolsMenuRef.current?.scrollHeight || 420, window.innerHeight * 0.6);
+      setMoreToolsPlacement(chooseMenuPlacement(anchor.top, anchor.bottom, window.innerHeight, menuHeight));
+    };
+    updatePlacement();
+    window.addEventListener('resize', updatePlacement);
+    window.addEventListener('scroll', updatePlacement, true);
+    return () => {
+      window.removeEventListener('resize', updatePlacement);
+      window.removeEventListener('scroll', updatePlacement, true);
+    };
+  }, [moreToolsOpen]);
   const [publishVfs, setPublishVfs] = useState<VirtualFileSystem | null>(null);
   const [publishTitle, setPublishTitle] = useState('');
   const [publishCoverImage, setPublishCoverImage] = useState('/code-showcase/covers-contact-sheet.png');
@@ -630,6 +655,7 @@ export default function ChatInterface() {
   const [codeVersions, setCodeVersions] = useState<VersionSnapshot[]>([]);
   const [activeCodeVersionId, setActiveCodeVersionId] = useState('');
   const [codeProjectKind, setCodeProjectKind] = useState<'frontend' | 'fullstack'>('frontend');
+  const [codeConsoleEntries, setCodeConsoleEntries] = useState<SandboxConsoleEntry[]>([]);
   const [isCompactingCodeContext, setIsCompactingCodeContext] = useState(false);
   const [codeContextActionMessage, setCodeContextActionMessage] = useState('');
   // Why: Day57 @file 剪枝——状态提升到此,提交时连同 instruction 一起传给 useCodeAutoRepair.modify。
@@ -655,6 +681,7 @@ export default function ChatInterface() {
     stopAutoRepair,
     compactContext,
     addTrustedTerminalPrefix,
+    verifyRuntimeCandidate,
   } = useCodeAutoRepair();
 
   const handleCompactCodeContext = useCallback(async () => {
@@ -1988,6 +2015,89 @@ export default function ChatInterface() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, isLoading, handleNodeEvent, handleResearchWebDocs, sealOffProcessingNodes, activeSessionId, runtimeSettings, researchEngine, researchOptions]);
 
+  const handleCodeReadOnlyConversation = async (input: {
+    requestSessionId: string;
+    userMessage: string;
+    assistantMessageId: string;
+    requestToken: number;
+    decision: CodeWorkbenchIntentDecision;
+    latestRun?: (typeof agentRuns)[number];
+  }) => {
+    const parsedVfs = parseProjectCode(generatedCode);
+    const files = parsedVfs && Object.keys(parsedVfs).length > 0
+      ? Object.keys(parsedVfs)
+      : generatedCode.trim() ? ['index.html'] : [];
+    const latestRun = input.latestRun;
+    const contextPrompt = buildCodeReadOnlyPrompt(input.userMessage, {
+      projectKind: codeProjectKind,
+      files,
+      latestRun: latestRun ? {
+        request: latestRun.request,
+        phase: latestRun.trace.phase,
+        summary: latestRun.trace.summary || latestRun.trace.answer,
+        taskPlan: latestRun.trace.taskPlan ? {
+          completedCount: latestRun.trace.taskPlan.completedCount,
+          totalCount: latestRun.trace.taskPlan.totalCount,
+          status: latestRun.trace.taskPlan.status,
+        } : undefined,
+      } : undefined,
+    });
+    const clarificationHint = input.decision.intent === 'clarify'
+      ? '\n\n路由事实：当前没有可恢复的未完成 Agent run。请向用户说明这一点，并等待新的明确需求。'
+      : '';
+    const streamingAssistant: ChatMessage = {
+      id: input.assistantMessageId,
+      role: 'assistant',
+      content: '',
+      codeResponseKind: input.decision.intent === 'clarify' ? 'clarify' : 'conversation',
+    };
+    messagesRef.current = [...messagesRef.current, streamingAssistant];
+    setMessages(messagesRef.current);
+
+    let answer = '';
+    let streamError = '';
+    const updateAnswer = (nextContent: string) => {
+      if (input.requestToken !== activeRequestTokenRef.current) return;
+      answer = nextContent;
+      const nextMessages = messagesRef.current.map((message) =>
+        message.id === input.assistantMessageId ? { ...message, content: nextContent } : message,
+      );
+      messagesRef.current = nextMessages;
+      setMessages(nextMessages);
+    };
+
+    await sendChatMessage(`${contextPrompt}${clarificationHint}`, 'standard', {
+      onToken: (token) => updateAnswer(`${answer}${token}`),
+      onDone: (event) => {
+        if (event.answer.length > answer.length) updateAnswer(event.answer);
+      },
+      onError: (event) => { streamError = event.message; },
+    }, {
+      sessionId: input.requestSessionId,
+      providerOverride: activeProvider === 'custom' ? 'deepseek' : activeProvider,
+      maxTokensOverride: 4_000,
+      runtimeSettings: {
+        ...runtimeSettings,
+        webSearch: 'off',
+        deepThinking: 'off',
+        mcpMode: 'off',
+        mcpServerIds: [],
+        skillMode: 'off',
+        skillIds: [],
+      },
+    });
+    if (streamError) throw new Error(streamError);
+    if (input.requestToken !== activeRequestTokenRef.current) return;
+    const finalContent = answer.trim() || '当前没有收到可用的回答。';
+    updateAnswer(finalContent);
+    const updated = await saveSessionSnapshot(
+      input.requestSessionId,
+      { ...buildSnapshot(), messages: messagesRef.current },
+      false,
+    );
+    setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading || !isSessionReady) return;
@@ -2059,6 +2169,57 @@ export default function ChatInterface() {
         );
         setIsLoading(false);
         return;
+      }
+    }
+
+    let codeIntentDecision: CodeWorkbenchIntentDecision | null = null;
+    if (mode === 'code') {
+      // The newest run is the durable task checkpoint.  An unfinished run is
+      // only needed to decide whether resume is legal; completed runs still
+      // carry the sticky scope and the last runtime evidence for the next turn.
+      const latestCodeRun = [...agentRuns].reverse()[0];
+      const latestUnfinishedRun = [...agentRuns].reverse().find(isCodeAgentRunUnfinished);
+      try {
+        const recentTurns: CodeIntentTurn[] = turnBaseMessages
+          .slice(-8)
+          .map((item) => ({
+            role: item.role === 'user' || item.role === 'assistant' ? item.role : 'assistant',
+            content: item.content,
+          }));
+        const activeRun: CodeIntentActiveRun | undefined = latestCodeRun
+          ? {
+              run_id: latestCodeRun.id,
+              request: latestCodeRun.request,
+              phase: latestCodeRun.trace.phase,
+              status: latestCodeRun.trace.status,
+              summary: latestCodeRun.trace.summary || latestCodeRun.trace.answer,
+              resume_eligible: latestCodeRun.trace.resumeEligible,
+              runtime_verification: Boolean(latestCodeRun.trace.runtimeVerification),
+              active_scope: latestCodeRun.trace.activeScope,
+              scope_version: latestCodeRun.trace.scopeVersion,
+              allowed_next_action: latestCodeRun.trace.allowedNextAction,
+              target_files: latestCodeRun.trace.fileChanges?.map((change) => change.path),
+              last_verification: latestCodeRun.trace.runtimeEvidence,
+            }
+          : undefined;
+        codeIntentDecision = await classifyCodeWorkbenchIntent(userMessage, {
+          hasProject: Boolean(generatedCode.trim()),
+          hasUnfinishedRun: Boolean(latestUnfinishedRun),
+          recentTurns,
+          activeRun,
+          projectKind: codeProjectKind,
+          activeScope: latestCodeRun?.trace.activeScope,
+          sessionId: requestSessionId,
+        });
+      } catch {
+        // Classification failure must fail closed. A temporary router outage
+        // can delay a write, but it must never turn a question into a patch.
+        codeIntentDecision = {
+          intent: 'conversation',
+          confidence: 0,
+          reason: '意图路由暂时不可用，已按只读问题处理。',
+          can_mutate: false,
+        };
       }
     }
 
@@ -2361,21 +2522,133 @@ export default function ChatInterface() {
         setIsLoading(false);
       }
     } else if (mode === 'code') {
-      const isIncrementalChange = Boolean(generatedCode.trim());
-      const targetElement = selectedElement;
-      // Why: MCP 会话级注入——与 webSearch/deepThinking 同链路，随 code 请求 meta 透传后端。
-      const mcpContext = { mode: mcpMode, serverIds: selectedMcpServerIds };
+      const decision = codeIntentDecision ?? {
+        intent: 'conversation' as const,
+        confidence: 0,
+        reason: '未取得意图路由结果，按只读问题处理。',
+        can_mutate: false,
+      };
+        const isIncrementalChange = Boolean(generatedCode.trim());
+        const targetElement = selectedElement;
+        // Why: MCP 会话级注入——与 webSearch/deepThinking 同链路，随 code 请求 meta 透传后端。
+        const mcpContext = { mode: mcpMode, serverIds: selectedMcpServerIds };
+        const mutationContext = {
+          ...mcpContext,
+          intent: decision.intent === 'runtime_fix'
+            ? 'runtime_fix' as const
+            : decision.intent === 'resume'
+              ? 'resume' as const
+              : 'action' as const,
+        };
       try {
-        const didComplete = isIncrementalChange
-          ? await modifyCode(userMessage, targetElement, requestAttachments, mentionedFiles, requestSessionId, mcpContext)
-          : await generateCode(userMessage, codeProjectKind, requestAttachments, requestSessionId, mcpContext);
+        if (
+          !decision.can_mutate
+          || decision.intent === 'conversation'
+          || decision.intent === 'clarify'
+        ) {
+          const latestUnfinishedRun = [...agentRuns].reverse().find(isCodeAgentRunUnfinished);
+          await handleCodeReadOnlyConversation({
+            requestSessionId,
+            userMessage,
+            assistantMessageId,
+            requestToken,
+            decision,
+            latestRun: latestUnfinishedRun,
+          });
+          return;
+        }
+        const latestUnfinishedRun = [...agentRuns].reverse().find(isCodeAgentRunUnfinished);
+        const routerRecentTurns: CodeIntentTurn[] = turnBaseMessages
+          .slice(-8)
+          .map((item) => ({
+            role: item.role === 'user' || item.role === 'assistant' ? item.role : 'assistant',
+            content: item.content,
+          }));
+        const latestCodeRun = [...agentRuns].reverse()[0];
+        const routerActiveRun: CodeIntentActiveRun | undefined = latestCodeRun
+          ? {
+              run_id: latestCodeRun.id,
+              request: latestCodeRun.request,
+              phase: latestCodeRun.trace.phase,
+              status: latestCodeRun.trace.status,
+              summary: latestCodeRun.trace.summary || latestCodeRun.trace.answer,
+              resume_eligible: latestCodeRun.trace.resumeEligible,
+              runtime_verification: Boolean(latestCodeRun.trace.runtimeVerification),
+              active_scope: latestCodeRun.trace.activeScope,
+              scope_version: latestCodeRun.trace.scopeVersion,
+              allowed_next_action: latestCodeRun.trace.allowedNextAction,
+              target_files: latestCodeRun.trace.fileChanges?.map((change) => change.path),
+              last_verification: latestCodeRun.trace.runtimeEvidence,
+            }
+          : undefined;
+        const mutationResult = decision.intent === 'resume'
+          ? latestUnfinishedRun
+            ? await modifyCode(
+                userMessage,
+                targetElement,
+                requestAttachments,
+                mentionedFiles,
+                requestSessionId,
+                { ...mutationContext, intent: 'resume', resume: true },
+                {
+                  resumeFromRun: latestUnfinishedRun,
+                  intentRouteId: decision.route_id ?? undefined,
+                  recentTurns: routerRecentTurns,
+                  activeRun: routerActiveRun,
+                  activeScope: decision.active_scope,
+                  scopeVersion: decision.scope_version,
+                  scopeSource: decision.scope_source,
+                  allowedNextAction: decision.allowed_next_action,
+                  runtimeEvidence: decision.active_scope ? routerActiveRun?.last_verification : undefined,
+                },
+                codeConsoleEntries,
+              )
+            : await handleCodeReadOnlyConversation({
+                requestSessionId,
+                userMessage,
+                assistantMessageId,
+                requestToken,
+                decision: {
+                  intent: 'clarify',
+                  confidence: 1,
+                  reason: '没有找到可恢复的未完成 Agent run。',
+                  can_mutate: false,
+                },
+              }).then(() => false)
+          : isIncrementalChange
+            ? await modifyCode(
+                userMessage,
+                targetElement,
+                requestAttachments,
+                mentionedFiles,
+                requestSessionId,
+                { ...mutationContext, intent: decision.intent === 'runtime_fix' ? 'runtime_fix' : 'action', resume: false },
+                {
+                  intentRouteId: decision.route_id ?? undefined,
+                  recentTurns: routerRecentTurns,
+                  activeRun: routerActiveRun,
+                  activeScope: decision.active_scope,
+                  scopeVersion: decision.scope_version,
+                  scopeSource: decision.scope_source,
+                  allowedNextAction: decision.allowed_next_action,
+                  runtimeEvidence: decision.active_scope ? routerActiveRun?.last_verification : undefined,
+                },
+                codeConsoleEntries,
+              )
+            : await generateCode(userMessage, codeProjectKind, requestAttachments, requestSessionId, mcpContext);
+        const didComplete = typeof mutationResult === 'object'
+          ? mutationResult.completed
+          : mutationResult;
+        const isRuntimeCandidate = typeof mutationResult === 'object' && mutationResult.candidate;
         if (didComplete) {
           setSelectedElement(null);
           setMessages((previous) => [
             ...previous,
             {
               role: 'assistant',
-              content: isIncrementalChange
+              content: isRuntimeCandidate
+                ? '候选补丁已生成，正在等待浏览器重新加载并验证 Console。'
+                : isIncrementalChange
                 ? '修改已应用，正在自动检测运行时错误。'
                 : '网页代码已生成，正在自动检测运行时错误。',
             },
@@ -3232,6 +3505,16 @@ export default function ChatInterface() {
         .filter((message) => message.role === 'user')
         .map((message) => message.attachments ?? [])
     : [];
+  const latestCodeUserIndex = mode === 'code'
+    ? messages.reduce((latest, message, index) => message.role === 'user' ? index : latest, -1)
+    : -1;
+  const latestCodeConversationAnswer = mode === 'code'
+    ? [...messages].map((message, index) => ({ message, index })).reverse().find(({ message, index }) =>
+        message.role === 'assistant'
+        && Boolean(message.codeResponseKind)
+        && index > latestCodeUserIndex,
+      )?.message
+    : undefined;
   const chatNodes = visibleMessages.reduce<ChatNode[]>((nodes, message, index) => {
     if (message.role === 'user') {
       nodes.push({
@@ -3557,7 +3840,7 @@ export default function ChatInterface() {
                 <ModeSelector
                   value={mode}
                   disabled={isLoading || !isSessionReady}
-                  menuPlacement="bottom"
+                  menuPlacement="auto"
                   allowedGroups={['code']}
                   onChange={(nextMode) => void handleModeChange(nextMode)}
                 />
@@ -3566,6 +3849,7 @@ export default function ChatInterface() {
               attachments={attachments}
               onAttachmentsChange={setAttachments}
               isMultimodal={Boolean(currentModelSettings?.multimodal)}
+              onConsoleEntriesChange={setCodeConsoleEntries}
               selectedElement={selectedElement}
               isLoading={isLoading}
               isSessionReady={isSessionReady}
@@ -3580,6 +3864,25 @@ export default function ChatInterface() {
               onAddTrustedTerminalPrefix={addTrustedTerminalPrefix}
               onTerminalPropositionUpdate={handleTerminalPropositionUpdate}
               onRuntimeError={handleRuntimeError}
+              onAcceptanceFinished={({ codeRunId, passed, blocked, report, consoleEntries }) => {
+                // Runtime-fix candidates are previews until the deterministic
+                // browser verifier passes. A blocked verifier is reported to
+                // the commit gate with boot_completed=false, which records
+                // needs_attention without falsely committing the candidate.
+                if (!agentTrace.runtimeVerification || agentTrace.runtimeVerification.runId !== codeRunId) return;
+                const testConsoleEntries = (report.console ?? [])
+                  .filter((entry) => ['log', 'info', 'warn', 'error'].includes(entry.level))
+                  .map((entry) => ({
+                    level: entry.level as SandboxConsoleEntry['level'],
+                    args: [entry.text],
+                    timestamp: Date.now(),
+                  }));
+                const evidence = [...consoleEntries, ...testConsoleEntries].slice(-100);
+                if (!passed && !blocked) return;
+                void verifyRuntimeCandidate(evidence, passed, passed).catch((cause) => {
+                  setError(cause instanceof Error ? `运行时验证失败：${cause.message}` : '运行时验证失败，请稍后重试。');
+                });
+              }}
               onStopAutoRepair={stopAutoRepair}
               onCaptureSnapshot={captureCodeVersion}
               onPublishProject={(vfs) => {
@@ -3600,6 +3903,12 @@ export default function ChatInterface() {
               onVfsChange={handleVfsChange}
               onRewritePrompt={handleRewritePrompt}
               onDeletePrompt={handleDeletePrompt}
+              conversationAnswer={latestCodeConversationAnswer?.codeResponseKind
+                ? {
+                    content: latestCodeConversationAnswer.content,
+                    kind: latestCodeConversationAnswer.codeResponseKind,
+                  }
+                : null}
             />
             <div className="border-t border-slate-200 bg-white px-3 py-1.5 text-[11px] text-slate-400">
                 <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
@@ -4294,7 +4603,7 @@ export default function ChatInterface() {
               }}
               onWebSearchChange={() => changeWebSearch(nextCapabilityMode(webSearch))}
               onDeepThinkingChange={() => changeDeepThinking(nextCapabilityMode(deepThinking))}
-              modeControl={<ModeSelector value={mode} compact disabled={isLoading || !isSessionReady} menuPlacement="bottom" onChange={(nextMode) => void handleModeChange(nextMode)} />}
+              modeControl={<ModeSelector value={mode} compact disabled={isLoading || !isSessionReady} menuPlacement="auto" onChange={(nextMode) => void handleModeChange(nextMode)} />}
               attachmentControl={<div className="relative">
                 <button type="button" aria-label="添加附件" aria-haspopup="menu" aria-expanded={attachmentMenuOpen} onClick={() => setAttachmentMenuOpen((open) => !open)} className="flex h-9 w-9 items-center justify-center rounded-lg border border-slate-300 text-slate-700 hover:bg-slate-100 hover:text-slate-950">
                   <Plus size={20}/>
@@ -4306,19 +4615,26 @@ export default function ChatInterface() {
                 </div>}
                 <input ref={attachmentInputRef} type="file" className="hidden" onChange={(e)=>{addLocalAttachment(e.target.files?.[0]); e.currentTarget.value='';}}/>
               </div>}
-              moreControl={<div className="relative shrink-0">
+              moreControl={<div ref={moreToolsRef} className="relative shrink-0">
                 <button
                   type="button"
                   aria-label="更多工具"
                   aria-haspopup="menu"
                   aria-expanded={moreToolsOpen}
-                  onClick={() => setMoreToolsOpen((open) => !open)}
+                  onClick={() => {
+                    const willOpen = !moreToolsOpen;
+                    if (willOpen) {
+                      const anchor = moreToolsRef.current?.getBoundingClientRect();
+                      if (anchor) setMoreToolsPlacement(chooseMenuPlacement(anchor.top, anchor.bottom, window.innerHeight, Math.min(moreToolsMenuRef.current?.scrollHeight || 420, window.innerHeight * 0.6)));
+                    }
+                    setMoreToolsOpen(willOpen);
+                  }}
                   className="inline-flex h-9 items-center gap-1 rounded-lg px-2 text-xs text-slate-600 transition hover:bg-slate-100 hover:text-slate-950"
                 >
                   <Menu size={18}/><span className="hidden sm:inline">更多</span>
                 </button>
                 {moreToolsOpen && (
-                  <div role="menu" aria-label="更多工具列表" className="absolute right-0 top-full z-[80] mt-2 max-h-[min(420px,60vh)] w-48 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_18px_50px_rgba(15,23,42,0.16)]">
+                  <div ref={moreToolsMenuRef} role="menu" aria-label="更多工具列表" className={`absolute right-0 z-[80] max-h-[min(420px,60vh)] w-48 overflow-y-auto rounded-2xl border border-slate-200 bg-white p-2 shadow-[0_18px_50px_rgba(15,23,42,0.16)] ${moreToolsPlacement === 'top' ? 'bottom-full mb-2' : 'top-full mt-2'}`}>
                     {[
                       { label: '运行设置', icon: SlidersHorizontal },
                       { label: '代码', icon: Code2 },

@@ -10,6 +10,7 @@ import {
   optimizeCodePrompt,
 } from './projects';
 import { deleteCodeProject, listCodeProjects, PublishedCodeProject } from '../../lib/api';
+import ModelQuickSwitcher from '../ModelQuickSwitcher';
 
 type CategoryFilter = 'all' | CodeProjectCategory;
 type InspirationItem =
@@ -207,8 +208,9 @@ export default function CodeShowcasePage({ onBack, onUsePrompt, onOpenCode }: Co
           <p className="mt-3 text-sm text-slate-500 sm:text-base">从一个好点子出发，生成网页、工具和互动作品</p>
           <div className="mt-8 rounded-[24px] border border-slate-200 bg-white p-2.5 text-left shadow-[0_18px_55px_rgba(15,23,42,0.08)]">
             <textarea id="code-showcase-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={3} placeholder="描述你想创建的网页，或从下方选择一个同款指令" className="min-h-24 w-full resize-y rounded-2xl border-0 bg-transparent px-4 py-3 text-[15px] leading-6 text-slate-900 outline-none placeholder:text-slate-400" />
-            <div className="flex items-center justify-between gap-3 px-2 pb-1">
-              <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-3 px-2 pb-1">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <ModelQuickSwitcher compact />
                 <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700"><Code2 size={14} /> 代码</span>
                 <button type="button" disabled={!prompt.trim()} onClick={() => setPrompt((value) => optimizeCodePrompt(value))} className="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-100 disabled:opacity-40"><WandSparkles size={14} /> 优化指令</button>
               </div>

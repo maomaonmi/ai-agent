@@ -3,9 +3,11 @@ import { useMemo } from 'react';
 import type {
   CodeAcceptanceReport,
   CodeAgentActorKind,
+  CodeTaskPlanState,
   CodeAgentTimelineEvent,
 } from '../lib/api';
 import MarkdownMessage from './MarkdownMessage';
+import CodeTaskListCard from './CodeTaskListCard';
 import { filterHookTimelineEvents, shouldShowActorLabel } from '../Code/agentTimeline';
 
 type AcceptanceState = 'idle' | 'running' | 'passed' | 'failed' | 'blocked';
@@ -17,11 +19,12 @@ interface CodeAgentTimelineProps {
   acceptanceState?: AcceptanceState;
   acceptanceReport?: CodeAcceptanceReport | null;
   acceptanceElapsedSeconds?: number;
+  taskPlan?: CodeTaskPlanState;
   onOpenDiff?: (path: string) => void;
 }
 const ACTOR_LABEL: Record<CodeAgentActorKind, string> = {
   main: '主代码 Agent',
-  test: '测试 Agent',
+  test: '浏览器验证器',
   ops: '运维 Agent',
   system: '系统',
 };
@@ -47,11 +50,11 @@ const STAGE_LABEL: Record<CodeAgentTimelineEvent['stage'], string> = {
 };
 
 function statusText(state: AcceptanceState): string {
-  if (state === 'running') return '测试 Agent 正在执行';
+  if (state === 'running') return '浏览器验证器正在执行';
   if (state === 'passed') return '验收通过';
-  if (state === 'failed') return '验收失败，已交给运维 Agent';
-  if (state === 'blocked') return '测试已阻塞或终止';
-  return '等待测试';
+  if (state === 'failed') return '浏览器验证未通过，已交给主 Agent';
+  if (state === 'blocked') return '浏览器验证已阻塞或终止';
+  return '等待浏览器验证';
 }
 
 function makeTestEvents(
@@ -95,8 +98,8 @@ function makeTestEvents(
     next(
       'status',
       state === 'running'
-        ? '测试 Agent 已启动，正在生成验收计划并执行浏览器验证。'
-        : `测试 Agent 已完成：${statusText(state)}。`,
+        ? '确定性浏览器验证器已启动，正在检查页面、可见文本、Console 和 Network。'
+        : `确定性浏览器验证器已完成：${statusText(state)}。`,
       state !== 'running',
       state,
       elapsedSeconds > 0 ? { durationMs: elapsedSeconds * 1_000 } : undefined,
@@ -108,7 +111,7 @@ function makeTestEvents(
     for (const attempt of verificationAttempts) {
       events.push(next(
         'status',
-        `测试 Agent 第 ${attempt.attempt} 轮：${attempt.phase === 'planning' ? '生成验收计划' : '执行浏览器验证'}`,
+          `浏览器验证器第 ${attempt.attempt} 次：执行页面验证`,
         true,
         attempt.status,
       ));
@@ -144,7 +147,7 @@ function makeTestEvents(
   for (const artifact of report?.artifacts ?? []) {
     events.push(next(
       'file_change',
-      `测试 Agent 读取产物：${artifact.path}`,
+      `浏览器验证器读取产物：${artifact.path}`,
       true,
       'observed',
       undefined,
@@ -195,12 +198,45 @@ function ActorBadge({ kind }: { kind: CodeAgentActorKind }) {
   );
 }
 
+function FullToolResultCard({ event, toolName, report }: {
+  event: CodeAgentTimelineEvent;
+  toolName: string;
+  report: string;
+}) {
+  return (
+    <details className="rounded-lg border border-slate-200 bg-slate-50" open>
+      <summary className="cursor-pointer list-none px-3 py-2.5 text-xs leading-5 text-slate-600 marker:hidden">
+        <span className="mr-2 rounded bg-white/80 px-1.5 py-0.5 text-[10px] font-medium text-slate-500">
+          状态
+        </span>
+        <span className="font-medium">{event.content}</span>
+      </summary>
+      <div className="border-t border-slate-200 px-3 py-3">
+        <div className="mb-2 text-[11px] font-medium text-slate-500">
+          {toolName} 完整返回
+        </div>
+        <pre
+          tabIndex={0}
+          className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md border border-slate-200 bg-white p-3 font-mono text-[11px] leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
+          {report}
+        </pre>
+      </div>
+    </details>
+  );
+}
+
 function TimelineEventCard({ event, onOpenDiff, isRunning }: {
   event: CodeAgentTimelineEvent;
   onOpenDiff?: (path: string) => void;
   isRunning: boolean;
 }) {
   const filePath = event.file?.path || (typeof event.metadata?.path === 'string' ? event.metadata.path : '');
+  const toolName = typeof event.metadata?.tool_name === 'string' ? event.metadata.tool_name : '';
+  const toolReport = typeof event.metadata?.tool_report === 'string' ? event.metadata.tool_report : '';
+  if (event.stage === 'status' && toolName && toolReport) {
+    return <FullToolResultCard event={event} toolName={toolName} report={toolReport} />;
+  }
   if (event.stage === 'thinking') {
     return (
       <details className="rounded-lg border border-slate-200 bg-white" open={!event.done && isRunning}>
@@ -268,6 +304,7 @@ export default function CodeAgentTimeline({
   acceptanceState = 'idle',
   acceptanceReport,
   acceptanceElapsedSeconds = 0,
+  taskPlan,
   onOpenDiff,
 }: CodeAgentTimelineProps) {
   const visibleEvents = useMemo(
@@ -293,7 +330,7 @@ export default function CodeAgentTimeline({
   const fileCount = new Set(allEvents
     .map((event) => event.file?.path || (typeof event.metadata?.path === 'string' ? event.metadata.path : ''))
     .filter(Boolean)).size;
-  if (allEvents.length === 0) return null;
+  if (allEvents.length === 0 && !taskPlan) return null;
 
   return (
     <section aria-label="代码 AgentLoop 时间线" className="border-t border-slate-200 bg-slate-50/60 p-3">
@@ -310,6 +347,7 @@ export default function CodeAgentTimeline({
           </span>
         )}
       </div>
+      {taskPlan && <CodeTaskListCard plan={taskPlan} onOpenFile={onOpenDiff} />}
       <ol className="space-y-2.5">
         {allEvents.map((event, index) => (
           <li key={event.eventId} className="space-y-1.5">

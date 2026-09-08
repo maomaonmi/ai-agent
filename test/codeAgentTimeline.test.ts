@@ -20,6 +20,7 @@ import {
   classifyCodeGenerationEvent,
   summarizeAgentLoopRound,
 } from '../src/Code/agentEventRouting.ts';
+import { applyCodeTaskEvent } from '../src/Code/codeTaskPlan.ts';
 
 function input(overrides: Partial<TimelineEventInput> = {}): TimelineEventInput {
   return {
@@ -52,6 +53,18 @@ test('merges streamed deltas into one timeline item without losing metrics', () 
   assert.equal(events[0]?.metrics?.charCount, 7);
   assert.equal(events[0]?.sequence, 1);
   assert.equal(events[0]?.timestampMs, 200);
+});
+
+test('keeps the complete tool report metadata for the scrollable result viewer', () => {
+  const fullReport = 'const value = 1;\n'.repeat(40);
+  const events = appendTimelineEvent([], input({
+    stage: 'status',
+    content: '第 1 轮已调用 read_file：const value = 1;…',
+    metadata: { tool_name: 'read_file', tool_report: fullReport },
+  }));
+
+  assert.equal(events[0]?.metadata?.tool_name, 'read_file');
+  assert.equal(events[0]?.metadata?.tool_report, fullReport);
 });
 
 test('keeps separate AgentLoop thinking turns separate and closes only the completed turn', () => {
@@ -235,4 +248,71 @@ test('summarizes a round with no effective VFS change without requiring event.co
     state_hash_before: 'same',
     state_hash_after: 'same',
   }), 'AgentLoop 第 1 轮完成：工具调用 1 次，本轮没有有效文件变化。');
+});
+
+test('replays task events idempotently and keeps stable task identity', () => {
+  const listed = applyCodeTaskEvent(null, {
+    type: 'task_list',
+    run_id: 'run-task-ui',
+    plan_id: 'plan-1',
+    plan_path: 'PLAN.md',
+    todo_path: 'todo.md',
+    event_id: 'task-list-1',
+    sequence: 1,
+    timestamp_ms: 100,
+    completed_count: 0,
+    total_count: 2,
+    status: 'running',
+    done: false,
+    tasks: [
+      { id: 1, task_key: 'task-1', title: '调整底部面板', target_files: ['src/Panel.tsx'], description: '浅色面板', status: 'pending' },
+      { id: 2, task_key: 'task-2', title: '验证效果', target_files: ['src/Panel.tsx'], description: '运行检查', status: 'pending' },
+    ],
+  });
+  const started = applyCodeTaskEvent(listed, {
+    type: 'task_update',
+    run_id: 'run-task-ui',
+    plan_id: 'plan-1',
+    task_id: 1,
+    task_key: 'task-1',
+    status: 'in_progress',
+    plan_status: 'running',
+    event_id: 'task-update-1',
+    sequence: 2,
+    timestamp_ms: 200,
+    done: false,
+  });
+  const completed = applyCodeTaskEvent(started, {
+    type: 'task_update',
+    run_id: 'run-task-ui',
+    plan_id: 'plan-1',
+    task_id: 1,
+    task_key: 'task-1',
+    status: 'completed',
+    plan_status: 'running',
+    event_id: 'task-update-2',
+    sequence: 3,
+    timestamp_ms: 300,
+    done: false,
+  });
+  const replayed = applyCodeTaskEvent(completed, {
+    type: 'task_update',
+    run_id: 'run-task-ui',
+    plan_id: 'plan-1',
+    task_id: 1,
+    task_key: 'task-1',
+    status: 'completed',
+    event_id: 'task-update-2',
+    sequence: 3,
+    timestamp_ms: 300,
+    done: false,
+  });
+
+  assert.equal(completed, replayed);
+  assert.equal(completed.tasks[0]?.task_key, 'task-1');
+  assert.equal(completed.tasks[0]?.status, 'completed');
+  assert.equal(completed.completedCount, 1);
+  assert.equal(completed.totalCount, 2);
+  assert.equal(completed.planPath, 'PLAN.md');
+  assert.equal(completed.todoPath, 'todo.md');
 });

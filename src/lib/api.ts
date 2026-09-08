@@ -1101,6 +1101,8 @@ export interface ChatMessage {
   feedbackQuestion?: string;
   feedbackAnswer?: string;
   tokenUsage?: TokenUsage;
+  /** Read-only Code workbench answers are persisted as ordinary assistant turns. */
+  codeResponseKind?: 'conversation' | 'clarify';
 }
 
 export type AgentLoopStageKind = 'think' | 'search' | 'observe' | 'final';
@@ -1284,6 +1286,8 @@ export interface CodeUpdateEvent {
   type: 'code_update';
   code: string;
   done: boolean;
+  /** True when code is a runtime-fix candidate awaiting browser verification. */
+  candidate?: boolean;
 }
 
 export interface CodeErrorEvent {
@@ -1307,6 +1311,14 @@ export interface CodeAgentActivityEvent {
   event_id?: string;
   sequence?: number;
   timestamp_ms?: number;
+  resume_eligible?: boolean;
+  status?: string;
+  active_scope?: CodeTaskScope;
+  scope_version?: number;
+  scope_source?: 'orchestrator' | 'inherited' | 'explicit';
+  allowed_next_action?: string;
+  runtime_evidence?: RuntimeVerificationEvidence;
+  metadata?: Record<string, unknown>;
 }
 
 export interface HookEvent {
@@ -1339,6 +1351,26 @@ export interface RuntimeSummaryEvent {
   intent: 'patch' | 'fullstack_bootstrap' | 'answer' | 'ask_clarification';
   content: string;
   done: boolean;
+  resume_eligible?: boolean;
+  status?: string;
+  run_id?: string;
+  base_revision?: string;
+  candidate_revision?: string;
+  active_scope?: CodeTaskScope;
+  scope_version?: number;
+  scope_source?: 'orchestrator' | 'inherited' | 'explicit';
+  allowed_next_action?: string;
+  runtime_evidence?: RuntimeVerificationEvidence;
+}
+
+export interface RuntimeVerificationResponse {
+  run_id: string;
+  status: 'completed' | 'needs_attention' | string;
+  verified: boolean;
+  committed: boolean;
+  reason: string;
+  console_errors?: string[];
+  runtime_evidence?: RuntimeVerificationEvidence;
 }
 
 // Why: 预留——终端命令提案事件。先走审批链（已在 terminal_service.filter_command 黑白名单），
@@ -1353,28 +1385,76 @@ export interface TerminalProposalEvent {
 
 // Why: 全栈修改模式任务拆解——后端把复杂指令拆成子任务列表推给前端，
 // 前端用浮层卡片展示进度（待办/进行中/完成/失败/跳过）。
+export type CodeTaskStatus =
+  | 'pending'
+  | 'in_progress'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+  | 'needs_attention';
+
+export type CodeTaskPlanStatus = 'running' | 'completed' | 'needs_attention';
+
 export interface TaskItem {
-  id: number;
+  id: number | string;
+  task_key?: string;
   title: string;
   target_files: string[];
   description: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped';
+  status: CodeTaskStatus;
+  reason?: string;
 }
 
 export interface TaskListEvent {
   type: 'task_list';
   tasks: TaskItem[];
   done: boolean;
+  run_id?: string;
+  plan_id?: string;
+  plan_path?: string;
+  todo_path?: string;
+  event_id?: string;
+  sequence?: number;
+  timestamp_ms?: number;
+  completed_count?: number;
+  total_count?: number;
+  status?: CodeTaskPlanStatus;
 }
 
 export interface TaskUpdateEvent {
   type: 'task_update';
-  task_id: number;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped';
+  task_id: number | string;
+  task_key?: string;
+  status: CodeTaskStatus;
+  plan_status?: CodeTaskPlanStatus;
+  task?: TaskItem;
+  reason?: string;
   done: boolean;
-  // Why: 子任务级 diff，后端在子任务完成时对比前后 VFS 快照计算得出，
-  // 前端据此在执行记录里渲染"文件修改 · N 个文件"卡片。
+  run_id?: string;
+  plan_id?: string;
+  plan_path?: string;
+  todo_path?: string;
+  event_id?: string;
+  sequence?: number;
+  timestamp_ms?: number;
+  completed_count?: number;
+  total_count?: number;
+  // Why: 兼容旧版 task_update 的子任务级 diff；当前实现用 file_written
+  // 作为唯一文件变更事件，避免同一修改在任务完成时重复渲染。
   delta?: Record<string, { add: number; del: number }>;
+}
+
+export interface CodeTaskPlanState {
+  runId: string;
+  planId: string;
+  planPath: string;
+  todoPath: string;
+  tasks: TaskItem[];
+  status: CodeTaskPlanStatus;
+  completedCount: number;
+  totalCount: number;
+  lastSequence: number;
+  seenEventIds?: string[];
 }
 
 // Why: Agent Loop 工具循环中 write_file 等工具每落盘一个文件即推送该事件，
@@ -1383,6 +1463,10 @@ export interface FileWrittenEvent {
   type: 'file_written';
   path: string;
   done: boolean;
+  additions?: number;
+  deletions?: number;
+  line_count?: number;
+  operation?: 'create' | 'modify' | 'delete';
 }
 
 // Why: AgentLoop 每轮结束后推送的运行指标不是代码内容，不能落入
@@ -1400,9 +1484,15 @@ export interface AgentLoopRoundEvent {
   tool_calls_count?: number;
   files_changed?: string[];
   tests_changed?: string[];
+  diff_additions?: number;
+  diff_deletions?: number;
+  diff_size?: number;
   stdout_hash?: string;
   error_signature?: string;
   mutation_attempted?: boolean;
+  semantic_progress?: boolean;
+  progress_score?: number;
+  progress_facts?: string[];
   consecutive_no_progress_rounds?: number;
   consecutive_error_rounds?: number;
 }
@@ -1594,12 +1684,60 @@ export interface CodeAgentTrace {
   //   禁止缩进进“完整模型输出”大黑框。summary 为空表示本次 run 没有独立汇报内容。
   summary?: string;
   summaryIntent?: 'patch' | 'fullstack_bootstrap' | 'answer' | 'ask_clarification';
+  /** Candidate identity used by the browser-verification commit handshake. */
+  runtimeVerification?: {
+    runId: string;
+    baseRevision: string;
+    candidateRevision: string;
+  };
+  /** Terminal outcome of the orchestrated run, including a resumable checkpoint. */
+  status?: 'running' | 'awaiting_runtime_verification' | 'completed' | 'needs_attention' | 'failed';
+  /** The orchestrator left durable unfinished work that a later turn may resume. */
+  resumeEligible?: boolean;
   // Why: 预留——终端命令提案缓存列表，等后续 UI 渲染“执行/拒绝/编辑后执行”横幅。
   terminalProposals?: Array<{ command: string; reason?: string; expected_output_hint?: string }>;
   hookEvents?: HookEvent[];
   tokenUsage?: TokenUsage;
   contextUsage?: ContextUsageEvent;
+  taskPlan?: CodeTaskPlanState;
   timeline?: CodeAgentTimelineEvent[];
+  /** Orchestrator-owned sticky scope; restored with the run. */
+  activeScope?: CodeTaskScope;
+  scopeVersion?: number;
+  scopeSource?: 'orchestrator' | 'inherited' | 'explicit';
+  allowedNextAction?: string;
+  /** Structured browser evidence passed into the next repair/resume turn. */
+  runtimeEvidence?: RuntimeVerificationEvidence;
+}
+
+export type CodeTaskScope =
+  | 'frontend_runtime'
+  | 'frontend_patch'
+  | 'fullstack_patch'
+  | 'fullstack_bootstrap';
+
+export interface RuntimeTargetError {
+  type: string;
+  message: string;
+  source?: string;
+  line?: number;
+  column?: number;
+  stack?: string;
+}
+
+export interface RuntimeVerificationEvidence {
+  status: 'verified' | 'runtime_verification_failed' | 'blocked' | 'needs_attention' | string;
+  run_id: string;
+  base_revision: string;
+  candidate_revision: string;
+  target_error?: RuntimeTargetError;
+  changed_files: string[];
+  diff_summary: string;
+  new_errors: string[];
+  same_error_persisted: boolean;
+  boot_completed: boolean;
+  console_errors: string[];
+  diagnostic: string;
 }
 
 export type CodeAgentActorKind = 'main' | 'test' | 'ops' | 'system';
@@ -1654,7 +1792,8 @@ export interface CodeAgentRun {
 
 export interface AcceptanceAssertionResult {
   assertion: {
-    kind: 'visible' | 'hidden' | 'text_contains' | 'count_gte' | 'console_contains';
+    kind: 'visible' | 'hidden' | 'text_contains' | 'count_gte' | 'console_contains'
+      | 'forbidden_visible_text' | 'console_error' | 'page_error' | 'dom_unreadable';
     selector: string;
     expected: string;
     minimum: number;
@@ -1676,6 +1815,15 @@ export interface AcceptanceVerificationAttempt {
   passed?: boolean;
   blocked?: boolean;
   assertions?: AcceptanceAssertionResult[];
+  deterministic_findings?: DeterministicBrowserFinding[];
+}
+
+export interface DeterministicBrowserFinding {
+  kind: string;
+  selector: string;
+  expected: string;
+  actual: string;
+  message: string;
 }
 
 export interface CodeAcceptanceReport {
@@ -1702,6 +1850,9 @@ export interface CodeAcceptanceReport {
   returncode?: number;
   model_output?: string;
   artifacts?: CodeFileChange[];
+  deterministic?: boolean;
+  deterministic_findings?: DeterministicBrowserFinding[];
+  page_errors?: Array<{ type: string; text: string }>;
 }
 
 export interface ChatOptions {
@@ -1716,6 +1867,74 @@ export interface ChatOptions {
   providerOverride?: 'deepseek' | 'qwen' | 'glm' | 'minimax';
   maxTokensOverride?: number;
   thinkingBudgetOverride?: number;
+}
+
+export type CodeWorkbenchIntent = 'conversation' | 'action' | 'runtime_fix' | 'resume' | 'clarify';
+
+export interface CodeIntentTurn {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
+export interface CodeIntentActiveRun {
+  run_id: string;
+  request?: string;
+  phase?: string;
+  status?: string;
+  summary?: string;
+  resume_eligible?: boolean;
+  runtime_verification?: boolean;
+  active_scope?: CodeTaskScope;
+  scope_version?: number;
+  allowed_next_action?: string;
+  target_files?: string[];
+  last_verification?: RuntimeVerificationEvidence;
+}
+
+export interface CodeWorkbenchIntentDecision {
+  intent: CodeWorkbenchIntent;
+  confidence: number;
+  reason: string;
+  can_mutate: boolean;
+  route_id?: string | null;
+  recommended_scope?: CodeTaskScope | 'inherit';
+  active_scope?: CodeTaskScope;
+  scope_version?: number;
+  scope_source?: 'orchestrator' | 'inherited' | 'explicit';
+  allowed_next_action?: string;
+}
+
+/** Classify a Code workbench turn before dispatching any write-capable call. */
+export async function classifyCodeWorkbenchIntent(
+  message: string,
+  input: {
+    hasProject: boolean;
+    hasUnfinishedRun: boolean;
+    recentTurns?: CodeIntentTurn[];
+    activeRun?: CodeIntentActiveRun;
+    projectKind?: 'frontend' | 'fullstack';
+    activeScope?: CodeTaskScope;
+    sessionId?: string;
+  },
+  signal?: AbortSignal,
+): Promise<CodeWorkbenchIntentDecision> {
+  const response = await fetch(`${API_BASE_URL}/api/code/intent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message,
+      has_project: input.hasProject,
+      has_unfinished_run: input.hasUnfinishedRun,
+      recent_turns: input.recentTurns ?? [],
+      active_run: input.activeRun,
+      project_kind: input.projectKind ?? 'frontend',
+      active_scope: input.activeScope,
+      session_id: input.sessionId,
+    }),
+    signal,
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<CodeWorkbenchIntentDecision>;
 }
 
 export interface SessionSummary {
@@ -2571,6 +2790,13 @@ export interface CodeRequestMeta {
   session_id?: string;
   mcp_mode?: McpMode;
   mcp_server_ids?: string[];
+  intent?: 'action' | 'runtime_fix' | 'resume';
+  resume?: boolean;
+  intent_route_id?: string;
+  recent_turns?: CodeIntentTurn[];
+  active_run?: CodeIntentActiveRun;
+  active_scope?: CodeTaskScope;
+  runtime_evidence?: RuntimeVerificationEvidence;
 }
 
 function applyCodeRequestMeta(base: Record<string, unknown>, meta?: CodeRequestMeta): void {
@@ -2579,6 +2805,13 @@ function applyCodeRequestMeta(base: Record<string, unknown>, meta?: CodeRequestM
   if (meta?.session_id) base.session_id = meta.session_id;
   if (meta?.mcp_mode) base.mcp_mode = meta.mcp_mode;
   if (meta?.mcp_server_ids) base.mcp_server_ids = meta.mcp_server_ids;
+  if (meta?.intent) base.intent = meta.intent;
+  if (meta?.resume !== undefined) base.resume = meta.resume;
+  if (meta?.intent_route_id) base.intent_route_id = meta.intent_route_id;
+  if (meta?.recent_turns) base.recent_turns = meta.recent_turns;
+  if (meta?.active_run) base.active_run = meta.active_run;
+  if (meta?.active_scope) base.active_scope = meta.active_scope;
+  if (meta?.runtime_evidence) base.runtime_evidence = meta.runtime_evidence;
 }
 
 export async function generateWebCode(
@@ -2669,6 +2902,37 @@ export async function modifyFullstackCode(
   if (mentionedFiles.length) base.mentioned_files = mentionedFiles;
   applyCodeRequestMeta(base, meta);
   return streamCodeRequest('/api/code/fullstack/modify', base, onEvent, signal);
+}
+
+export async function verifyFullstackRuntime(
+  body: {
+    run_id: string;
+    base_revision: string;
+    candidate_revision: string;
+    boot_completed: boolean;
+    deterministic_verifier_passed: boolean;
+    console_entries: Array<{
+      level: 'log' | 'info' | 'warn' | 'error';
+      text: string;
+      source?: string;
+      line?: number;
+      column?: number;
+      stack?: string;
+    }>;
+    target_error?: RuntimeTargetError;
+    changed_files?: string[];
+    diff_summary?: string;
+  },
+  signal?: AbortSignal,
+): Promise<RuntimeVerificationResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/code/fullstack/runtime-verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<RuntimeVerificationResponse>;
 }
 
 export async function fixFullstackCode(

@@ -1,9 +1,10 @@
 'use client';
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Bot, ChevronDown, LoaderCircle } from 'lucide-react';
+import { Bot, ChevronDown, ChevronRight, LoaderCircle } from 'lucide-react';
 import { getImageModels, getModelCatalog, getModelSettings, getVideoModels, ImageModelCapability, ModelSettings, ModelVariant, saveModelSettings, VideoModelCapability } from '../lib/api';
 import { chooseVideoParameterPlacement, type VideoParameterPlacement } from '../features/omni/videoParamPlacement';
+import { chooseMenuPlacement, chooseSubmenuSide, type MenuPlacement, type SubmenuSide } from './menuPlacement';
 
 export interface VideoComposerParams {
   ratio: string;
@@ -146,6 +147,13 @@ const DEEPSEEK_EFFORTS = [
 
 type ComposerCapability = 'omni' | 'ppt' | 'music' | 'writing' | 'image' | 'video' | 'research';
 
+const TEXT_MODEL_PROVIDERS = [
+  { id: 'deepseek', label: 'DeepSeek' },
+  { id: 'glm', label: 'GLM' },
+  { id: 'qwen', label: '千问 Qwen' },
+  { id: 'minimax', label: 'MiniMax' },
+] as const;
+
 const FALLBACK_IMAGE_MODELS: ImageModelCapability[] = [
   { id: 'qwen-image-3.0-pro', name: '千问 3.0 Pro', provider: 'qianwen', description: '', max_outputs: 6, max_width: 2048, max_height: 2048, supports_negative_prompt: true, enabled: true },
   { id: 'wan2.7-image-pro', name: '万相 2.7 Pro', provider: 'qianwen', description: '', max_outputs: 4, max_width: 4096, max_height: 4096, supports_negative_prompt: true, enabled: true },
@@ -180,6 +188,12 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
   const [videoModels, setVideoModels] = useState<VideoModelCapability[]>(FALLBACK_VIDEO_MODELS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [hoveredProvider, setHoveredProvider] = useState<Provider | null>(null);
+  const [modelMenuPlacement, setModelMenuPlacement] = useState<MenuPlacement>('bottom');
+  const [modelSubmenuSide, setModelSubmenuSide] = useState<SubmenuSide>('right');
+  const modelMenuAnchorRef = useRef<HTMLDivElement>(null);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -200,6 +214,46 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
     window.addEventListener('model-settings-changed', refresh);
     return () => window.removeEventListener('model-settings-changed', refresh);
   }, [refresh]);
+
+  useEffect(() => {
+    if (!modelMenuOpen) return;
+    const closeOnOutsidePointer = (event: MouseEvent) => {
+      if (!modelMenuAnchorRef.current?.contains(event.target as Node)) {
+        setModelMenuOpen(false);
+        setHoveredProvider(null);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setModelMenuOpen(false);
+        setHoveredProvider(null);
+      }
+    };
+    document.addEventListener('mousedown', closeOnOutsidePointer);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsidePointer);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [modelMenuOpen]);
+
+  useLayoutEffect(() => {
+    if (!modelMenuOpen) return;
+    const updatePlacement = () => {
+      const anchor = modelMenuAnchorRef.current?.getBoundingClientRect();
+      if (!anchor) return;
+      setModelMenuPlacement(chooseMenuPlacement(anchor.top, anchor.bottom, window.innerHeight, Math.min(modelMenuRef.current?.scrollHeight || 420, window.innerHeight * 0.7)));
+      const submenuWidth = 280;
+      setModelSubmenuSide(chooseSubmenuSide(anchor.left, anchor.right, window.innerWidth, submenuWidth));
+    };
+    updatePlacement();
+    window.addEventListener('resize', updatePlacement);
+    window.addEventListener('scroll', updatePlacement, true);
+    return () => {
+      window.removeEventListener('resize', updatePlacement);
+      window.removeEventListener('scroll', updatePlacement, true);
+    };
+  }, [modelMenuOpen, hoveredProvider]);
 
   useEffect(() => {
     if (preferredCapability === 'image') {
@@ -335,7 +389,6 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
     finally { setLoading(false); }
   };
 
-  const selectClass = `appearance-none bg-transparent pr-4 font-medium outline-none disabled:opacity-60 ${compact ? 'max-w-32' : 'max-w-48'}`;
   const labelClass = 'relative inline-flex min-w-0 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-600 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200';
 
   if (preferredCapability === 'image' || preferredCapability === 'video') {
@@ -353,34 +406,53 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
   }
 
   return <div className={`flex items-center gap-2 ${compact ? '' : 'min-w-0'}`}>
-    <label className={labelClass}>
-      {loading ? <LoaderCircle size={14} className="animate-spin"/> : <Bot size={14} className="text-sky-600"/>}
-      <span className="sr-only">当前模型</span>
-      <select aria-label="当前模型" value={currentValue} disabled={disabled || loading} onChange={(e) => void change(e.target.value)} className={selectClass}>
-        <optgroup label="DeepSeek">
-          {variantsOf('deepseek').map((variant) => (
-            <option key={variant.value} value={variant.value} disabled={!profiles.deepseek?.has_api_key}>{variant.label}</option>
-          ))}
-        </optgroup>
-        <optgroup label="GLM">
-          {variantsOf('glm').map((variant) => (
-            <option key={variant.value} value={variant.value} disabled={!profiles.glm?.has_api_key}>{variant.label}</option>
-          ))}
-        </optgroup>
-        <optgroup label="千问 Qwen">
-          {variantsOf('qwen').map((variant) => (
-            <option key={variant.value} value={variant.value} disabled={!profiles.qwen?.has_api_key}>{variant.label}</option>
-          ))}
-        </optgroup>
-        <optgroup label="MiniMax">
-          {variantsOf('minimax').map((variant) => (
-            <option key={variant.value} value={variant.value} disabled={!profiles.minimax?.has_api_key}>{variant.label}</option>
-          ))}
-        </optgroup>
-        {profiles.custom?.has_api_key && <option value="custom">{profiles.custom.display_name || profiles.custom.model_id}</option>}
-      </select>
-      <ChevronDown size={13} aria-hidden="true" className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400" />
-    </label>
+    <div ref={modelMenuAnchorRef} className="relative">
+      <button type="button" aria-label="当前模型" aria-haspopup="menu" aria-expanded={modelMenuOpen} disabled={disabled || loading} onClick={() => {
+        const willOpen = !modelMenuOpen;
+        if (willOpen) {
+          const anchor = modelMenuAnchorRef.current?.getBoundingClientRect();
+          if (anchor) {
+            setModelMenuPlacement(chooseMenuPlacement(anchor.top, anchor.bottom, window.innerHeight, Math.min(modelMenuRef.current?.scrollHeight || 420, window.innerHeight * 0.7)));
+            setModelSubmenuSide(chooseSubmenuSide(anchor.left, anchor.right, window.innerWidth, 280));
+          }
+          setHoveredProvider(active === 'custom' ? null : active);
+        } else setHoveredProvider(null);
+        setModelMenuOpen(willOpen);
+      }} className={`${labelClass} ${compact ? 'max-w-48' : ''}`}>
+        {loading ? <LoaderCircle size={14} className="animate-spin"/> : <Bot size={14} className="text-sky-600"/>}
+        <span className="min-w-0 truncate">{activeVariant?.label || profiles[active]?.display_name || '当前模型'}</span>
+        <ChevronDown size={13} aria-hidden="true" className={`shrink-0 text-slate-400 transition-transform ${modelMenuOpen ? 'rotate-180' : ''}`} />
+      </button>
+      {modelMenuOpen && <div ref={modelMenuRef} role="menu" aria-label="模型选择" className={`absolute right-0 z-[90] w-64 max-h-[min(70vh,520px)] overflow-visible rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl ${modelMenuPlacement === 'top' ? 'bottom-full mb-2' : 'top-full mt-2'}`}>
+        <div className="px-3 pb-1 pt-2 text-[11px] font-semibold text-slate-400">选择服务商</div>
+        {TEXT_MODEL_PROVIDERS.map((provider) => {
+          const isHovered = hoveredProvider === provider.id;
+          const providerVariants = variantsOf(provider.id);
+          const hasKey = Boolean(profiles[provider.id]?.has_api_key);
+          return <div key={provider.id} className="relative" onMouseEnter={() => setHoveredProvider(provider.id)}>
+            <button type="button" role="menuitem" aria-haspopup="menu" aria-expanded={isHovered} onMouseEnter={() => setHoveredProvider(provider.id)} onFocus={() => setHoveredProvider(provider.id)} onClick={() => setHoveredProvider(provider.id)} onKeyDown={(event) => {
+              if (event.key === 'ArrowRight') {
+                event.preventDefault();
+                setHoveredProvider(provider.id);
+              }
+              if (event.key === 'ArrowLeft' || event.key === 'Escape') {
+                event.preventDefault();
+                setHoveredProvider(null);
+              }
+            }} className={`flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm ${isHovered ? 'bg-slate-100 text-slate-950' : 'text-slate-700 hover:bg-slate-50'}`}>
+              <span className="min-w-0 flex-1 font-medium">{provider.label}</span><ChevronRight size={15} aria-hidden="true" className="text-slate-400" />
+            </button>
+            {isHovered && <div role="menu" aria-label={`${provider.label}模型`} className={`absolute top-0 z-[100] w-72 max-h-[min(70vh,520px)] overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl ${modelSubmenuSide === 'right' ? 'left-full ml-1' : 'right-full mr-1'}`}>
+              {providerVariants.map((variant) => <button key={variant.value} type="button" role="menuitemradio" aria-checked={currentValue === variant.value} disabled={disabled || loading || !hasKey} onClick={() => { setModelMenuOpen(false); setHoveredProvider(null); void change(variant.value); }} className={`flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm ${currentValue === variant.value ? 'bg-slate-100 font-medium text-slate-950' : 'text-slate-700 hover:bg-slate-50'} disabled:cursor-not-allowed disabled:opacity-45`}>
+                <span className="min-w-0 flex-1">{variant.label}</span>{currentValue === variant.value && <span className="text-sky-600" aria-label="当前模型">✓</span>}
+              </button>)}
+              {!hasKey && <p className="px-3 pb-1 pt-2 text-[11px] text-slate-400">请先在设置中配置 API 密钥</p>}
+            </div>}
+          </div>;
+        })}
+        {profiles.custom?.has_api_key && <button type="button" role="menuitemradio" aria-checked={currentValue === 'custom'} onClick={() => { setModelMenuOpen(false); void change('custom'); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm text-slate-700 hover:bg-slate-50"><span className="min-w-0 flex-1">{profiles.custom.display_name || profiles.custom.model_id}</span>{currentValue === 'custom' && <span className="text-sky-600" aria-label="当前模型">✓</span>}</button>}
+      </div>}
+    </div>
     {active === 'deepseek' && activeVariant?.thinking_control === 'deepseek' && (
       <label className={labelClass}>
         <span className="sr-only">思考强度</span>

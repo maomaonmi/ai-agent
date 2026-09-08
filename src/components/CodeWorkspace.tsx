@@ -60,6 +60,7 @@ import {
   type CodeAgentRun,
   type CodeAgentTimelineEvent,
 } from '../lib/api';
+import MarkdownMessage from './MarkdownMessage';
 import {
   detectLanguage,
   diffLines,
@@ -94,7 +95,17 @@ interface CodeWorkspaceProps {
   onAttachmentsChange?: (attachments: ChatAttachment[]) => void;
   // Why: 只有多模态模型才允许在前端粘贴/上传图片，避免把无效请求推给后端。
   isMultimodal?: boolean;
+  // Console error/warn 是手动运行时修复的诊断证据，必须与当前 run 一起上送。
+  onConsoleEntriesChange?: (entries: SandboxConsoleEntry[]) => void;
   onRuntimeError: (error: RuntimeErrorReport) => void;
+  onAcceptanceFinished?: (result: {
+    codeRunId: string;
+    verificationRunId: string;
+    passed: boolean;
+    blocked: boolean;
+    report: CodeAcceptanceReport;
+    consoleEntries: SandboxConsoleEntry[];
+  }) => void;
   onStopAutoRepair: () => void;
   onCaptureSnapshot: (vfs: VirtualFileSystem, summary: string) => void;
   onPublishProject?: (vfs: VirtualFileSystem) => void;
@@ -117,7 +128,24 @@ interface CodeWorkspaceProps {
   // 变更后需要把新 VFS 序列化为字符串同步回上层 ChatInterface 的 generatedCode，
   // 以便下次提交时Agent能看到完整一致的VFS快照。
   onVfsChange?: (serializedCode: string) => void;
+  /** Latest read-only answer projected from the persisted conversation timeline. */
+  conversationAnswer?: {
+    content: string;
+    kind: 'conversation' | 'clarify';
+  } | null;
 }
+
+type AcceptanceProjection = {
+  state: 'idle' | 'running' | 'passed' | 'failed' | 'blocked';
+  report: CodeAcceptanceReport | null;
+  elapsedSeconds: number;
+};
+
+const IDLE_ACCEPTANCE: AcceptanceProjection = {
+  state: 'idle',
+  report: null,
+  elapsedSeconds: 0,
+};
 
 function getTimelineEvents(run: CodeAgentRun): CodeAgentTimelineEvent[] {
   if (run.trace.timeline?.length) return run.trace.timeline;
@@ -180,7 +208,9 @@ export default function CodeWorkspace({
   attachments = [],
   onAttachmentsChange,
   isMultimodal = false,
+  onConsoleEntriesChange,
   onRuntimeError,
+  onAcceptanceFinished,
   onStopAutoRepair,
   onCaptureSnapshot,
   onPublishProject,
@@ -196,6 +226,7 @@ export default function CodeWorkspace({
   mentionedFiles = [],
   onMentionedFilesChange,
   onVfsChange,
+  conversationAnswer = null,
 }: CodeWorkspaceProps) {
   const [activeView, setActiveView] = useState<'preview' | 'source'>('preview');
   const [vfs, setVfs] = useState<VirtualFileSystem>({});
@@ -232,11 +263,11 @@ export default function CodeWorkspace({
   // Why: Day58 拖拽目标高亮——从文件树拖拽到表单区域时显示绿色边框。
   const [isDragOver, setIsDragOver] = useState(false);
   const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
-  const [acceptanceState, setAcceptanceState] = useState<
-    'idle' | 'running' | 'passed' | 'failed' | 'blocked'
-  >('idle');
-  const [acceptanceReport, setAcceptanceReport] = useState<CodeAcceptanceReport | null>(null);
-  const [acceptanceElapsedSeconds, setAcceptanceElapsedSeconds] = useState(0);
+  // Acceptance belongs to the candidate run that produced it. Keeping one
+  // global state here caused a late Test Agent result to render under the
+  // next user request after a new run was appended.
+  const [acceptanceByRun, setAcceptanceByRun] = useState<Record<string, AcceptanceProjection>>({});
+  const acceptanceByRunRef = useRef<Record<string, AcceptanceProjection>>({});
   const [leftPanelWidth, setLeftPanelWidth] = useState(360);
   // Why: 图片放大预览弹窗，点击缩略图后显示原图。
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
@@ -266,6 +297,7 @@ export default function CodeWorkspace({
   const workspaceRef = useRef<HTMLElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const acceptanceControllerRef = useRef<AbortController | null>(null);
+  const activeAcceptanceRunIdRef = useRef('');
   const testedRunIdRef = useRef('');
   const acceptanceEligibilityRef = useRef<AcceptanceEligibilityState>({
     candidateRunId: '',
@@ -275,13 +307,30 @@ export default function CodeWorkspace({
   const acceptancePreviewRef = useRef('');
   const promptsRef = useRef<string[]>([]);
   const onRuntimeErrorRef = useRef(onRuntimeError);
+  const onAcceptanceFinishedRef = useRef(onAcceptanceFinished);
   const initialFileSetRef = useRef(false);
   consoleEntriesRef.current = consoleEntries;
+  acceptanceByRunRef.current = acceptanceByRun;
   promptsRef.current = prompts;
   onRuntimeErrorRef.current = onRuntimeError;
+  onAcceptanceFinishedRef.current = onAcceptanceFinished;
+
+  useEffect(() => {
+    onConsoleEntriesChange?.(consoleEntries);
+  }, [consoleEntries, onConsoleEntriesChange]);
+
   const hasCode = code.trim().length > 0;
   const hasProject = Object.keys(vfs).length > 0;
+  const activeAcceptanceState = activeAcceptanceRunIdRef.current
+    ? acceptanceByRun[activeAcceptanceRunIdRef.current]?.state
+    : undefined;
   const latestRunId = agentRuns.at(-1)?.id ?? '';
+  // The header belongs to the current code candidate, not merely the last
+  // durable timeline item. This prevents a late verifier result from a prior
+  // request being shown while a new request is still running.
+  const latestAcceptance = testedRunIdRef.current === runId && activeAcceptanceRunIdRef.current
+    ? acceptanceByRun[activeAcceptanceRunIdRef.current] ?? IDLE_ACCEPTANCE
+    : IDLE_ACCEPTANCE;
 
   // 终端面板辅助：创建手动终端 / 关闭会话 / 判断是否手动终端 / 选中的 run_id
   const createManualTerminal = useCallback(() => {
@@ -776,10 +825,28 @@ export default function CodeWorkspace({
   useEffect(() => {
     setConsoleEntries([]);
     setIsInspectMode(false);
-    acceptanceControllerRef.current?.abort();
-    acceptanceControllerRef.current = null;
-    setAcceptanceState('idle');
-    setAcceptanceReport(null);
+    const previousAcceptanceRunId = activeAcceptanceRunIdRef.current;
+    if (previousAcceptanceRunId && previousAcceptanceRunId !== runId) {
+      acceptanceControllerRef.current?.abort();
+      acceptanceControllerRef.current = null;
+      setAcceptanceByRun((previous) => {
+        const existing = previous[previousAcceptanceRunId];
+        if (!existing || existing.state !== 'running') return previous;
+        return {
+          ...previous,
+          [previousAcceptanceRunId]: {
+            ...existing,
+            state: 'blocked',
+            report: {
+              passed: false,
+              blocked: true,
+              diagnostic: '新需求已开始，上一轮测试已停止并保留在原任务下。',
+            },
+          },
+        };
+      });
+      activeAcceptanceRunIdRef.current = '';
+    }
   }, [runId]);
 
   // Why: 切到 Terminal Tab 时，如果还没有选中具体 terminal run_id，自动切到"最近的 agent run（
@@ -843,53 +910,100 @@ export default function CodeWorkspace({
       { runId, status: status.state },
     );
     acceptanceEligibilityRef.current = eligibility.state;
+    const acceptanceTimelineRunId = agentRuns.at(-1)?.id;
+    if (
+      testedRunIdRef.current === runId
+      && acceptanceTimelineRunId
+      && activeAcceptanceRunIdRef.current
+      && activeAcceptanceRunIdRef.current !== acceptanceTimelineRunId
+    ) {
+      // A durable agent-run can arrive one render after the code candidate
+      // reaches done. Move the existing projection to that lane without
+      // starting a second browser request.
+      const existingProjection = acceptanceByRunRef.current[activeAcceptanceRunIdRef.current];
+      if (existingProjection) {
+        activeAcceptanceRunIdRef.current = acceptanceTimelineRunId;
+        setAcceptanceByRun((previous) => ({
+          ...previous,
+          [acceptanceTimelineRunId]: existingProjection,
+        }));
+      }
+    }
     if (
       !eligibility.shouldStart ||
       !acceptancePreviewRef.current.trim() ||
       testedRunIdRef.current === runId
     ) return;
 
-    const acceptanceRunId = runId;
-    testedRunIdRef.current = acceptanceRunId;
+    const acceptanceCodeRunId = runId;
+    // code-run-* is the browser candidate revision; agent-run-* is the
+    // durable conversation/timeline lane. Keep both identities explicit so a
+    // verifier result cannot disappear under a different request.
+    const acceptanceLaneId = acceptanceTimelineRunId ?? acceptanceCodeRunId;
+    testedRunIdRef.current = acceptanceCodeRunId;
+    activeAcceptanceRunIdRef.current = acceptanceLaneId;
     const controller = new AbortController();
     acceptanceControllerRef.current = controller;
-    setAcceptanceState('running');
-    setAcceptanceElapsedSeconds(0);
-    setAcceptanceReport(null);
+    setAcceptanceByRun((previous) => ({
+      ...previous,
+      [acceptanceLaneId]: { ...IDLE_ACCEPTANCE, state: 'running' },
+    }));
     const previewHtml = acceptancePreviewRef.current;
     const expectation = promptsRef.current.at(-1)?.trim() || '验证页面主要交互可以正常工作';
 
     void runCodeAcceptanceTest({
       user_request: expectation,
       preview_html: previewHtml,
-      verification_run_id: acceptanceRunId,
+      verification_run_id: acceptanceCodeRunId,
       console_entries: consoleEntriesRef.current.map((entry) => ({
         level: entry.level,
         text: entry.args.join(' '),
       })),
     }, controller.signal).then((report) => {
-      if (controller.signal.aborted || testedRunIdRef.current !== acceptanceRunId) return;
-      setAcceptanceReport(report);
+      if (controller.signal.aborted || testedRunIdRef.current !== acceptanceCodeRunId) return;
+      setAcceptanceByRun((previous) => ({
+        ...previous,
+        [acceptanceLaneId]: {
+          ...(previous[acceptanceLaneId] ?? IDLE_ACCEPTANCE),
+          report,
+          state: report.blocked ? 'blocked' : report.passed ? 'passed' : 'failed',
+        },
+      }));
+      const observedEntries = consoleEntriesRef.current.slice(-100);
+      onAcceptanceFinishedRef.current?.({
+        codeRunId: acceptanceCodeRunId,
+        verificationRunId: acceptanceLaneId,
+        passed: report.passed,
+        blocked: report.blocked,
+        report,
+        consoleEntries: observedEntries,
+      });
       if (report.blocked) {
-        setAcceptanceState('blocked');
         return;
       }
       if (report.passed) {
-        setAcceptanceState('passed');
         return;
       }
-      setAcceptanceState('failed');
       const failedAssertions = report.assertions
         ?.filter((item) => !item.passed)
         .map((item) => `${item.assertion.kind} ${item.assertion.selector}: ${item.actual}`)
         .join('\n');
+      const deterministicFindings = report.deterministic_findings
+        ?.map((item) => `${item.kind} ${item.selector}: ${item.actual}`)
+        .join('\n');
+      const pageErrors = report.page_errors
+        ?.map((item) => `${item.type}: ${item.text}`)
+        .join('\n');
       onRuntimeErrorRef.current({
         type: 'code-sandbox-runtime-error',
-        runId: acceptanceRunId,
-        source: 'python-playwright-test-agent',
+        runId: acceptanceCodeRunId,
+        source: 'deterministic-browser-verifier',
         message: [
-          `用户验收未通过：${report.plan?.summary ?? expectation}`,
+          `${report.deterministic ? '确定性浏览器验证未通过' : '用户验收未通过'}：${report.plan?.summary ?? expectation}`,
           failedAssertions,
+          deterministicFindings,
+          pageErrors,
+          report.page_text ? `页面可见文本：${report.page_text}` : '',
           report.diagnostic,
           report.runner_stderr,
           report.network_failures?.length
@@ -911,21 +1025,33 @@ export default function CodeWorkspace({
       if (controller.signal.aborted) {
         if (acceptanceControllerRef.current === controller) {
           acceptanceControllerRef.current = null;
-          setAcceptanceState('blocked');
-          setAcceptanceReport({
-            passed: false,
-            blocked: true,
-            diagnostic: '测试请求被预览状态更新中断，已安全终止。',
-          });
+          setAcceptanceByRun((previous) => ({
+            ...previous,
+            [acceptanceLaneId]: {
+              ...(previous[acceptanceLaneId] ?? IDLE_ACCEPTANCE),
+              state: 'blocked',
+              report: {
+                passed: false,
+                blocked: true,
+                diagnostic: '测试请求被预览状态更新中断，已安全终止。',
+              },
+            },
+          }));
         }
         return;
       }
-      setAcceptanceState('blocked');
-      setAcceptanceReport({
-        passed: false,
-        blocked: true,
-        diagnostic: error instanceof Error ? error.message : '测试 Agent 调用失败',
-      });
+      setAcceptanceByRun((previous) => ({
+        ...previous,
+        [acceptanceLaneId]: {
+          ...(previous[acceptanceLaneId] ?? IDLE_ACCEPTANCE),
+          state: 'blocked',
+          report: {
+            passed: false,
+            blocked: true,
+            diagnostic: error instanceof Error ? error.message : '浏览器验证器调用失败',
+          },
+        },
+      }));
     }).finally(() => {
       if (acceptanceControllerRef.current === controller) {
         acceptanceControllerRef.current = null;
@@ -933,35 +1059,48 @@ export default function CodeWorkspace({
     });
 
     return () => controller.abort();
-  }, [runId, status.state]);
+  }, [agentRuns.length, runId, status.state]);
 
   useEffect(() => {
-    if (acceptanceState !== 'running') return;
+    const acceptanceRunId = activeAcceptanceRunIdRef.current;
+    if (!acceptanceRunId || acceptanceByRunRef.current[acceptanceRunId]?.state !== 'running') return;
     const startedAt = Date.now();
     const intervalId = window.setInterval(() => {
-      setAcceptanceElapsedSeconds(Math.min(
-        Math.floor((Date.now() - startedAt) / 1000),
-        ACCEPTANCE_UI_TIMEOUT_MS / 1_000,
-      ));
+      setAcceptanceByRun((previous) => ({
+        ...previous,
+        [acceptanceRunId]: {
+          ...(previous[acceptanceRunId] ?? IDLE_ACCEPTANCE),
+          elapsedSeconds: Math.min(
+            Math.floor((Date.now() - startedAt) / 1000),
+            ACCEPTANCE_UI_TIMEOUT_MS / 1_000,
+          ),
+        },
+      }));
     }, 1_000);
     const timeoutId = window.setTimeout(() => {
       const activeController = acceptanceControllerRef.current;
       if (!activeController) return;
       activeController.abort();
       acceptanceControllerRef.current = null;
-      setAcceptanceElapsedSeconds(ACCEPTANCE_UI_TIMEOUT_MS / 1_000);
-      setAcceptanceState('blocked');
-      setAcceptanceReport({
-        passed: false,
-        blocked: true,
-        diagnostic: '测试状态超过 50 秒，已由界面看门狗强制终止。',
-      });
+      setAcceptanceByRun((previous) => ({
+        ...previous,
+        [acceptanceRunId]: {
+          ...(previous[acceptanceRunId] ?? IDLE_ACCEPTANCE),
+          state: 'blocked',
+          elapsedSeconds: ACCEPTANCE_UI_TIMEOUT_MS / 1_000,
+          report: {
+            passed: false,
+            blocked: true,
+            diagnostic: '测试状态超过 50 秒，已由界面看门狗强制终止。',
+          },
+        },
+      }));
     }, ACCEPTANCE_UI_TIMEOUT_MS);
     return () => {
       window.clearInterval(intervalId);
       window.clearTimeout(timeoutId);
     };
-  }, [acceptanceState]);
+  }, [activeAcceptanceState]);
 
   useEffect(() => {
     const latest = agentRuns.at(-1);
@@ -1009,12 +1148,22 @@ export default function CodeWorkspace({
   const stopAgentLoop = () => {
     acceptanceControllerRef.current?.abort();
     acceptanceControllerRef.current = null;
-    setAcceptanceState('blocked');
-    setAcceptanceReport({
-      passed: false,
-      blocked: true,
-      diagnostic: '已由用户终止模型对话与自动测试修复循环。',
-    });
+    const acceptanceRunId = activeAcceptanceRunIdRef.current;
+    if (acceptanceRunId) {
+      setAcceptanceByRun((previous) => ({
+        ...previous,
+        [acceptanceRunId]: {
+          ...(previous[acceptanceRunId] ?? IDLE_ACCEPTANCE),
+          state: 'blocked',
+          report: {
+            passed: false,
+            blocked: true,
+            diagnostic: '已由用户终止模型对话与自动测试修复循环。',
+          },
+        },
+      }));
+      activeAcceptanceRunIdRef.current = '';
+    }
     onStopAutoRepair();
   };
 
@@ -1160,21 +1309,21 @@ export default function CodeWorkspace({
             aria-live="polite"
             className="mr-1 text-xs text-slate-500"
           >
-            {acceptanceState === 'running' &&
-              `测试 Agent 验收中 · 已用 ${acceptanceElapsedSeconds} 秒，最多自动校正 1 次`}
-            {acceptanceState !== 'running' && status.state === 'generating' &&
+            {latestAcceptance.state === 'running' &&
+              `浏览器验证中 · 已用 ${latestAcceptance.elapsedSeconds} 秒，完成后才会提交运行时补丁`}
+            {latestAcceptance.state !== 'running' && status.state === 'generating' &&
               `正在生成 · ${status.charCount.toLocaleString()} 字符`}
-            {acceptanceState !== 'running' && status.state === 'modifying' &&
+            {latestAcceptance.state !== 'running' && status.state === 'modifying' &&
               `正在增量修改 · ${status.charCount.toLocaleString()} 字符`}
-            {acceptanceState !== 'running' && status.state === 'checking' && '正在检测运行时错误...'}
-            {acceptanceState !== 'running' && status.state === 'repairing' &&
+            {latestAcceptance.state !== 'running' && status.state === 'checking' && '正在检测运行时错误...'}
+            {latestAcceptance.state !== 'running' && status.state === 'repairing' &&
               `自动修复第 ${status.attempt} 次 · ${status.charCount.toLocaleString()} 字符`}
-            {acceptanceState !== 'running' && status.state === 'done' &&
+            {latestAcceptance.state !== 'running' && status.state === 'done' &&
               (status.repairCount > 0
                 ? `运行正常 · 已自动修复 ${status.repairCount} 次`
                 : `生成完成 · ${status.charCount.toLocaleString()} 字符`)}
-            {acceptanceState !== 'running' && status.state === 'error' && status.message}
-            {acceptanceState !== 'running' && status.state === 'idle' && '等待需求'}
+            {latestAcceptance.state !== 'running' && status.state === 'error' && status.message}
+            {latestAcceptance.state !== 'running' && status.state === 'idle' && '等待需求'}
           </div>
           {status.state === 'repairing' && (
             <button
@@ -1185,7 +1334,7 @@ export default function CodeWorkspace({
               终止自动修复
             </button>
           )}
-          {acceptanceState === 'running' && (
+          {latestAcceptance.state === 'running' && (
             <button
               type="button"
               onClick={stopAgentLoop}
@@ -1419,16 +1568,19 @@ export default function CodeWorkspace({
                         <CodeAgentTimeline
                           events={getTimelineEvents(run)}
                           runId={run.id}
-                          isRunning={run.trace.isRunning || (run.id === latestRunId && (
-                            acceptanceState === 'running' ||
+                          isRunning={run.trace.isRunning || (
+                            acceptanceByRun[run.id]?.state === 'running' ||
+                            (run.id === latestRunId && (
                             status.state === 'generating' ||
                             status.state === 'modifying' ||
                             status.state === 'checking' ||
                             status.state === 'repairing'
-                          ))}
-                          acceptanceState={run.id === latestRunId ? acceptanceState : 'idle'}
-                          acceptanceReport={run.id === latestRunId ? acceptanceReport : null}
-                          acceptanceElapsedSeconds={run.id === latestRunId ? acceptanceElapsedSeconds : 0}
+                            ))
+                          )}
+                          acceptanceState={(acceptanceByRun[run.id] ?? IDLE_ACCEPTANCE).state}
+                          acceptanceReport={(acceptanceByRun[run.id] ?? IDLE_ACCEPTANCE).report}
+                          acceptanceElapsedSeconds={(acceptanceByRun[run.id] ?? IDLE_ACCEPTANCE).elapsedSeconds}
+                          taskPlan={run.trace.taskPlan}
                           onOpenDiff={(path) => {
                             setActiveFile(path);
                             setActiveView('source');
@@ -1440,6 +1592,19 @@ export default function CodeWorkspace({
                 );
               })}
             </ol>
+          )}
+
+          {conversationAnswer && (
+            <article className="mt-4 rounded-2xl border border-slate-200 bg-white px-3.5 py-3 text-sm leading-6 text-slate-700 shadow-sm">
+              <div className="mb-1.5 text-xs font-medium text-slate-400">
+                {conversationAnswer.kind === 'clarify' ? '需要确认' : '只读回答'}
+              </div>
+              {conversationAnswer.content.trim() ? (
+                <MarkdownMessage content={conversationAnswer.content} density="compact" />
+              ) : (
+                <span className="text-slate-400">正在整理回答…</span>
+              )}
+            </article>
           )}
 
             </>

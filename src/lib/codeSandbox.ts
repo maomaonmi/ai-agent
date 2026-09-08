@@ -14,7 +14,14 @@ export interface RuntimeErrorReport {
   line?: number;
   column?: number;
   stack?: string;
-  consoleEntries?: Array<{ level: string; text: string }>;
+  consoleEntries?: Array<{
+    level: string;
+    text: string;
+    source?: string;
+    line?: number;
+    column?: number;
+    stack?: string;
+  }>;
 }
 
 export interface RepairLog {
@@ -24,7 +31,14 @@ export interface RepairLog {
   diagnostic?: string;
   modelOutput?: string;
   fileChanges?: Array<{ path: string; additions: number; deletions: number }>;
-  consoleEntries?: Array<{ level: string; text: string }>;
+  consoleEntries?: Array<{
+    level: string;
+    text: string;
+    source?: string;
+    line?: number;
+    column?: number;
+    stack?: string;
+  }>;
 }
 
 export interface SelectedElementContext {
