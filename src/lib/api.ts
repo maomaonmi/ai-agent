@@ -3308,6 +3308,53 @@ export interface AcceptanceProgressEvent {
   report?: CodeAcceptanceReport;
 }
 
+async function replayAcceptanceProgress(
+  runId: string,
+  afterSequence: number,
+  onEvent: (event: AcceptanceProgressEvent) => void,
+  signal?: AbortSignal,
+): Promise<number> {
+  const query = new URLSearchParams({ after: String(Math.max(0, afterSequence)) });
+  const response = await fetch(
+    `${API_BASE_URL}/api/code/events/${encodeURIComponent(runId)}?${query.toString()}`,
+    { headers: { Accept: 'text/event-stream' }, signal },
+  );
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('验收事件重放响应为空。');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let delivered = 0;
+  const seen = new Set<string>();
+  const handleFrame = (frame: string) => {
+    const data = frame
+      .split('\n')
+      .find((line) => line.startsWith('data:'))
+      ?.slice(5)
+      .trim();
+    if (!data) return;
+    const event = JSON.parse(data) as AcceptanceProgressEvent & { event_id?: string };
+    if (event.event_id && seen.has(event.event_id)) return;
+    if (event.event_id) seen.add(event.event_id);
+    delivered += 1;
+    onEvent(event);
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    const frames = buffer.split('\n\n');
+    buffer = frames.pop() ?? '';
+    for (const frame of frames) handleFrame(frame);
+    if (done) {
+      if (buffer.trim()) handleFrame(buffer);
+      break;
+    }
+  }
+  return delivered;
+}
+
 export async function runCodeAcceptanceTest(
   body: {
     user_request: string;
@@ -3332,6 +3379,9 @@ export async function runCodeAcceptanceTest(
     didTimeout = true;
     timeoutController.abort();
   }, ACCEPTANCE_REQUEST_TIMEOUT_MS);
+  let report: CodeAcceptanceReport | null = null;
+  let lastSequence = 0;
+  let receivedTerminalError = false;
 
   try {
     const response = await fetch(`${API_BASE_URL}/api/code/test/stream`, {
@@ -3345,14 +3395,19 @@ export async function runCodeAcceptanceTest(
     if (!reader) throw new Error('浏览器验证响应为空。');
     const decoder = new TextDecoder();
     let buffer = '';
-    let report: CodeAcceptanceReport | null = null;
     const handleFrame = (frame: string) => {
       const data = frame.split('\n').find((line) => line.startsWith('data:'))?.slice(5).trim();
       if (!data) return;
       const event = JSON.parse(data) as AcceptanceProgressEvent;
+      if (typeof event.sequence === 'number') {
+        lastSequence = Math.max(lastSequence, event.sequence);
+      }
       onProgress?.(event);
       if (event.event === 'completed' && event.report) report = event.report;
-      if (event.event === 'error') throw new Error(event.detail || event.message);
+      if (event.event === 'error') {
+        receivedTerminalError = true;
+        throw new Error(event.detail || event.message);
+      }
     };
     while (true) {
       const { done, value } = await reader.read();
@@ -3370,6 +3425,29 @@ export async function runCodeAcceptanceTest(
   } catch (error) {
     if (didTimeout) {
       throw new Error(`测试请求超过 ${ACCEPTANCE_REQUEST_TIMEOUT_MS / 1000} 秒，已自动终止。`);
+    }
+    if (!signal?.aborted && !receivedTerminalError) {
+      try {
+        const recovered = await replayAcceptanceProgress(
+          body.run_id?.trim() || body.verification_run_id,
+          lastSequence,
+          (event) => {
+            if (typeof event.sequence === 'number') {
+              lastSequence = Math.max(lastSequence, event.sequence);
+            }
+            onProgress?.(event);
+            if (event.event === 'completed' && event.report) report = event.report;
+            if (event.event === 'error') {
+              receivedTerminalError = true;
+              throw new Error(event.detail || event.message);
+            }
+          },
+          signal,
+        );
+        if (recovered > 0 && report) return report;
+      } catch (replayError) {
+        console.log('[sse-diag] acceptance durable replay unavailable:', replayError);
+      }
     }
     throw error;
   } finally {
