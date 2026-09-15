@@ -3232,6 +3232,57 @@ export async function verifyFullstackRuntime(
   return response.json() as Promise<RuntimeVerificationResponse>;
 }
 
+/**
+ * Recover only the missing durable events for a run. This endpoint is
+ * read-only: reconnecting never resubmits the mutation-producing POST.
+ */
+export async function replayCodeEvents(
+  runId: string,
+  afterSequence: number,
+  onEvent: (event: CodeGenerationEvent) => void,
+  signal?: AbortSignal,
+): Promise<number> {
+  const query = new URLSearchParams({ after: String(Math.max(0, afterSequence)) });
+  const response = await fetch(
+    `${API_BASE_URL}/api/code/events/${encodeURIComponent(runId)}?${query.toString()}`,
+    { headers: { Accept: 'text/event-stream' }, signal },
+  );
+  if (!response.ok) throw new Error(await parseApiError(response));
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('代码事件重放响应为空。');
+
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let delivered = 0;
+  const eventBuffer = new CodeAgentEventBuffer(runId);
+  const handleFrame = (frame: string) => {
+    const data = frame
+      .split('\n')
+      .find((line) => line.startsWith('data:'))
+      ?.slice(5)
+      .trim();
+    if (!data) return;
+    const parsed = JSON.parse(data) as CodeGenerationEvent;
+    for (const event of eventBuffer.accept(parsed)) {
+      delivered += 1;
+      onEvent(event);
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    const frames = buffer.split('\n\n');
+    buffer = frames.pop() ?? '';
+    for (const frame of frames) handleFrame(frame);
+    if (done) {
+      if (buffer.trim()) handleFrame(buffer);
+      break;
+    }
+  }
+  return delivered;
+}
+
 export async function fixFullstackCode(
   vfs: Record<string, string>,
   error: string,
@@ -3395,6 +3446,28 @@ async function streamCodeRequest(
     }
   } catch (error) {
     console.log('[sse-diag] stream error at frames=%d:', frameCount, error);
+    // The POST is never retried: it may have already executed tools or
+    // written a candidate. Ask the durable read-only ledger for only events
+    // after the last accepted cursor, then let the event buffer deduplicate.
+    if (!signal?.aborted && typeof body.run_id === 'string' && body.run_id.trim()) {
+      try {
+        const recovered = await replayCodeEvents(
+          body.run_id,
+          eventBuffer.lastAcceptedSequence,
+          (event) => {
+            frameCount += 1;
+            onEvent(event);
+          },
+          signal,
+        );
+        if (recovered > 0) {
+          console.log('[sse-diag] recovered events=%d after=%d', recovered, eventBuffer.lastAcceptedSequence);
+          return;
+        }
+      } catch (replayError) {
+        console.log('[sse-diag] durable replay unavailable:', replayError);
+      }
+    }
     throw error;
   }
 }

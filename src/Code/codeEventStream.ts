@@ -14,6 +14,10 @@ export class CodeAgentEventBuffer {
     this.expectedRunId = expectedRunId;
   }
 
+  get lastAcceptedSequence(): number {
+    return this.lastSequence;
+  }
+
   accept(event: CodeGenerationEvent): CodeGenerationEvent[] {
     if (this.expectedRunId && event.run_id && event.run_id !== this.expectedRunId) {
       return [];
