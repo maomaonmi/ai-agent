@@ -1384,6 +1384,8 @@ export interface TestAgentContractReplanEvent {
   done: boolean;
   run_id?: string;
   verification_session_id?: string;
+  candidate_revision?: string;
+  affected_obligations?: string[];
   metadata?: Record<string, unknown>;
 }
 

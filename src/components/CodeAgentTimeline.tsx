@@ -310,9 +310,12 @@ function TestAgentEvidenceCard({ event, onOpenTerminal }: {
   const command = formatCommand(report.command);
   const stdout = formatOutput(report.stdout ?? report.runner_stdout);
   const stderr = formatOutput(report.stderr ?? report.runner_stderr);
+  const artifact = formatOutput(report.artifact);
+  const candidateRevision = formatOutput(report.candidate_revision);
   const contract = report.measurement_contract ?? report.acceptance_goal;
+  const contractText = contract == null ? '' : formatEvidence(contract);
   const hasDetails = Boolean(
-    command || stdout || stderr || report.returncode != null || report.artifact || report.candidate_revision || contract,
+    command || stdout || stderr || report.returncode != null || artifact || candidateRevision || contractText,
   );
   const status = String(event.status || report.status || 'scheduled');
   const shouldOpen = status === 'failed' || status === 'blocked';
@@ -327,16 +330,16 @@ function TestAgentEvidenceCard({ event, onOpenTerminal }: {
           {!hasDetails && <span className="shrink-0 text-[11px] text-slate-400">等待结果</span>}
         </summary>
         <div className="mt-2 space-y-2 pl-5 text-[11px] leading-5 text-slate-600">
-          {report.artifact && (
-            <div className="text-slate-500">脚本：<code className="font-mono text-slate-700">{String(report.artifact)}</code></div>
+          {artifact && (
+            <div className="text-slate-500">脚本：<code className="font-mono text-slate-700">{artifact}</code></div>
           )}
-          {report.candidate_revision && (
-            <div className="text-slate-500">候选版本：<code className="font-mono text-slate-700">{String(report.candidate_revision)}</code></div>
+          {candidateRevision && (
+            <div className="text-slate-500">候选版本：<code className="font-mono text-slate-700">{candidateRevision}</code></div>
           )}
-          {contract && (
+          {contractText && (
             <div>
               <div className="mb-1 font-medium text-slate-500">验收契约</div>
-              <pre tabIndex={0} aria-label="Runtime 验收契约" className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-200 bg-slate-50 px-2 py-1.5 font-mono text-[11px] leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500">{formatEvidence(contract)}</pre>
+              <pre tabIndex={0} aria-label="Runtime 验收契约" className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-200 bg-slate-50 px-2 py-1.5 font-mono text-[11px] leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500">{contractText}</pre>
             </div>
           )}
           {command && (
