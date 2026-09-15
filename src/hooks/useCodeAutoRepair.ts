@@ -9,6 +9,7 @@ import {
   generateWebCode,
   modifyFullstackCode,
   modifyWebCode,
+  persistCodeAgentTelemetry,
   requestCodeContextCompaction,
   runCodeAcceptanceTest,
   verifyFullstackRuntime,
@@ -29,11 +30,20 @@ import {
   type TokenUsageEvent,
   type McpMode,
   type RuntimeVerificationEvidence,
+  type DeterministicBrowserFinding,
+  type RuntimeReadEvidence,
+  type AcceptanceGoalContract,
 } from '../lib/api';
 import { appendTimelineEvent, completeTimelineEvent } from '../Code/agentTimeline';
 import { classifyCodeGenerationEvent, summarizeAgentLoopRound } from '../Code/agentEventRouting';
 import { applyCodeTaskEvent } from '../Code/codeTaskPlan';
-import { resetAgentRuns } from '../Code/agentRunLifecycle';
+import { createRuntimeRepairRunId, rebindRuntimeEvidenceToRun } from '../Code/agentRunIdentity';
+import {
+  bindRuntimeVerificationCandidate,
+  projectRuntimeVerificationCandidate,
+  resetAgentRuns,
+  settleAgentRunAsSuperseded,
+} from '../Code/agentRunLifecycle';
 import { canStartRuntimeRepair } from '../Code/acceptancePolicy';
 import {
   bundleFullstackVFS,
@@ -264,16 +274,16 @@ export default function useCodeAutoRepair() {
   const [agentTrace, setAgentTrace] = useState<CodeAgentTrace>(EMPTY_AGENT_TRACE);
   const [agentRuns, setAgentRuns] = useState<CodeAgentRun[]>([]);
   const [terminalWorkspaceId] = useState<string>(() => {
-    // Why: 前端单浏览器窗口内的所有 agent run 共享一个 workspace_id（简单场景就"default"也行），
-    // 但不同 tab 需要区分，所以在 localStorage 里给每个浏览器 tab 持久化一个 `terminal-ws-xxx`，
-    // 这样用户开两个窗口各自 agent 的终端不会乱。
-    const KEY = 'terminal-workspace-id';
+    // sessionStorage is scoped to one browser tab. localStorage made two tabs
+    // share the same workspace key, so their AgentLoop PTYs and proposals
+    // could be rendered in one terminal panel.
+    const KEY = 'terminal-workspace-id-v2';
     try {
-      const existing = window.localStorage.getItem(KEY);
+      const existing = window.sessionStorage.getItem(KEY);
       if (existing) return existing;
     } catch { /* noop */ }
     const id = `ws-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    try { window.localStorage.setItem(KEY, id); } catch { /* noop */ }
+    try { window.sessionStorage.setItem(KEY, id); } catch { /* noop */ }
     return id;
   });
   // 会话级（本次 tab session）的信任白名单，按 runId 分组，关页面就失效。
@@ -308,6 +318,17 @@ export default function useCodeAutoRepair() {
   // Why: MCP 配置引用——与 sessionIdRef 同模式，自动修复链路（fixWebCode/fixFullstackCode）
   //   也需要携带 mcp_mode/mcp_server_ids，否则修复请求的 MCP 上下文与用户设定不一致。
   const mcpRef = useRef<McpRequestContext | null>(null);
+
+  const persistRunTelemetry = useCallback((runId: string, telemetry: {
+    tokenUsage?: CodeAgentTrace['tokenUsage'];
+    contextUsage?: ContextUsageEvent;
+  }) => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId || sessionId === '__global__' || !runId) return;
+    // Telemetry must not make an otherwise successful AgentLoop fail in the UI.
+    // The durable snapshot remains the fallback when the server is unavailable.
+    void persistCodeAgentTelemetry(sessionId, runId, telemetry).catch(() => undefined);
+  }, []);
 
   const commitAgentTrace = useCallback((update: (previous: CodeAgentTrace) => CodeAgentTrace) => {
     const next = update(agentTraceRef.current);
@@ -407,19 +428,25 @@ export default function useCodeAutoRepair() {
       scopeSource?: 'orchestrator' | 'inherited' | 'explicit';
       allowedNextAction?: string;
       runtimeEvidence?: RuntimeVerificationEvidence;
+      acceptanceGoal?: AcceptanceGoalContract;
+      verificationSessionId?: string;
     } = {},
   ) => {
     hasAgentOutputRef.current = false;
     const resumedRun = options.resumeRun;
-    const id = resumedRun?.id ?? `agent-run-${Date.now()}-${sequenceRef.current + 1}`;
-    timelineSequenceRef.current = resumedRun
-      ? Math.max(0, ...(resumedRun.trace.timeline ?? []).map((event) => event.sequence))
-      : 0;
+    // Every user turn owns a fresh execution identity. A resume references the
+    // prior run as evidence; it must never append rounds to the old prompt or
+    // reuse its runtime-candidate key.
+    const id = `agent-run-${Date.now()}-${sequenceRef.current + 1}`;
+    timelineSequenceRef.current = 0;
     thinkingStartedAtRef.current = {};
     currentAgentRunIdRef.current = id;
     const trace: CodeAgentTrace = {
-      ...(resumedRun?.trace ?? EMPTY_AGENT_TRACE),
-      steps: [...(resumedRun?.trace.steps ?? []), message],
+      ...EMPTY_AGENT_TRACE,
+      taskPlan: resumedRun?.trace.taskPlan,
+      fileChanges: resumedRun?.trace.fileChanges,
+      runtimeReadEvidence: resumedRun?.trace.runtimeReadEvidence,
+      steps: [message],
       phase: resumedRun ? 'resuming' : 'analyzing',
       isRunning: true,
       status: 'running',
@@ -428,14 +455,19 @@ export default function useCodeAutoRepair() {
       scopeVersion: options.scopeVersion ?? resumedRun?.trace.scopeVersion,
       scopeSource: options.scopeSource ?? resumedRun?.trace.scopeSource,
       allowedNextAction: options.allowedNextAction ?? resumedRun?.trace.allowedNextAction,
-      runtimeEvidence: options.runtimeEvidence ?? resumedRun?.trace.runtimeEvidence,
+      runtimeEvidence: options.runtimeEvidence
+        ? rebindRuntimeEvidenceToRun(options.runtimeEvidence, id)
+        : undefined,
+      acceptanceGoal: options.acceptanceGoal ?? resumedRun?.trace.acceptanceGoal,
+      verificationSessionId: options.verificationSessionId
+        ?? resumedRun?.trace.verificationSessionId
+        ?? id,
     };
     agentTraceRef.current = trace;
     setAgentTrace(trace);
-    setAgentRuns((previous) => resumedRun
-      ? previous.map((run) => run.id === id ? { ...run, request, projectKind, trace } : run)
-      : [...previous, {
+    setAgentRuns((previous) => [...previous, {
           id,
+          resumedFromRunId: resumedRun?.id,
           request,
           projectKind,
           createdAt: new Date().toISOString(),
@@ -567,18 +599,103 @@ export default function useCodeAutoRepair() {
       );
       return true;
     }
+    if (event.type === 'test_agent_execution') {
+      const executionEvent = event;
+      const lifecycleId = executionEvent.verification_session_id
+        ?? (typeof executionEvent.metadata?.verification_session_id === 'string'
+          ? executionEvent.metadata.verification_session_id
+          : undefined)
+        ?? currentAgentRunIdRef.current;
+      const executionRunId = executionEvent.run_id ?? currentAgentRunIdRef.current;
+      appendActivity(
+        executionEvent.content,
+        executionEvent.done,
+        'verification',
+        executionEvent.status,
+        {
+          runId: executionRunId,
+          actorId: `test:${lifecycleId}`,
+          actorKind: 'test',
+          eventId: executionEvent.source_event_id ?? executionEvent.event_id
+            ?? `test-agent-execution:${lifecycleId}:${executionEvent.candidate_revision ?? 'candidate'}`,
+          timestampMs: executionEvent.timestamp_ms,
+          metadata: {
+            ...executionEvent.metadata,
+            source: 'test-agent-live',
+            eventType: executionEvent.type,
+            verificationSessionId: lifecycleId,
+            lifecycleEvent: executionEvent.metadata?.lifecycle_event,
+            candidateRevision: executionEvent.candidate_revision
+              ?? executionEvent.metadata?.candidate_revision,
+          },
+        },
+      );
+      commitAgentTrace((previous) => ({
+        ...previous,
+        verificationSessionId: lifecycleId,
+      }));
+      return true;
+    }
+    if (
+      event.type === 'test_agent_checkpoint'
+      || event.type === 'test_agent_result'
+      || event.type === 'test_agent_contract_replan'
+    ) {
+      const testEvent = event;
+      const lifecycleId = testEvent.verification_session_id
+        ?? (typeof testEvent.metadata?.verification_session_id === 'string'
+          ? testEvent.metadata.verification_session_id
+          : undefined)
+        ?? currentAgentRunIdRef.current;
+      const testRunId = testEvent.run_id ?? currentAgentRunIdRef.current;
+      const sourceEventId = testEvent.source_event_id ?? testEvent.event_id;
+      appendActivity(
+        testEvent.content,
+        testEvent.done,
+        'verification',
+        testEvent.status,
+        {
+          runId: testRunId,
+          actorId: `test:${lifecycleId}`,
+          actorKind: 'test',
+          eventId: sourceEventId ?? `test-agent:${lifecycleId}:${testEvent.type}:${testEvent.phase}`,
+          timestampMs: testEvent.timestamp_ms,
+          metadata: {
+            ...testEvent.metadata,
+            source: 'test-agent-live',
+            eventType: testEvent.type,
+            verificationSessionId: lifecycleId,
+            lifecycleEvent: testEvent.metadata?.lifecycle_event,
+            candidateRevision: testEvent.candidate_revision
+              ?? testEvent.metadata?.candidate_revision,
+            affectedObligations: testEvent.affected_obligations
+              ?? testEvent.metadata?.affected_obligations,
+          },
+        },
+      );
+      commitAgentTrace((previous) => ({
+        ...previous,
+        verificationSessionId: lifecycleId,
+      }));
+      return true;
+    }
     if (event.type === 'context_usage') {
       const contextEvent = event as ContextUsageEvent;
       // 上下文是运行指标，不再为每次 measured/compressing 事件创建时间线卡片；
       // 底部 Token 状态栏消费同一份 trace.contextUsage，实时显示最新值。
       if (actorKind === 'main') {
         commitAgentTrace((previous) => ({ ...previous, contextUsage: contextEvent }));
+        persistRunTelemetry(
+          contextEvent.run_id ?? currentAgentRunIdRef.current,
+          { contextUsage: contextEvent },
+        );
       }
       return true;
     }
     if (event.type === 'token_usage') {
       const usageEvent = event as TokenUsageEvent;
       commitAgentTrace((previous) => ({ ...previous, tokenUsage: usageEvent.usage }));
+      persistRunTelemetry(usageEvent.run_id ?? currentAgentRunIdRef.current, { tokenUsage: usageEvent.usage });
       return true;
     }
     if (event.type === 'hook_event') {
@@ -611,7 +728,16 @@ export default function useCodeAutoRepair() {
         stripEnvelopeFromAnswerText(event.content, eventIntent);
       const isAnswerIntent = resolvedIntent === 'answer' || resolvedIntent === 'ask_clarification';
       appendActivity(resolvedContent || event.content, event.done, 'summary', resolvedIntent);
-      if (actorKind !== 'main') return true;
+      if (actorKind !== 'main') {
+        // Runtime-fix streams use the ops actor for their child timeline, but
+        // the candidate identity still belongs to that same AgentLoop run.
+        // Preserve it so the subsequent browser check can address the right
+        // server-side candidate instead of leaving the child unbound.
+        if (actorKind === 'ops') {
+          commitAgentTrace((previous) => bindRuntimeVerificationCandidate(previous, event));
+        }
+        return true;
+      }
       commitAgentTrace((previous) => {
         const previousSummary = previous.summary ?? '';
         const incremental = event.done ? resolvedContent : `${previousSummary}${event.content}`;
@@ -630,18 +756,20 @@ export default function useCodeAutoRepair() {
               ? 'awaiting_runtime_verification'
             : event.done ? 'completed' : 'running',
           resumeEligible: event.resume_eligible ?? previous.resumeEligible,
-          runtimeVerification: event.run_id && event.base_revision && event.candidate_revision
-            ? {
-                runId: event.run_id,
-                baseRevision: event.base_revision,
-                candidateRevision: event.candidate_revision,
-              }
-            : previous.runtimeVerification,
+          // Revision fields are also present on ordinary completed summaries
+          // for audit/display purposes. Only an explicit awaiting status
+          // represents a server-side candidate that runtime-verify can commit.
+          runtimeVerification: projectRuntimeVerificationCandidate(
+            previous.runtimeVerification,
+            event,
+          ),
           activeScope: event.active_scope ?? previous.activeScope,
           scopeVersion: event.scope_version ?? previous.scopeVersion,
           scopeSource: event.scope_source ?? previous.scopeSource,
           allowedNextAction: event.allowed_next_action ?? previous.allowedNextAction,
           runtimeEvidence: event.runtime_evidence ?? previous.runtimeEvidence,
+          verificationSessionId: event.verification_session_id
+            ?? previous.verificationSessionId,
         };
       });
       return true;
@@ -650,11 +778,22 @@ export default function useCodeAutoRepair() {
       console.log('[terminal][sse] terminal_proposal event:', event);
       appendActivity(event.command, false, 'tool_call', 'awaiting_approval');
       if (actorKind === 'main') {
+        const propositionId = String(
+          (event as { proposition_id?: string; id?: string }).proposition_id
+          ?? (event as { id?: string }).id
+          ?? `${event.run_id ?? 'unknown'}:${event.command}`,
+        );
         commitAgentTrace((previous) => ({
           ...previous,
           terminalProposals: [
-            ...(previous.terminalProposals ?? []).filter((item) => item.command !== event.command),
-            { command: event.command, reason: event.reason, expected_output_hint: event.expected_output_hint },
+            ...(previous.terminalProposals ?? []).filter((item) => item.proposition_id !== propositionId),
+            {
+              proposition_id: propositionId,
+              run_id: event.run_id,
+              command: event.command,
+              reason: event.reason,
+              expected_output_hint: event.expected_output_hint,
+            },
           ],
         }));
       }
@@ -667,6 +806,36 @@ export default function useCodeAutoRepair() {
           detail: { run_id: runId },
         }));
       } catch (e) { console.log('[terminal][sse] dispatch error:', e); }
+      return true;
+    }
+    if (event.type === 'sandbox_command_request') {
+      const source = event.source.slice(0, 240);
+      appendActivity(
+        source,
+        false,
+        'tool_call',
+        'sandbox_console_eval',
+        {
+          runId: event.run_id,
+          eventId: event.event_id,
+          metadata: {
+            source: 'browser-sandbox-bridge',
+            requestId: event.request_id,
+            command: event.source,
+            timeoutMs: event.timeout_ms,
+          },
+        },
+      );
+      // CodeWorkspace owns the iframe. The AgentLoop owns the wait/result
+      // state. This event is the explicit bridge between those two lanes.
+      window.dispatchEvent(new CustomEvent('code-sandbox-agent-command', {
+        detail: {
+          run_id: event.run_id,
+          request_id: event.request_id,
+          source: event.source,
+          timeout_ms: event.timeout_ms,
+        },
+      }));
       return true;
     }
     // Why: 任务拆解事件是 AgentLoop 状态投影，不是普通文字活动。
@@ -762,6 +931,8 @@ export default function useCodeAutoRepair() {
       ? 'status'
       : event.channel === 'answer'
         ? 'summary'
+        : event.phase === 'preflight'
+          ? 'preflight'
         : event.phase === 'thinking'
           ? 'thinking'
           : event.phase === 'validating'
@@ -779,7 +950,7 @@ export default function useCodeAutoRepair() {
     });
     if (actorKind !== 'main') return true;
     // 思考增量只进入 reasoning，不应阻止随后真正的代码/JSON 输出更新。
-    if (event.channel === 'output' && event.phase !== 'thinking') hasAgentOutputRef.current = true;
+    if (event.channel === 'output' && event.phase !== 'thinking' && event.phase !== 'preflight') hasAgentOutputRef.current = true;
     if (event.channel === 'answer') {
       commitAgentTrace((previous) => {
         const rawNextAnswer = event.done
@@ -814,6 +985,31 @@ export default function useCodeAutoRepair() {
       }));
       return true;
     }
+    // preflight 的 done=true 只表示短思路已经完成；真实 CodeAgent 仍在继续执行，
+    // 不能把这段摘要写入 output，也不能让整条任务提前进入结束态。
+    if (event.channel === 'output' && event.phase === 'preflight') {
+      commitAgentTrace((previous) => ({
+        ...previous,
+        phase: event.phase,
+        isRunning: true,
+      }));
+      return true;
+    }
+    const activityEvent = event as CodeAgentActivityEvent;
+    const rawReadEvidence = activityEvent.metadata?.runtime_read_evidence;
+    const readEvidence = rawReadEvidence && typeof rawReadEvidence === 'object'
+      ? rawReadEvidence as Partial<RuntimeReadEvidence> & { path?: string }
+      : null;
+    const readEvidencePath = typeof readEvidence?.path === 'string'
+      ? readEvidence.path.replaceAll('\\', '/').trim()
+      : '';
+    const readEvidenceContent = typeof readEvidence?.content === 'string'
+      ? readEvidence.content
+      : '';
+    const hasReadEvidence = Boolean(
+      readEvidencePath && readEvidenceContent && typeof readEvidence?.revision === 'string'
+        && readEvidence.revision,
+    );
     commitAgentTrace((previous) => {
       const scopePatch = {
         activeScope: activity.active_scope ?? previous.activeScope,
@@ -821,6 +1017,19 @@ export default function useCodeAutoRepair() {
         scopeSource: activity.scope_source ?? previous.scopeSource,
         allowedNextAction: activity.allowed_next_action ?? previous.allowedNextAction,
         runtimeEvidence: activity.runtime_evidence ?? previous.runtimeEvidence,
+        runtimeReadEvidence: hasReadEvidence
+          ? Object.fromEntries([
+              ...Object.entries(previous.runtimeReadEvidence ?? {})
+                .filter(([path]) => path !== readEvidencePath),
+              [readEvidencePath, {
+                content: readEvidenceContent.slice(0, 20_000),
+                revision: readEvidence?.revision,
+                source_run_id: typeof readEvidence?.source_run_id === 'string'
+                  ? readEvidence.source_run_id
+                  : undefined,
+              }],
+            ].slice(-12))
+          : previous.runtimeReadEvidence,
       };
       if (event.channel === 'output') {
         return {
@@ -845,7 +1054,7 @@ export default function useCodeAutoRepair() {
       };
     });
     return true;
-  }, [appendTimeline, commitAgentTrace]);
+  }, [appendTimeline, commitAgentTrace, persistRunTelemetry]);
 
   const recordFileChanges = useCallback((
     beforeCode: string,
@@ -909,6 +1118,15 @@ export default function useCodeAutoRepair() {
     const nextRunId = `code-run-${Date.now()}-${sequenceRef.current}`;
     runIdRef.current = nextRunId;
     setRunId(nextRunId);
+    commitAgentTrace((previous) => previous.runtimeVerification
+      ? {
+          ...previous,
+          runtimeVerification: {
+            ...previous.runtimeVerification,
+            browserRunId: nextRunId,
+          },
+        }
+      : previous);
     setStatus({ state: 'checking', attempt: repairCountRef.current });
 
     checkTimerRef.current = window.setTimeout(() => {
@@ -920,12 +1138,16 @@ export default function useCodeAutoRepair() {
       });
       runtimeCheckCompletedRef.current = true;
     }, ERROR_CHECK_WINDOW_MS);
-  }, [clearCheckTimer, updateCode]);
+  }, [clearCheckTimer, commitAgentTrace, updateCode]);
 
   const verifyRuntimeCandidate = useCallback(async (
     consoleEntries: SandboxConsoleEntry[],
     bootCompleted = true,
     deterministicVerifierPassed = false,
+    goalVerified = false,
+    goalAssertionIds: string[] = [],
+    deterministicFindings: DeterministicBrowserFinding[] = [],
+    verificationInconclusive = false,
   ) => {
     const candidate = agentTraceRef.current.runtimeVerification;
     if (!candidate) return null;
@@ -937,7 +1159,7 @@ export default function useCodeAutoRepair() {
       .filter((entry) => entry.level === 'error')
       .map((entry) => entry.text)
       .join('\n');
-    const attemptKey = `${candidate.runId}:${candidate.candidateRevision}:${bootCompleted}:${deterministicVerifierPassed}:${errorEvidence}`;
+    const attemptKey = `${candidate.runId}:${candidate.candidateRevision}:${bootCompleted}:${deterministicVerifierPassed}:${goalVerified}:${verificationInconclusive}:${goalAssertionIds.join(',')}:${errorEvidence}`;
     if (runtimeVerificationAttemptsRef.current.has(attemptKey)) return null;
     runtimeVerificationAttemptsRef.current.add(attemptKey);
     const changedFiles = (agentTraceRef.current.fileChanges ?? []).map((change) => change.path);
@@ -959,6 +1181,10 @@ export default function useCodeAutoRepair() {
         candidate_revision: candidate.candidateRevision,
         boot_completed: bootCompleted,
         deterministic_verifier_passed: deterministicVerifierPassed,
+        goal_verified: goalVerified,
+        verification_inconclusive: verificationInconclusive,
+        goal_assertion_ids: goalAssertionIds.slice(0, 20),
+        deterministic_findings: deterministicFindings.slice(0, 20),
         console_entries: evidence,
         target_error: targetError,
         changed_files: changedFiles,
@@ -982,6 +1208,8 @@ export default function useCodeAutoRepair() {
         metadata: {
           candidateRevision: candidate.candidateRevision,
           consoleErrorCount: result.console_errors?.length ?? 0,
+          goalVerified: result.runtime_evidence?.goal_verified ?? goalVerified,
+          goalAssertionIds: result.runtime_evidence?.goal_assertion_ids ?? goalAssertionIds,
           runtimeEvidence: result.runtime_evidence,
         },
       });
@@ -990,6 +1218,23 @@ export default function useCodeAutoRepair() {
       // A transport failure is retryable; never turn an unconfirmed
       // candidate into a completed run or consume its retry key permanently.
       runtimeVerificationAttemptsRef.current.delete(attemptKey);
+      const message = error instanceof Error ? error.message : '运行时验证请求失败。';
+      commitAgentTrace((previous) => ({
+        ...previous,
+        phase: 'needs_attention',
+        status: 'needs_attention',
+        isRunning: false,
+        resumeEligible: true,
+        steps: [...previous.steps, `运行时验证未完成：${message}`],
+      }));
+      appendTimeline({
+        actorKind: 'system',
+        actorId: `runtime-verify:${candidate.runId}`,
+        runId: candidate.runId,
+        stage: 'error',
+        status: 'needs_attention',
+        content: `运行时验证请求失败，候选补丁仍保留待处理：${message}`,
+      });
       throw error;
     }
   }, [appendTimeline, commitAgentTrace]);
@@ -1029,6 +1274,13 @@ export default function useCodeAutoRepair() {
   const restore = useCallback((savedCode: string) => {
     // Restoring a checkpoint/version changes the active code projection; it
     // must not erase the conversation's completed AgentLoop history.
+    // Keep the active trace too. `openSession` restores the session snapshot
+    // first and then restores the newer VFS checkpoint; reset() preserves the
+    // run list but historically cleared the selected trace/run id. That made
+    // the persisted token/context telemetry disappear from the bottom bar
+    // after refresh even though it was still present in agentRuns.
+    const preservedRunId = currentAgentRunIdRef.current;
+    const preservedTrace = agentTraceRef.current;
     reset({ preserveAgentRuns: true });
     if (!savedCode) return;
     updateCode(savedCode);
@@ -1038,6 +1290,13 @@ export default function useCodeAutoRepair() {
     setRunId(restoredRunId);
     runtimeCheckCompletedRef.current = true;
     setStatus({ state: 'done', charCount: savedCode.length, repairCount: 0 });
+
+    if (preservedRunId) {
+      currentAgentRunIdRef.current = preservedRunId;
+      const restoredTrace = { ...preservedTrace, isRunning: false };
+      agentTraceRef.current = restoredTrace;
+      setAgentTrace(restoredTrace);
+    }
   }, [reset, updateCode]);
 
   const restoreAgentRuns = useCallback((savedRuns: CodeAgentRun[]) => {
@@ -1051,6 +1310,25 @@ export default function useCodeAutoRepair() {
     agentTraceRef.current = latest?.trace ?? EMPTY_AGENT_TRACE;
     timelineSequenceRef.current = Math.max(0, ...(agentTraceRef.current.timeline ?? []).map((event) => event.sequence));
     setAgentTrace(agentTraceRef.current);
+  }, []);
+
+  const discardAgentRuns = useCallback((discardedRunIds: Iterable<string>) => {
+    const ids = new Set(Array.from(discardedRunIds).filter(Boolean));
+    if (!ids.size) return;
+    setAgentRuns((previous) => previous.filter((run) => !ids.has(run.id)));
+    setTrustedTerminalPrefixes((previous) => {
+      const next = { ...previous };
+      ids.forEach((id) => delete next[id]);
+      return next;
+    });
+    if (ids.has(currentAgentRunIdRef.current)) {
+      // The caller has already selected the branch to retain. Reset the active
+      // presentation immediately so a deleted run cannot keep its spinner or
+      // resume metadata while the replacement request is being classified.
+      currentAgentRunIdRef.current = '';
+      agentTraceRef.current = EMPTY_AGENT_TRACE;
+      setAgentTrace(EMPTY_AGENT_TRACE);
+    }
   }, []);
 
   const addTrustedTerminalPrefix = useCallback((runIdValue: string, prefix: string) => {
@@ -1067,6 +1345,7 @@ export default function useCodeAutoRepair() {
     attachments: ChatAttachment[] = [],
     sessionId: string | null = null,
     mcp: McpRequestContext | null = null,
+    acceptanceGoal?: AcceptanceGoalContract,
   ) => {
     sessionIdRef.current = sessionId;
     mcpRef.current = mcp;
@@ -1084,6 +1363,7 @@ export default function useCodeAutoRepair() {
         allowedNextAction: projectKind === 'fullstack'
           ? 'fullstack_bootstrap'
           : 'minimal_frontend_patch',
+        acceptanceGoal,
       },
     );
     // 注意：beginAgentTrace 内部设置了 currentAgentRunIdRef，所以必须在它之后取 meta.run_id。
@@ -1126,12 +1406,12 @@ export default function useCodeAutoRepair() {
       if (projectKind === 'fullstack') {
         await generateFullstackCode(
           prompt, handleEvent, controller.signal, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds },
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, acceptance_goal: acceptanceGoal, verification_session_id: agentTraceRef.current.verificationSessionId },
         );
       } else {
         await generateWebCode(
           prompt, handleEvent, controller.signal, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds },
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, acceptance_goal: acceptanceGoal, verification_session_id: agentTraceRef.current.verificationSessionId },
         );
       }
     } catch (error) {
@@ -1139,7 +1419,7 @@ export default function useCodeAutoRepair() {
       throw error;
     }
     return didComplete;
-  }, [addTrustedTerminalPrefix, beginAgentTrace, beginRuntimeCheck, commitAgentTrace, consumeAgentEvent, finishTimeline, recordFileChanges, reset, terminalWorkspaceId, updateCode]);
+  }, [beginAgentTrace, beginRuntimeCheck, commitAgentTrace, consumeAgentEvent, finishTimeline, recordFileChanges, reset, terminalWorkspaceId, updateCode]);
 
   const modify = useCallback(async (
     instruction: string,
@@ -1153,12 +1433,14 @@ export default function useCodeAutoRepair() {
       resumeFromRun?: CodeAgentRun;
       intentRouteId?: string;
       recentTurns?: CodeIntentTurn[];
+      assistantReferences?: CodeIntentTurn[];
       activeRun?: CodeIntentActiveRun;
       activeScope?: CodeTaskScope;
       scopeVersion?: number;
       scopeSource?: 'orchestrator' | 'inherited' | 'explicit';
       allowedNextAction?: string;
       runtimeEvidence?: RuntimeVerificationEvidence;
+      acceptanceGoal?: AcceptanceGoalContract;
     } = {},
     consoleEntries: SandboxConsoleEntry[] = [],
   ) => {
@@ -1209,9 +1491,20 @@ export default function useCodeAutoRepair() {
         scopeSource: options.scopeSource,
         allowedNextAction: options.allowedNextAction,
         runtimeEvidence: isResume ? options.runtimeEvidence : undefined,
+        acceptanceGoal: options.acceptanceGoal,
       },
     );
     const runIdForRequest = currentAgentRunIdRef.current;
+    const requestRuntimeEvidence = isResume && options.runtimeEvidence
+      ? rebindRuntimeEvidenceToRun(options.runtimeEvidence, runIdForRequest)
+      : options.runtimeEvidence;
+    const requestActiveRun = isResume && options.activeRun
+      ? {
+          ...options.activeRun,
+          run_id: runIdForRequest,
+          resumed_from_run_id: options.activeRun.run_id,
+        }
+      : options.activeRun;
 
     const controller = new AbortController();
     controllerRef.current = controller;
@@ -1243,12 +1536,15 @@ export default function useCodeAutoRepair() {
         const report = await runCodeAcceptanceTest({
           user_request: instruction.trim(),
           preview_html: previewHtml,
+          run_id: runIdForRequest,
           verification_run_id: `${runIdForRequest}:preflight`.slice(0, 64),
           console_entries: consoleEntries.slice(-100).map((entry) => ({
             level: entry.level,
             text: entry.args.join(' ').slice(0, 2_000),
           })),
-        }, controller.signal);
+          acceptance_goal: options.acceptanceGoal ?? agentTraceRef.current.acceptanceGoal,
+          verification_session_id: agentTraceRef.current.verificationSessionId,
+        }, undefined, controller.signal);
         const reportDiagnostics = formatRuntimePreflightDiagnostics(report);
         if (!report.passed) {
           effectiveDiagnostics = [effectiveDiagnostics, reportDiagnostics]
@@ -1260,11 +1556,19 @@ export default function useCodeAutoRepair() {
           actorId: `deterministic-preflight:${runIdForRequest}:result`,
           runId: runIdForRequest,
           stage: 'verification',
-          status: report.blocked ? 'blocked' : report.passed ? 'passed' : 'failed',
+          status: report.blocked
+            ? 'runtime_smoke_blocked'
+            : report.passed
+              ? 'runtime_smoke_passed'
+              : 'runtime_smoke_failed',
           content: report.diagnostic
-            || (report.passed ? '确定性浏览器预检通过。' : '确定性浏览器预检未通过。'),
+            || (report.passed
+              ? '运行时冒烟预检通过（仅代表当前版本能启动，不代表本轮需求已完成）。'
+              : '运行时冒烟预检未通过。'),
           metadata: {
             source: 'deterministic-browser-preflight',
+            verificationClass: 'runtime_smoke',
+            goalVerified: false,
             deterministic: true,
             passed: report.passed,
             blocked: report.blocked,
@@ -1287,9 +1591,14 @@ export default function useCodeAutoRepair() {
           actorId: `deterministic-preflight:${runIdForRequest}:blocked`,
           runId: runIdForRequest,
           stage: 'verification',
-          status: 'blocked',
+          status: 'runtime_smoke_blocked',
           content: `确定性浏览器预检暂不可用：${message}`,
-          metadata: { source: 'deterministic-browser-preflight', blocked: true },
+          metadata: {
+            source: 'deterministic-browser-preflight',
+            verificationClass: 'runtime_smoke',
+            goalVerified: false,
+            blocked: true,
+          },
         });
       }
     }
@@ -1334,13 +1643,13 @@ export default function useCodeAutoRepair() {
       if (hasVfs) {
         await modifyFullstackCode(
           currentVfs, instruction, targetElement, handleEvent, controller.signal, effectiveDiagnostics, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, intent: mcp?.intent ?? (isResume ? 'resume' : 'action'), intent_route_id: options.intentRouteId, resume: isResume, recent_turns: options.recentTurns, active_run: options.activeRun, active_scope: options.activeScope, runtime_evidence: options.runtimeEvidence },
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, intent: mcp?.intent ?? (isResume ? 'resume' : 'action'), intent_route_id: options.intentRouteId, resume: isResume, recent_turns: options.recentTurns, assistant_references: options.assistantReferences, active_run: requestActiveRun, active_scope: options.activeScope, runtime_evidence: requestRuntimeEvidence, acceptance_goal: options.acceptanceGoal ?? agentTraceRef.current.acceptanceGoal, verification_session_id: agentTraceRef.current.verificationSessionId },
           mentionedFiles,
         );
       } else {
         await modifyWebCode(
           currentCode, instruction, targetElement, handleEvent, controller.signal, effectiveDiagnostics, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, intent: mcp?.intent ?? (isResume ? 'resume' : 'action'), intent_route_id: options.intentRouteId, resume: isResume, recent_turns: options.recentTurns, active_run: options.activeRun, active_scope: options.activeScope, runtime_evidence: options.runtimeEvidence },
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, intent: mcp?.intent ?? (isResume ? 'resume' : 'action'), intent_route_id: options.intentRouteId, resume: isResume, recent_turns: options.recentTurns, assistant_references: options.assistantReferences, active_run: requestActiveRun, active_scope: options.activeScope, runtime_evidence: requestRuntimeEvidence, acceptance_goal: options.acceptanceGoal ?? agentTraceRef.current.acceptanceGoal, verification_session_id: agentTraceRef.current.verificationSessionId },
         );
       }
     } catch (error) {
@@ -1373,7 +1682,7 @@ export default function useCodeAutoRepair() {
       completed: true,
       candidate: agentTraceRef.current.status === 'awaiting_runtime_verification',
     };
-  }, [addTrustedTerminalPrefix, beginAgentTrace, beginRuntimeCheck, clearCheckTimer, clearRepairRetryTimer, commitAgentTrace, consumeAgentEvent, finishTimeline, recordFileChanges, terminalWorkspaceId, updateCode]);
+  }, [appendTimeline, beginAgentTrace, beginRuntimeCheck, clearCheckTimer, clearRepairRetryTimer, commitAgentTrace, consumeAgentEvent, finishTimeline, recordFileChanges, terminalWorkspaceId, updateCode]);
 
   const handleRuntimeError = useCallback(async (
     runtimeError: RuntimeErrorReport,
@@ -1400,30 +1709,6 @@ export default function useCodeAutoRepair() {
       runtimeError.line ?? 0,
       runtimeError.column ?? 0,
     ].join('|');
-    const initialRuntimeEvidence = normalizeRuntimeVerificationEvidence({
-      status: 'runtime_verification_failed',
-      run_id: runtimeError.runId,
-      base_revision: '',
-      candidate_revision: '',
-      target_error: {
-        type: 'RuntimeError',
-        message: clipRepairText(runtimeError.message, 2_000) ?? 'Runtime error',
-        source: clipRepairText(runtimeError.source, 500),
-        line: runtimeError.line,
-        column: runtimeError.column,
-        stack: clipRepairText(runtimeError.stack, 4_000),
-      },
-      changed_files: (agentTraceRef.current.fileChanges ?? []).map((change) => change.path),
-      diff_summary: '',
-      new_errors: [],
-      same_error_persisted: true,
-      boot_completed: false,
-      console_errors: (runtimeError.consoleEntries ?? [])
-        .filter((entry) => entry.level === 'error')
-        .map((entry) => clipRepairText(entry.text, 2_000) ?? ''),
-      diagnostic: clipRepairText(formatRuntimeError(runtimeError), 2_000) ?? '',
-    });
-    commitAgentTrace((previous) => ({ ...previous, runtimeEvidence: initialRuntimeEvidence }));
     const occurrence = (errorOccurrencesRef.current.get(errorSignature) ?? 0) + 1;
     errorOccurrencesRef.current.set(errorSignature, occurrence);
     recentErrorsRef.current = [
@@ -1454,6 +1739,75 @@ export default function useCodeAutoRepair() {
     isRepairingRef.current = true;
     repairCountRef.current += 1;
     const attempt = repairCountRef.current;
+    const previousRunId = currentAgentRunIdRef.current;
+    const repairRunId = createRuntimeRepairRunId(
+      previousRunId || runtimeError.runId,
+      attempt,
+    );
+    currentAgentRunIdRef.current = repairRunId;
+    const previousRuntimeEvidence = (
+      runtimeError.runtimeEvidence as RuntimeVerificationEvidence | undefined
+    ) ?? agentTraceRef.current.runtimeEvidence;
+    const initialRuntimeEvidence = normalizeRuntimeVerificationEvidence({
+      ...(previousRuntimeEvidence ?? {}),
+      status: 'runtime_verification_failed',
+      run_id: repairRunId,
+      base_revision: previousRuntimeEvidence?.base_revision ?? '',
+      candidate_revision: previousRuntimeEvidence?.candidate_revision ?? '',
+      target_error: {
+        type: 'RuntimeError',
+        message: clipRepairText(runtimeError.message, 2_000) ?? 'Runtime error',
+        source: clipRepairText(runtimeError.source, 500),
+        line: runtimeError.line,
+        column: runtimeError.column,
+        stack: clipRepairText(runtimeError.stack, 4_000),
+      },
+      changed_files: (agentTraceRef.current.fileChanges ?? []).map((change) => change.path),
+      diff_summary: '',
+      new_errors: [],
+      same_error_persisted: previousRuntimeEvidence?.same_error_persisted ?? true,
+      boot_completed: false,
+      console_errors: (runtimeError.consoleEntries ?? [])
+        .filter((entry) => entry.level === 'error')
+        .map((entry) => clipRepairText(entry.text, 2_000) ?? ''),
+      diagnostic: clipRepairText(formatRuntimeError(runtimeError), 2_000) ?? '',
+    });
+    const boundRuntimeEvidence = rebindRuntimeEvidenceToRun(
+      initialRuntimeEvidence,
+      repairRunId,
+    ) ?? initialRuntimeEvidence;
+    const repairTrace: CodeAgentTrace = {
+      ...agentTraceRef.current,
+      phase: 'repairing',
+      isRunning: true,
+      status: 'running',
+      resumeEligible: false,
+      runtimeVerification: undefined,
+      runtimeEvidence: boundRuntimeEvidence,
+    };
+    agentTraceRef.current = repairTrace;
+    setAgentTrace(repairTrace);
+    setAgentRuns((previous) => {
+      const sourceRun = previous.find((run) => run.id === previousRunId) ?? previous.at(-1);
+      const parentRunId = sourceRun?.id || previousRunId || undefined;
+      const nextRuns = parentRunId
+        ? previous.map((run) => run.id === parentRunId
+          ? settleAgentRunAsSuperseded(run, repairRunId)
+          : run)
+        : previous;
+      return [
+        ...nextRuns,
+        {
+          id: repairRunId,
+          parentRunId,
+          runKind: 'runtime_repair',
+          request: sourceRun?.request ?? '自动修复浏览器运行错误',
+          projectKind: sourceRun?.projectKind ?? 'frontend',
+          createdAt: new Date().toISOString(),
+          trace: repairTrace,
+        },
+      ];
+    });
     const diagnostic = buildBoundedRepairDiagnostic(
       runtimeError,
       occurrence,
@@ -1486,7 +1840,10 @@ export default function useCodeAutoRepair() {
       const handleEvent = (event: CodeGenerationEvent) => {
         if (classifyCodeGenerationEvent(event) === 'agent_event') {
             consumeAgentEvent(event, 'ops', `ops:${currentAgentRunIdRef.current}:repair`);
-            if (event.type === 'agent_activity' && event.channel === 'output' && event.phase !== 'thinking') {
+            if (event.type === 'agent_activity'
+              && event.channel === 'output'
+              && event.phase !== 'thinking'
+              && event.phase !== 'preflight') {
               repairModelOutput += event.content;
               setRepairLogs((previous) => previous.map((log) =>
                 log.attempt === attempt ? { ...log, modelOutput: repairModelOutput } : log
@@ -1495,7 +1852,12 @@ export default function useCodeAutoRepair() {
             return;
           }
           if (event.type === 'error') {
-            commitAgentTrace((previous) => ({ ...previous, isRunning: false }));
+            commitAgentTrace((previous) => ({
+              ...previous,
+              phase: 'failed',
+              status: 'failed',
+              isRunning: false,
+            }));
             throw new Error(event.message);
           }
           // 这里只允许显式的 CodeUpdateEvent 进入修复代码投影。
@@ -1510,6 +1872,16 @@ export default function useCodeAutoRepair() {
           didComplete = didComplete || event.done;
           if (event.done) {
             finishTimeline('ops');
+            // The repair model has finished. Keep the workflow lock until
+            // browser verification completes, but expose the handoff phase
+            // instead of leaving this child run looking like active thinking.
+            commitAgentTrace((previous) => ({
+              ...previous,
+              phase: 'awaiting_runtime_verification',
+              status: 'awaiting_runtime_verification',
+              isRunning: true,
+              resumeEligible: false,
+            }));
             appendTimeline({
               actorKind: 'ops',
               actorId: `ops:${currentAgentRunIdRef.current}:repair`,
@@ -1536,6 +1908,8 @@ export default function useCodeAutoRepair() {
             intent: 'runtime_fix',
             active_scope: agentTraceRef.current.activeScope ?? 'frontend_runtime',
             runtime_evidence: agentTraceRef.current.runtimeEvidence,
+            acceptance_goal: agentTraceRef.current.acceptanceGoal,
+            verification_session_id: agentTraceRef.current.verificationSessionId,
           },
         );
       } else {
@@ -1627,6 +2001,12 @@ export default function useCodeAutoRepair() {
         return;
       }
       setStatus({ state: 'repairing', attempt, charCount: 0 });
+      commitAgentTrace((previous) => ({
+        ...previous,
+        phase: 'failed',
+        status: 'failed',
+        isRunning: false,
+      }));
       continueAgentTrace(`第 ${attempt} 次补丁生成或校验失败，正在更换诊断策略继续修复。`);
       clearRepairRetryTimer();
       repairRetryTimerRef.current = window.setTimeout(() => {
@@ -1636,6 +2016,17 @@ export default function useCodeAutoRepair() {
       }, 300);
     }
   }, [appendTimeline, beginRuntimeCheck, clearCheckTimer, clearRepairRetryTimer, commitAgentTrace, consumeAgentEvent, continueAgentTrace, finishTimeline, recordFileChanges, terminalWorkspaceId]);
+
+  const settleCurrentAgentRunAfterAcceptance = useCallback((passed: boolean) => {
+    isRepairingRef.current = false;
+    commitAgentTrace((previous) => ({
+      ...previous,
+      phase: passed ? 'completed' : 'needs_attention',
+      status: passed ? 'completed' : 'needs_attention',
+      isRunning: false,
+      resumeEligible: !passed,
+    }));
+  }, [commitAgentTrace]);
 
   repairHandlerRef.current = (runtimeError) => {
     void handleRuntimeError(runtimeError);
@@ -1706,6 +2097,23 @@ export default function useCodeAutoRepair() {
     return () => window.removeEventListener(key, handler as EventListener);
   }, []);
 
+  // A rewrite discards the selected Code turn and every later turn. Close the
+  // corresponding PTYs even when the Terminal tab is not currently mounted.
+  useEffect(() => {
+    const handler = (ev: Event) => {
+      const detail = (ev as CustomEvent<{ run_ids?: string[] }>).detail;
+      const runIds = Array.from(new Set((detail?.run_ids ?? []).filter(Boolean)));
+      if (!runIds.length) return;
+      void Promise.all(runIds.map(async (runId) => {
+        try {
+          await fetch(`/api/terminal/close/${encodeURIComponent(terminalWorkspaceId)}/${encodeURIComponent(runId)}`, { method: 'POST' });
+        } catch { /* terminal cleanup must not fail the rewrite */ }
+      }));
+    };
+    window.addEventListener('code-agent-terminal-close', handler);
+    return () => window.removeEventListener('code-agent-terminal-close', handler);
+  }, [terminalWorkspaceId]);
+
   return {
     code,
     status,
@@ -1720,11 +2128,13 @@ export default function useCodeAutoRepair() {
     reset,
     restore,
     restoreAgentRuns,
+    discardAgentRuns,
     handleRuntimeError,
     stopAutoRepair,
     compactContext,
     addTrustedTerminalPrefix,
     verifyRuntimeCandidate,
+    settleCurrentAgentRunAfterAcceptance,
   };
 }
 

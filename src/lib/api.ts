@@ -4,6 +4,7 @@
  */
 
 import type { OmniTurnContext } from '../features/omni/types';
+import { CodeAgentEventBuffer } from '../Code/codeEventStream.ts';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const ACCEPTANCE_REQUEST_TIMEOUT_MS = 50_000;
@@ -1102,7 +1103,9 @@ export interface ChatMessage {
   feedbackAnswer?: string;
   tokenUsage?: TokenUsage;
   /** Read-only Code workbench answers are persisted as ordinary assistant turns. */
-  codeResponseKind?: 'conversation' | 'clarify';
+  codeResponseKind?: 'conversation' | 'clarify' | 'routing_error';
+  /** The bounded read-only Agent process and full read_file results for this turn. */
+  codeReadOnlyTimeline?: CodeAgentTimelineEvent[];
 }
 
 export type AgentLoopStageKind = 'think' | 'search' | 'observe' | 'final';
@@ -1290,6 +1293,15 @@ export interface CodeUpdateEvent {
   candidate?: boolean;
 }
 
+export interface CodeAgentEventEnvelope {
+  run_id?: string;
+  event_id?: string;
+  sequence?: number;
+  timestamp_ms?: number;
+  source_event_id?: string;
+  source_sequence?: number;
+}
+
 export interface CodeErrorEvent {
   type: 'error';
   message: string;
@@ -1299,7 +1311,7 @@ export interface CodeErrorEvent {
 export interface CodeAgentActivityEvent {
   type: 'agent_activity';
   channel: 'status' | 'output' | 'answer';
-  phase: 'analyzing' | 'diagnosing' | 'thinking' | 'generating' | 'patching' | 'validating' | 'planning' | 'done';
+  phase: 'preflight' | 'analyzing' | 'diagnosing' | 'thinking' | 'generating' | 'patching' | 'validating' | 'planning' | 'tool_calling' | 'tool_result' | 'done';
   content: string;
   done: boolean;
   // AgentLoop 轮次边界：同一个 run 内的每个模型回合必须单独渲染，
@@ -1307,6 +1319,7 @@ export interface CodeAgentActivityEvent {
   turn_id?: string;
   iteration?: number;
   boundary?: 'turn_completed' | string;
+  run_id?: string;
   actor_id?: string;
   event_id?: string;
   sequence?: number;
@@ -1318,6 +1331,59 @@ export interface CodeAgentActivityEvent {
   scope_source?: 'orchestrator' | 'inherited' | 'explicit';
   allowed_next_action?: string;
   runtime_evidence?: RuntimeVerificationEvidence;
+  metadata?: Record<string, unknown>;
+}
+
+export interface TestAgentCheckpointEvent {
+  type: 'test_agent_checkpoint';
+  channel: 'verification';
+  phase: 'lifecycle_start' | 'module_verify' | string;
+  status: string;
+  content: string;
+  done: boolean;
+  run_id?: string;
+  verification_session_id?: string;
+  candidate_revision?: string;
+  affected_obligations?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface TestAgentExecutionEvent {
+  type: 'test_agent_execution';
+  channel: 'verification';
+  phase: 'test_agent' | string;
+  status: 'scheduled' | 'running' | 'blocked' | string;
+  content: string;
+  done: boolean;
+  run_id?: string;
+  verification_session_id?: string;
+  candidate_revision?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface TestAgentResultEvent {
+  type: 'test_agent_result';
+  channel: 'verification';
+  phase: 'precheck' | 'module_verify' | string;
+  status: 'passed' | 'failed' | 'blocked' | 'skipped' | string;
+  content: string;
+  done: boolean;
+  run_id?: string;
+  verification_session_id?: string;
+  candidate_revision?: string;
+  affected_obligations?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface TestAgentContractReplanEvent {
+  type: 'test_agent_contract_replan';
+  channel: 'verification';
+  phase: 'contract_replan' | string;
+  status: 'scheduled' | 'completed' | 'failed' | string;
+  content: string;
+  done: boolean;
+  run_id?: string;
+  verification_session_id?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -1341,6 +1407,8 @@ export interface HookEvent {
 
 export interface TokenUsageEvent {
   type: 'token_usage';
+  run_id?: string;
+  event_id?: string;
   usage: TokenUsage;
 }
 
@@ -1361,6 +1429,7 @@ export interface RuntimeSummaryEvent {
   scope_source?: 'orchestrator' | 'inherited' | 'explicit';
   allowed_next_action?: string;
   runtime_evidence?: RuntimeVerificationEvidence;
+  verification_session_id?: string;
 }
 
 export interface RuntimeVerificationResponse {
@@ -1377,10 +1446,23 @@ export interface RuntimeVerificationResponse {
 // 等前端 UI 渲染"执行/拒绝/编辑后执行"横幅后再消费。
 export interface TerminalProposalEvent {
   type: 'terminal_proposal';
+  proposition_id?: string;
+  id?: string;
+  workspace_id?: string;
   command: string;
   reason?: string;
   expected_output_hint?: string;
   run_id?: string;
+  timeout_seconds?: number;
+}
+
+/** Agent-requested evaluation in the current Code preview iframe. */
+export interface SandboxCommandRequestEvent {
+  type: 'sandbox_command_request';
+  run_id: string;
+  request_id: string;
+  source: string;
+  timeout_ms?: number;
 }
 
 // Why: 全栈修改模式任务拆解——后端把复杂指令拆成子任务列表推给前端，
@@ -1520,7 +1602,27 @@ export interface ContextUsageEvent {
   messages_removed?: number;
 }
 
-export type CodeGenerationEvent = CodeUpdateEvent | CodeErrorEvent | CodeAgentActivityEvent | HookEvent | TokenUsageEvent | RuntimeSummaryEvent | TerminalProposalEvent | TaskListEvent | TaskUpdateEvent | FileWrittenEvent | AgentLoopRoundEvent | ContextUsageEvent | MemoryUpdateEvent | SkillMatchedEvent;
+export type CodeGenerationEvent = (
+  | CodeUpdateEvent
+  | CodeErrorEvent
+  | CodeAgentActivityEvent
+  | TestAgentCheckpointEvent
+  | TestAgentExecutionEvent
+  | TestAgentResultEvent
+  | TestAgentContractReplanEvent
+  | HookEvent
+  | TokenUsageEvent
+  | RuntimeSummaryEvent
+  | TerminalProposalEvent
+  | SandboxCommandRequestEvent
+  | TaskListEvent
+  | TaskUpdateEvent
+  | FileWrittenEvent
+  | AgentLoopRoundEvent
+  | ContextUsageEvent
+  | MemoryUpdateEvent
+  | SkillMatchedEvent
+) & CodeAgentEventEnvelope;
 
 export type PlanTaskStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
 
@@ -1686,16 +1788,25 @@ export interface CodeAgentTrace {
   summaryIntent?: 'patch' | 'fullstack_bootstrap' | 'answer' | 'ask_clarification';
   /** Candidate identity used by the browser-verification commit handshake. */
   runtimeVerification?: {
+    /** Backend AgentLoop identity that owns the candidate VFS. */
     runId: string;
+    /** Browser code revision that must be used for verification. */
+    browserRunId?: string;
     baseRevision: string;
     candidateRevision: string;
   };
   /** Terminal outcome of the orchestrated run, including a resumable checkpoint. */
-  status?: 'running' | 'awaiting_runtime_verification' | 'completed' | 'needs_attention' | 'failed';
+  status?: 'running' | 'awaiting_runtime_verification' | 'completed' | 'needs_attention' | 'failed' | 'superseded';
   /** The orchestrator left durable unfinished work that a later turn may resume. */
   resumeEligible?: boolean;
   // Why: 预留——终端命令提案缓存列表，等后续 UI 渲染“执行/拒绝/编辑后执行”横幅。
-  terminalProposals?: Array<{ command: string; reason?: string; expected_output_hint?: string }>;
+  terminalProposals?: Array<{
+    proposition_id?: string;
+    run_id?: string;
+    command: string;
+    reason?: string;
+    expected_output_hint?: string;
+  }>;
   hookEvents?: HookEvent[];
   tokenUsage?: TokenUsage;
   contextUsage?: ContextUsageEvent;
@@ -1708,6 +1819,12 @@ export interface CodeAgentTrace {
   allowedNextAction?: string;
   /** Structured browser evidence passed into the next repair/resume turn. */
   runtimeEvidence?: RuntimeVerificationEvidence;
+  /** Version-bound source snippets that a later runtime repair may reuse. */
+  runtimeReadEvidence?: Record<string, RuntimeReadEvidence>;
+  /** Semantic browser-acceptance contract selected by the intent router. */
+  acceptanceGoal?: AcceptanceGoalContract;
+  /** Resident Test Agent identity shared by initial and repair runs. */
+  verificationSessionId?: string;
 }
 
 export type CodeTaskScope =
@@ -1736,14 +1853,62 @@ export interface RuntimeVerificationEvidence {
   new_errors: string[];
   same_error_persisted: boolean;
   boot_completed: boolean;
+  deterministic_verifier_passed?: boolean;
+  goal_verified?: boolean;
+  goal_assertion_ids?: string[];
   console_errors: string[];
+  deterministic_findings?: DeterministicBrowserFinding[];
+  repair_obligations?: Array<Record<string, unknown>>;
+  failure_fingerprint?: string;
+  failure_occurrence?: number;
+  same_failure_persisted?: boolean;
+  required_inspection_paths?: string[];
+  blocked_patch_paths?: string[];
+  page_errors?: string[];
   diagnostic: string;
+}
+
+export interface RuntimeReadEvidence {
+  content: string;
+  revision: string;
+  source_run_id?: string;
+}
+
+export type AcceptanceGoalType =
+  | 'page_health'
+  | 'primary_interaction'
+  | 'game_start'
+  | 'entity_presence'
+  | 'entity_presence_and_motion'
+  | 'game_growth_over_time'
+  | 'custom_measurement'
+  | 'unknown';
+
+export interface AcceptanceGoalContract {
+  goal_type: AcceptanceGoalType;
+  entity?: string;
+  interaction_target?: 'primary' | 'start' | 'submit' | 'save';
+  minimum_count?: number;
+  requires_position_change?: boolean;
+  interaction_required?: boolean;
+  growth_ticks?: number;
+  user_goal?: string;
+  success_criteria?: string[];
+  required_assertion_ids?: string[];
+  confidence?: number;
+  source?: string;
+  adapter_id?: string;
+  measurement_contract?: Record<string, unknown> | null;
+  valid?: boolean;
 }
 
 export type CodeAgentActorKind = 'main' | 'test' | 'ops' | 'system';
 
+export type CodeAgentRunKind = 'main' | 'runtime_repair';
+
 export type CodeAgentTimelineStage =
   | 'status'
+  | 'preflight'
   | 'thinking'
   | 'output'
   | 'tool_call'
@@ -1784,6 +1949,10 @@ export interface CodeFileChange {
 
 export interface CodeAgentRun {
   id: string;
+  parentRunId?: string;
+  resumedFromRunId?: string;
+  runKind?: CodeAgentRunKind;
+  supersededByRunId?: string;
   request: string;
   projectKind: 'frontend' | 'fullstack';
   createdAt: string;
@@ -1793,13 +1962,17 @@ export interface CodeAgentRun {
 export interface AcceptanceAssertionResult {
   assertion: {
     kind: 'visible' | 'hidden' | 'text_contains' | 'count_gte' | 'console_contains'
-      | 'forbidden_visible_text' | 'console_error' | 'page_error' | 'dom_unreadable';
+      | 'forbidden_visible_text' | 'console_error' | 'page_error' | 'dom_unreadable'
+      | 'enemy_snake_count_gte' | 'enemy_snake_position_changed'
+      | 'player_body_length_growth' | 'enemy_body_segment_length_growth'
+      | 'canvas_non_empty' | 'control_enabled' | 'observable_state_changed'
+      | 'canvas_changed_after_tick';
     selector: string;
     expected: string;
     minimum: number;
   };
   passed: boolean;
-  actual: string;
+  actual: unknown;
 }
 
 export interface AcceptanceVerificationAttempt {
@@ -1822,14 +1995,20 @@ export interface DeterministicBrowserFinding {
   kind: string;
   selector: string;
   expected: string;
-  actual: string;
+  actual: unknown;
   message: string;
+  repair_domain?: string;
+  required_postconditions?: Array<Record<string, unknown>>;
+  temporal_contract?: Record<string, unknown>;
 }
 
 export interface CodeAcceptanceReport {
   passed: boolean;
   blocked: boolean;
+  /** AgentLoop lane that owns this verification report. */
+  run_id?: string;
   verification_run_id?: string;
+  verification_session_id?: string;
   verification_attempts?: AcceptanceVerificationAttempt[];
   attempt_count?: number;
   stage?: 'planning' | 'browser';
@@ -1853,6 +2032,52 @@ export interface CodeAcceptanceReport {
   deterministic?: boolean;
   deterministic_findings?: DeterministicBrowserFinding[];
   page_errors?: Array<{ type: string; text: string }>;
+  acceptance_goal?: AcceptanceGoalContract;
+  interaction_scenario?: Record<string, unknown>;
+  goal_verified?: boolean;
+  inconclusive?: boolean;
+  verification_status?: 'passed' | 'failed' | 'blocked' | 'inconclusive';
+  goal_assertion_ids?: string[];
+  /** Evidence produced by the autonomous, isolated Test Agent child. */
+  test_agent_runs?: TestAgentRun[];
+  test_agent?: TestAgentRun;
+}
+
+export interface TestAgentRun {
+  status: 'passed' | 'failed' | 'blocked' | 'skipped';
+  phase: 'precheck' | 'targeted_reproduction' | 'final_replay' | 'none' | string;
+  should_run?: boolean;
+  reason?: string;
+  diagnostic?: string;
+  idempotency_key?: string;
+  artifact?: string;
+  findings?: Array<Record<string, unknown>>;
+  cached?: boolean;
+  command?: string[] | string;
+  stdout?: string;
+  stderr?: string;
+  returncode?: number;
+  duration_ms?: number;
+  timeout_seconds?: number;
+  script_line_count?: number;
+  artifact_revisions?: Array<{
+    revision: number;
+    parent_revision?: number | null;
+    acceptance_id: string;
+    reason: string;
+    contract_changed: boolean;
+    artifact: string;
+  }>;
+  duration_ms?: number;
+  verification_session_id?: string;
+  verification_session?: {
+    verification_session_id: string;
+    run_id: string;
+    checkpoint_count: number;
+    last_candidate_revision: string;
+    obligations: Record<string, Record<string, unknown>>;
+    test_runs: Array<Record<string, unknown>>;
+  };
 }
 
 export interface ChatOptions {
@@ -1889,6 +2114,9 @@ export interface CodeIntentActiveRun {
   allowed_next_action?: string;
   target_files?: string[];
   last_verification?: RuntimeVerificationEvidence;
+  runtime_read_evidence?: Record<string, RuntimeReadEvidence>;
+  acceptance_goal?: AcceptanceGoalContract;
+  verification_session_id?: string;
 }
 
 export interface CodeWorkbenchIntentDecision {
@@ -1902,6 +2130,10 @@ export interface CodeWorkbenchIntentDecision {
   scope_version?: number;
   scope_source?: 'orchestrator' | 'inherited' | 'explicit';
   allowed_next_action?: string;
+  resume_run_id?: string | null;
+  acceptance_goal?: AcceptanceGoalContract | null;
+  /** The router produced a trustworthy decision; false must not fall back to read-only. */
+  route_available?: boolean;
 }
 
 /** Classify a Code workbench turn before dispatching any write-capable call. */
@@ -1911,9 +2143,12 @@ export async function classifyCodeWorkbenchIntent(
     hasProject: boolean;
     hasUnfinishedRun: boolean;
     recentTurns?: CodeIntentTurn[];
+    assistantReferences?: CodeIntentTurn[];
     activeRun?: CodeIntentActiveRun;
+    resumeCandidates?: CodeIntentActiveRun[];
     projectKind?: 'frontend' | 'fullstack';
     activeScope?: CodeTaskScope;
+    acceptanceGoal?: AcceptanceGoalContract;
     sessionId?: string;
   },
   signal?: AbortSignal,
@@ -1926,9 +2161,12 @@ export async function classifyCodeWorkbenchIntent(
       has_project: input.hasProject,
       has_unfinished_run: input.hasUnfinishedRun,
       recent_turns: input.recentTurns ?? [],
+      assistant_references: input.assistantReferences ?? [],
       active_run: input.activeRun,
+      resume_candidates: input.resumeCandidates ?? [],
       project_kind: input.projectKind ?? 'frontend',
       active_scope: input.activeScope,
+      acceptance_goal: input.acceptanceGoal,
       session_id: input.sessionId,
     }),
     signal,
@@ -2291,14 +2529,25 @@ export async function sendChatMessage(
           // 此处曾有一个重复的 usage 守卫，条件 stage === undefined 会把
           // DeepSeek 链路带 usage 的 done 事件整个跳过，导致答案不渲染。
 
-          // Why: skill_matched 事件字段（type/skill_name/skill_type/confidence/standard_steps/done）
+          // Why: skill_matched 事件字段（命中 + 摘要注入边界）
           // 不与聊天流其它事件字段冲突，但放最前用 type 显式判断更清晰、防误匹配。
           if (parsed.type === 'skill_matched') {
             handlers.onSkillMatched?.({
               type: 'skill_matched',
+              skill_id: parsed.skill_id != null ? Number(parsed.skill_id) : undefined,
               skill_name: String(parsed.skill_name ?? ''),
               skill_type: String(parsed.skill_type ?? 'instruction') as SkillMatchedEvent['skill_type'],
               confidence: Number(parsed.confidence) || 0,
+              injected: parsed.injected === true,
+              injection_mode: parsed.injection_mode === 'full' || parsed.injection_mode === 'on_demand'
+                ? parsed.injection_mode
+                : 'summary',
+              injected_step_count: parsed.injected_step_count != null
+                ? Number(parsed.injected_step_count)
+                : undefined,
+              injected_validation_count: parsed.injected_validation_count != null
+                ? Number(parsed.injected_validation_count)
+                : undefined,
               standard_steps: Array.isArray(parsed.standard_steps)
                 ? (parsed.standard_steps as string[]).map(String)
                 : [],
@@ -2782,8 +3031,8 @@ export async function sendDeepResearch(
   }
 }
 
-// Why: code 系列请求共享的 meta。MCP 会话级注入字段仅 FullstackGenerateRequest 在后端
-// 有声明，其余端点由 Pydantic 默认忽略多余字段，统一透传无害。
+// Why: code 系列请求共享的 meta。Fullstack 的各个 AgentLoop 入口都显式携带
+// MCP 会话策略，避免 generate/modify/fix 在后端走出不同的工具边界。
 export interface CodeRequestMeta {
   workspace_id?: string;
   run_id?: string;
@@ -2794,9 +3043,48 @@ export interface CodeRequestMeta {
   resume?: boolean;
   intent_route_id?: string;
   recent_turns?: CodeIntentTurn[];
+  assistant_references?: CodeIntentTurn[];
   active_run?: CodeIntentActiveRun;
   active_scope?: CodeTaskScope;
   runtime_evidence?: RuntimeVerificationEvidence;
+  acceptance_goal?: AcceptanceGoalContract;
+  verification_session_id?: string;
+}
+
+export async function postSandboxCommandResult(input: {
+  runId: string;
+  requestId: string;
+  ok: boolean;
+  value?: string;
+  error?: string;
+}): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/code/sandbox/command-result`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      run_id: input.runId,
+      request_id: input.requestId,
+      ok: input.ok,
+      value: input.value ?? '',
+      error: input.error ?? '',
+    }),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+}
+
+export async function readCodeWorkbench(
+  body: {
+    message: string;
+    vfs: Record<string, string>;
+    project_kind: 'frontend' | 'fullstack';
+    recent_turns?: CodeIntentTurn[];
+    assistant_references?: CodeIntentTurn[];
+    session_id?: string;
+  },
+  onEvent: (event: CodeGenerationEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return streamCodeRequest('/api/code/read-only', body, onEvent, signal);
 }
 
 function applyCodeRequestMeta(base: Record<string, unknown>, meta?: CodeRequestMeta): void {
@@ -2809,9 +3097,12 @@ function applyCodeRequestMeta(base: Record<string, unknown>, meta?: CodeRequestM
   if (meta?.resume !== undefined) base.resume = meta.resume;
   if (meta?.intent_route_id) base.intent_route_id = meta.intent_route_id;
   if (meta?.recent_turns) base.recent_turns = meta.recent_turns;
+  if (meta?.assistant_references) base.assistant_references = meta.assistant_references;
   if (meta?.active_run) base.active_run = meta.active_run;
   if (meta?.active_scope) base.active_scope = meta.active_scope;
   if (meta?.runtime_evidence) base.runtime_evidence = meta.runtime_evidence;
+  if (meta?.acceptance_goal) base.acceptance_goal = meta.acceptance_goal;
+  if (meta?.verification_session_id) base.verification_session_id = meta.verification_session_id;
 }
 
 export async function generateWebCode(
@@ -2911,6 +3202,10 @@ export async function verifyFullstackRuntime(
     candidate_revision: string;
     boot_completed: boolean;
     deterministic_verifier_passed: boolean;
+    goal_verified?: boolean;
+    verification_inconclusive?: boolean;
+    goal_assertion_ids?: string[];
+    deterministic_findings?: DeterministicBrowserFinding[];
     console_entries: Array<{
       level: 'log' | 'info' | 'warn' | 'error';
       text: string;
@@ -2947,13 +3242,32 @@ export async function fixFullstackCode(
   return streamCodeRequest('/api/code/fullstack/fix', base, onEvent, signal);
 }
 
+export interface AcceptanceProgressEvent {
+  type: 'acceptance_progress';
+  event: 'started' | 'running' | 'completed' | 'error';
+  run_id?: string;
+  verification_run_id: string;
+  sequence: number;
+  timestamp_ms: number;
+  message: string;
+  elapsed_seconds?: number;
+  detail?: string;
+  report?: CodeAcceptanceReport;
+}
+
 export async function runCodeAcceptanceTest(
   body: {
     user_request: string;
     preview_html: string;
     console_entries: Array<{ level: 'log' | 'info' | 'warn' | 'error'; text: string }>;
+    run_id?: string;
     verification_run_id: string;
+    verification_session_id?: string;
+    acceptance_goal?: AcceptanceGoalContract;
+    candidate_revision?: string;
+    changed_files?: string[];
   },
+  onProgress?: (event: AcceptanceProgressEvent) => void,
   signal?: AbortSignal,
 ): Promise<CodeAcceptanceReport> {
   const timeoutController = new AbortController();
@@ -2967,14 +3281,39 @@ export async function runCodeAcceptanceTest(
   }, ACCEPTANCE_REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetch(`${API_BASE_URL}/api/code/test`, {
+    const response = await fetch(`${API_BASE_URL}/api/code/test/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
       signal: timeoutController.signal,
     });
     if (!response.ok) throw new Error(await parseApiError(response));
-    return response.json() as Promise<CodeAcceptanceReport>;
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('浏览器验证响应为空。');
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let report: CodeAcceptanceReport | null = null;
+    const handleFrame = (frame: string) => {
+      const data = frame.split('\n').find((line) => line.startsWith('data:'))?.slice(5).trim();
+      if (!data) return;
+      const event = JSON.parse(data) as AcceptanceProgressEvent;
+      onProgress?.(event);
+      if (event.event === 'completed' && event.report) report = event.report;
+      if (event.event === 'error') throw new Error(event.detail || event.message);
+    };
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() ?? '';
+      for (const frame of frames) handleFrame(frame);
+      if (done) {
+        if (buffer.trim()) handleFrame(buffer);
+        break;
+      }
+    }
+    if (!report) throw new Error('浏览器验证流在返回最终报告前结束。');
+    return report;
   } catch (error) {
     if (didTimeout) {
       throw new Error(`测试请求超过 ${ACCEPTANCE_REQUEST_TIMEOUT_MS / 1000} 秒，已自动终止。`);
@@ -3008,6 +3347,9 @@ async function streamCodeRequest(
 
   const decoder = new TextDecoder();
   let buffer = '';
+  const eventBuffer = new CodeAgentEventBuffer(
+    typeof body.run_id === 'string' ? body.run_id : undefined,
+  );
   // Why: 诊断"前端瞬间已结束但后端仍在流式传输"——记录首个/终止性事件与断流方式。
   let frameCount = 0;
   console.log('[sse-diag] stream start', path);
@@ -3019,23 +3361,32 @@ async function streamCodeRequest(
       const frames = buffer.split('\n\n');
       buffer = frames.pop() ?? '';
 
-      for (const frame of frames) {
+      const handleFrame = (frame: string) => {
         const data = frame
           .split('\n')
           .find((line) => line.startsWith('data:'))
           ?.slice(5)
           .trim();
-        if (!data) continue;
+        if (!data) return;
         const parsed = JSON.parse(data) as CodeGenerationEvent;
-        frameCount += 1;
-        const diag = parsed as { type: string; done?: boolean; channel?: string };
-        if (diag.done || diag.type === 'error' || diag.type === 'code_update' || diag.type === 'runtime_summary') {
-          console.log('[sse-diag] terminal-ish event #%d type=%s channel=%s done=%s', frameCount, diag.type, diag.channel, diag.done);
+        for (const deliverable of eventBuffer.accept(parsed)) {
+          frameCount += 1;
+          const diag = deliverable as { type: string; done?: boolean; channel?: string };
+          if (diag.done || diag.type === 'error' || diag.type === 'code_update' || diag.type === 'runtime_summary') {
+            console.log('[sse-diag] terminal-ish event #%d type=%s channel=%s done=%s', frameCount, diag.type, diag.channel, diag.done);
+          }
+          onEvent(deliverable);
         }
-        onEvent(parsed);
-      }
+      };
+
+      for (const frame of frames) handleFrame(frame);
 
       if (done) {
+        if (buffer.trim()) {
+          const finalFrame = buffer;
+          buffer = '';
+          handleFrame(finalFrame);
+        }
         console.log('[sse-diag] reader done (server closed stream) frames=%d', frameCount);
         break;
       }
@@ -3169,6 +3520,47 @@ export async function saveSessionSnapshot(
   return payload.session;
 }
 
+/** Replace the durable memory branch after a rewrite/delete operation. */
+export async function replaceSessionChatMemory(
+  sessionId: string,
+  messages: Array<Pick<ChatMessage, 'role' | 'content'>>,
+): Promise<{ session_id: string; changed: boolean; revision: number }> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/memory/chat-history/${encodeURIComponent(sessionId)}`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages }),
+    },
+  );
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json();
+}
+
+/** Persist live Code Agent usage independently of the debounced full snapshot. */
+export async function persistCodeAgentTelemetry(
+  sessionId: string,
+  runId: string,
+  telemetry: {
+    tokenUsage?: TokenUsage;
+    contextUsage?: ContextUsageEvent;
+  },
+): Promise<void> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/sessions/${encodeURIComponent(sessionId)}/code-agent-runs/${encodeURIComponent(runId)}/telemetry`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        run_id: runId,
+        ...(telemetry.tokenUsage ? { token_usage: telemetry.tokenUsage } : {}),
+        ...(telemetry.contextUsage ? { context_usage: telemetry.contextUsage } : {}),
+      }),
+    },
+  );
+  if (!response.ok) throw new Error(await parseApiError(response));
+}
+
 export async function deleteSession(sessionId: string): Promise<void> {
   const response = await fetch(
     `${API_BASE_URL}/api/sessions/${encodeURIComponent(sessionId)}`,
@@ -3214,9 +3606,14 @@ export interface MemoryUpdateEvent {
 // Why: Skill 匹配命中通知（SSE），供前端展示"已命中 Skill"的实时反馈。
 export interface SkillMatchedEvent {
   type: 'skill_matched';
+  skill_id?: number;
   skill_name: string;
   skill_type: 'code_pattern' | 'task_flow' | 'fix_template' | 'instruction';
   confidence: number;
+  injected?: boolean;
+  injection_mode?: 'summary' | 'full' | 'on_demand';
+  injected_step_count?: number;
+  injected_validation_count?: number;
   standard_steps: string[];
   done: true;
 }
@@ -3282,6 +3679,140 @@ export interface SkillCapsule {
   source: string | null;
   created_at: number;
   updated_at: number;
+}
+
+export type GoldenTraceCaseStatus = 'draft' | 'golden' | 'retired';
+export type GoldenTraceQualityState = 'candidate' | 'verified' | 'invalidated';
+export type GoldenTraceEvaluationStatus =
+  | 'queued'
+  | 'running'
+  | 'passed'
+  | 'failed'
+  | 'blocked'
+  | 'cancelled';
+
+export interface GoldenTraceOutcomeContract {
+  schema_version?: number;
+  required_scope: string;
+  allowed_path_prefixes?: string[];
+  forbidden_path_prefixes?: string[];
+  final_state_assertions?: string[];
+  require_browser_verification?: boolean;
+  require_interaction_verification?: boolean;
+  max_console_errors?: number;
+  max_page_errors?: number;
+  require_no_vfs_pollution?: boolean;
+  require_no_commit_before_browser_pass?: boolean;
+  require_no_regressions?: boolean;
+  require_static_verification?: boolean;
+}
+
+export interface GoldenTraceSemanticTrace {
+  schema_version?: number;
+  user_goal?: string;
+  task_scope: string;
+  root_cause_category: string;
+  allowed_tools: string[];
+  verification_strategy: string[];
+  success_criteria: string[];
+  applicability_conditions?: string[];
+  provenance?: Record<string, unknown>;
+}
+
+export interface GoldenTraceConcreteTrace {
+  schema_version?: number;
+  read_count?: number;
+  read_order: string[];
+  tool_order: string[];
+  patch: Record<string, unknown>;
+  browser_evidence: Record<string, unknown>;
+  revisions: Record<string, string>;
+  final_result: Record<string, unknown>;
+}
+
+export interface GoldenTraceCase {
+  case_id: string;
+  title: string;
+  schema_version: number;
+  status: GoldenTraceCaseStatus;
+  quality_state: GoldenTraceQualityState;
+  invalidated_reason?: string;
+  invalidated_at?: number | null;
+  source_session_id: string;
+  source_run_id: string;
+  request_text: string;
+  contract: GoldenTraceOutcomeContract;
+  semantic_trace?: GoldenTraceSemanticTrace;
+  concrete_trace?: GoldenTraceConcreteTrace;
+  fixture_checkpoint_id: number | null;
+  browser_evidence: Record<string, unknown>;
+  source_trace_hash: string;
+  source_quality: 'complete' | 'summary_only';
+  skill_id: number | null;
+  created_at: number;
+  updated_at: number;
+  latest_evaluation?: GoldenTraceEvaluation | null;
+}
+
+export interface GoldenTraceGateResult {
+  passed: boolean;
+  actual?: unknown;
+  expected?: unknown;
+  reason: string;
+}
+
+export interface GoldenTraceEvaluationReport {
+  status: GoldenTraceEvaluationStatus;
+  passed: boolean;
+  gates: Record<string, GoldenTraceGateResult>;
+  metrics: Record<string, unknown>;
+  details: Record<string, unknown>;
+}
+
+export interface GoldenTraceEvaluation {
+  evaluation_run_id: string;
+  case_id: string;
+  client_request_id: string;
+  mode: 'replay' | 'live';
+  status: GoldenTraceEvaluationStatus;
+  run_id: string | null;
+  browser_run_id: string | null;
+  report: GoldenTraceEvaluationReport | null;
+  created_at: number;
+  finished_at: number | null;
+}
+
+export interface GoldenTraceListResponse {
+  data: GoldenTraceCase[];
+  pagination: { page: number; page_size: number; total: number };
+}
+
+export interface GoldenTraceDetailResponse {
+  case: GoldenTraceCase;
+  recent_evaluations: GoldenTraceEvaluation[];
+  evaluation_count: number;
+}
+
+export type GoldenTraceSemanticTraceInput = Partial<GoldenTraceSemanticTrace> &
+  Pick<GoldenTraceSemanticTrace, 'task_scope' | 'root_cause_category' | 'allowed_tools' | 'verification_strategy' | 'success_criteria'>;
+
+export interface GoldenTraceCreateInput {
+  sessionId: string;
+  sourceRunId: string;
+  title: string;
+  contract?: GoldenTraceOutcomeContract;
+  semanticTrace?: GoldenTraceSemanticTraceInput;
+}
+
+export interface GoldenTraceEvaluationCreateInput {
+  clientRequestId: string;
+  mode?: 'replay' | 'live';
+}
+
+export interface GoldenTraceEvaluationResponse {
+  created: boolean;
+  existing: boolean;
+  evaluation: GoldenTraceEvaluation;
 }
 
 // Why: Skill 市场目录项（GET /api/skills/catalog），含已安装标记。
@@ -3391,6 +3922,109 @@ export async function getSkills(
   const response = await fetch(`${API_BASE_URL}/api/memory/skills${query}`);
   if (!response.ok) throw new Error(await parseApiError(response));
   return response.json();
+}
+
+export async function listGoldenTraces(options: {
+  page?: number;
+  pageSize?: number;
+  status?: GoldenTraceCaseStatus;
+} = {}): Promise<GoldenTraceListResponse> {
+  const params = new URLSearchParams({
+    page: String(Math.max(1, options.page ?? 1)),
+    page_size: String(Math.max(1, options.pageSize ?? 20)),
+  });
+  if (options.status) params.set('status', options.status);
+  const response = await fetch(`${API_BASE_URL}/api/memory/golden-traces?${params.toString()}`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<GoldenTraceListResponse>;
+}
+
+export async function createGoldenTrace(
+  input: GoldenTraceCreateInput,
+): Promise<{ created: boolean; existing: boolean; reactivated: boolean; case: GoldenTraceCase }> {
+  const response = await fetch(`${API_BASE_URL}/api/memory/golden-traces`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: input.sessionId,
+      source_run_id: input.sourceRunId,
+      title: input.title,
+      ...(input.contract ? { contract: input.contract } : {}),
+      ...(input.semanticTrace ? { semantic_trace: input.semanticTrace } : {}),
+    }),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<{ created: boolean; existing: boolean; reactivated: boolean; case: GoldenTraceCase }>;
+}
+
+export async function updateGoldenTraceSemantic(
+  caseId: string,
+  semanticTrace: GoldenTraceSemanticTraceInput,
+): Promise<{ case: GoldenTraceCase }> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/memory/golden-traces/${encodeURIComponent(caseId)}/semantic-trace`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(semanticTrace),
+    },
+  );
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<{ case: GoldenTraceCase }>;
+}
+
+export async function getGoldenTrace(caseId: string): Promise<GoldenTraceDetailResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/memory/golden-traces/${encodeURIComponent(caseId)}`);
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<GoldenTraceDetailResponse>;
+}
+
+export async function setGoldenTraceStatus(
+  caseId: string,
+  status: GoldenTraceCaseStatus,
+): Promise<{ case: GoldenTraceCase }> {
+  const response = await fetch(`${API_BASE_URL}/api/memory/golden-traces/${encodeURIComponent(caseId)}/status`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status }),
+  });
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<{ case: GoldenTraceCase }>;
+}
+
+export async function invalidateGoldenTrace(
+  caseId: string,
+  reason: string,
+): Promise<{ updated: boolean; invalidated: boolean; case: GoldenTraceCase }> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/memory/golden-traces/${encodeURIComponent(caseId)}/dispute`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    },
+  );
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<{ updated: boolean; invalidated: boolean; case: GoldenTraceCase }>;
+}
+
+export async function enqueueGoldenTraceEvaluation(
+  caseId: string,
+  input: GoldenTraceEvaluationCreateInput,
+): Promise<GoldenTraceEvaluationResponse> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/memory/golden-traces/${encodeURIComponent(caseId)}/runs`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        client_request_id: input.clientRequestId,
+        mode: input.mode ?? 'replay',
+      }),
+    },
+  );
+  if (!response.ok) throw new Error(await parseApiError(response));
+  return response.json() as Promise<GoldenTraceEvaluationResponse>;
 }
 
 // Why: 人工确认上架（决策 1）——pending ↔ published 状态流转的唯一前端入口。

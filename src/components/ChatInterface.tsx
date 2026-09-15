@@ -27,6 +27,7 @@ import {
   createSession,
   getSessionHistory,
   saveSessionSnapshot,
+  replaceSessionChatMemory,
   deleteSession,
   renameSession,
   clearSessions,
@@ -48,6 +49,11 @@ import {
   publishCodeProject,
   PublishedCodeProject,
   getCodeProject,
+  readCodeWorkbench,
+  createGoldenTrace,
+  type CodeAgentRun,
+  type CodeAgentActivityEvent,
+  type CodeAgentTimelineEvent,
   classifyCodeWorkbenchIntent,
   type CodeWorkbenchIntentDecision,
   type CodeIntentActiveRun,
@@ -77,6 +83,10 @@ import ModelQuickSwitcher, { type VideoComposerParams } from './ModelQuickSwitch
 import ChatNodeNavigator, { ChatNode } from './ChatNodeNavigator';
 import CodeWorkspace from './CodeWorkspace';
 import CodeShowcasePage from './code-showcase/CodeShowcasePage';
+import { isRuntimeCandidateForBrowserRun } from '../Code/agentRunIdentity';
+import { isCodeWorkflowBusy } from '../Code/codeWorkflowState';
+import { mapAgentRunsToPrompts } from '../Code/agentRunLifecycle';
+import { getAgentRunFamilyIds } from '../Code/terminalSessionPolicy';
 import WritingWorkspace from '../features/ai-writing/WritingWorkspace';
 import ImagePlazaWorkspace from '../features/picture/ImagePlazaWorkspace';
 import ImageStudioWorkspace from '../features/picture/ImageStudioWorkspace';
@@ -122,7 +132,10 @@ import useCodeAutoRepair from '../hooks/useCodeAutoRepair';
 import { SelectedElementContext, SandboxConsoleEntry } from '../lib/codeSandbox';
 import { bundleVFS, VirtualFileSystem } from '../Code/vfsBundler';
 import { isFullstackVFS, isManifestProjectVFS, parseProjectCode, serializeProjectVFS } from '../Code/fullstackBundler';
-import { buildCodeReadOnlyPrompt, isCodeAgentRunUnfinished } from '../lib/codeWorkbenchConversation';
+import {
+  buildCodeIntentContext,
+  toCodeIntentResumeCandidate,
+} from '../lib/codeWorkbenchConversation';
 import {
   createSnapshot,
   deepCopyVFS,
@@ -241,6 +254,71 @@ function researchSourcesFromMessage(message?: ChatMessage): ResearchChunk[] {
   return message.researchChunks?.length
     ? message.researchChunks
     : researchChunksFromWebDocs(message.webDocs ?? []);
+}
+
+function readOnlyActivityToTimelineEvent(
+  event: CodeAgentActivityEvent,
+  fallbackRunId: string,
+  fallbackSequence: number,
+): CodeAgentTimelineEvent | null {
+  if (!event.content.trim()) return null;
+  const runId = event.run_id?.trim() || fallbackRunId;
+  const actorId = event.actor_id?.trim() || `main:${runId}`;
+    const stage: CodeAgentTimelineEvent['stage'] = event.channel === 'status'
+      ? 'status'
+      : event.channel === 'answer'
+        ? 'summary'
+        : event.phase === 'preflight'
+          ? 'preflight'
+        : event.phase === 'thinking'
+          ? 'thinking'
+        : event.phase === 'validating'
+          ? 'validation'
+          : 'output';
+  const metadata: Record<string, unknown> = {
+    ...(event.metadata ?? {}),
+    source: 'code-read-only-agent',
+  };
+  const evidence = metadata.runtime_read_evidence;
+  if (
+    stage === 'status'
+    && evidence
+    && typeof evidence === 'object'
+    && typeof (evidence as { path?: unknown }).path === 'string'
+  ) {
+    metadata.path = (evidence as { path: string }).path;
+  }
+  return {
+    eventId: event.event_id || `${runId}:read-only:${event.sequence ?? fallbackSequence}`,
+    runId,
+    actorId,
+    actorKind: 'main',
+    stage,
+    content: event.content,
+    done: event.done,
+    timestampMs: event.timestamp_ms ?? Date.now(),
+    sequence: event.sequence ?? fallbackSequence,
+    iteration: event.iteration,
+    status: event.status ?? event.phase,
+    metadata,
+  };
+}
+
+function messagesForMemory(messages: ChatMessage[]): Array<Pick<ChatMessage, 'role' | 'content'>> {
+  return messages.map(({ role, content }) => ({ role, content }));
+}
+
+function promptIndexForMessage(messages: ChatMessage[], messageIndex: number): number | null {
+  if (messageIndex < 0 || messageIndex >= messages.length) return null;
+  const target = messages[messageIndex];
+  if (!target) return null;
+  if (target.role === 'user') {
+    return messages.slice(0, messageIndex + 1).filter((message) => message.role === 'user').length - 1;
+  }
+  const previousUserIndex = messages.slice(0, messageIndex + 1).findLastIndex((message) => message.role === 'user');
+  return previousUserIndex < 0
+    ? null
+    : messages.slice(0, previousUserIndex + 1).filter((message) => message.role === 'user').length - 1;
 }
 
 function buildCodeProjectCover(vfs: VirtualFileSystem, title: string): string {
@@ -424,6 +502,7 @@ export default function ChatInterface() {
 
   const [reasoningSteps, setReasoningSteps] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   // Why 保留 setWebDocs / setResearchChunks 仅作旧链路兼容：
   //   真正的每轮状态来源已经切换到 perRoundXxxRef + ChatMessage.xxx 扩展字段，
   //   右抽屉也被移除（下面的 Sidebar + Overlay + Float Button 会删掉）。
@@ -663,6 +742,9 @@ export default function ChatInterface() {
   // Why: 重写消息——点"重写"把该条用户消息载回输入框，CTRL+Enter 发送；
   // 若编辑的是历史消息，提交时先截断其后的所有记录（ChatGPT 式编辑重发）。
   const [rewritingIndex, setRewritingIndex] = useState<number | null>(null);
+  // All branch edits are serialized. A follow-up request must wait until the
+  // server has moved the memory cursor and saved the matching UI snapshot.
+  const memoryBranchSyncRef = useRef<Promise<void>>(Promise.resolve());
   const titleRequestedRef = useRef<Set<string>>(new Set());
   const {
     code: generatedCode,
@@ -677,12 +759,22 @@ export default function ChatInterface() {
     reset: resetCode,
     restore: restoreCode,
     restoreAgentRuns,
+    discardAgentRuns,
     handleRuntimeError,
     stopAutoRepair,
     compactContext,
     addTrustedTerminalPrefix,
     verifyRuntimeCandidate,
+    settleCurrentAgentRunAfterAcceptance,
   } = useCodeAutoRepair();
+
+  const codeWorkflowBusy = isCodeWorkflowBusy({
+    mode,
+    isLoading,
+    agentIsRunning: agentTrace.isRunning,
+    agentStatus: agentTrace.status,
+    codeStatus: codeStatus.state,
+  });
 
   const handleCompactCodeContext = useCallback(async () => {
     if (isCompactingCodeContext) return;
@@ -848,7 +940,10 @@ export default function ChatInterface() {
     localStorage.setItem('historySidebarCollapsed', String(collapsed));
   };
 
-  const buildSnapshot = (snapshotMessages: ChatMessage[] = messages): SessionSnapshot => {
+  const buildSnapshot = (
+    snapshotMessages: ChatMessage[] = messagesRef.current,
+    snapshotAgentRuns: CodeAgentRun[] = agentRuns,
+  ): SessionSnapshot => {
     // 为什么这里单独拼一次 global nodeProgress/webDocs/researchChunks：
     //   - SessionSnapshot 顶层字段是「老会话恢复兼容」所需（applySnapshot 里会把这些字段迁移到最后一条 assistant 消息）；
     //   - 真正的持久化主体是 messages[i].nodeProgress/webDocs/researchChunks（每轮绑定），这里顶层只同步「当前轮」的 refs 作兜底。
@@ -891,9 +986,13 @@ export default function ChatInterface() {
       codeVersions,
       activeCodeVersionId,
       codeProjectKind,
-      codeAgentRuns: agentRuns,
+      codeAgentRuns: snapshotAgentRuns,
     };
   };
+  // Keep the snapshot builder current without making branch-edit callbacks
+  // depend on a freshly-created function every render.
+  const buildSnapshotRef = useRef(buildSnapshot);
+  buildSnapshotRef.current = buildSnapshot;
 
   const persistResearchMessages = (sessionId: string | null | undefined, nextMessages: ChatMessage[]) => {
     messagesRef.current = nextMessages;
@@ -1197,6 +1296,35 @@ export default function ChatInterface() {
       ? serializeProjectVFS(vfs)
       : bundleVFS(vfs, { injectInspector: false }));
   }, [captureCodeVersion, restoreCode]);
+
+  const handleSaveGoldenTrace = useCallback(async (run: CodeAgentRun) => {
+    if (!activeSessionId || activeSessionId === LEGACY_GLOBAL_SESSION_ID) {
+      setError('当前会话尚未持久化，无法保存 Golden Trace。');
+      return;
+    }
+    const defaultTitle = run.request.trim().slice(0, 80) || '交互式前端运行时修复';
+    const title = window.prompt('为这条成功轨迹命名：', defaultTitle)?.trim();
+    if (!title) return;
+    setError(null);
+    try {
+      const result = await createGoldenTrace({
+        sessionId: activeSessionId,
+        sourceRunId: run.id,
+        title,
+      });
+      setNotice(
+        result.reactivated
+          ? '这条 Golden Trace 已从退役状态恢复为草稿，可继续评估或上架。'
+          : result.existing
+            ? '这条运行轨迹已经保存过了。'
+            : 'Golden Trace 已保存，可在记忆面板中查看.',
+      );
+      window.dispatchEvent(new Event('memory-updated'));
+    } catch (cause) {
+      setNotice(null);
+      setError(cause instanceof Error ? `保存 Golden Trace 失败：${cause.message}` : '保存 Golden Trace 失败。');
+    }
+  }, [activeSessionId]);
 
   const openSession = async (session: SessionSummary) => {
     setIsSessionReady(false);
@@ -1522,7 +1650,10 @@ export default function ChatInterface() {
       ]);
       return;
     }
-    const snapshotMessages = messages.length > 0 ? messages : messagesRef.current;
+    // messagesRef is the synchronous source of truth during streaming. The
+    // React state value can lag one render behind and would let the debounced
+    // autosave overwrite a just-completed read-only answer.
+    const snapshotMessages = messagesRef.current;
     // Never let a stale render overwrite a completed research session with an
     // empty message array while switching sessions or hydrating history.
     if (mode === 'research' && snapshotMessages.length === 0) return;
@@ -1661,15 +1792,21 @@ export default function ChatInterface() {
   //   内部 useCallback/useMemo 把它们当 dep → 每轮失效 → 连环 setState → 无限循环。
   const handleTerminalPropositionUpdate = useCallback((prop: {
     run_id?: string; status: string; remaining_seconds?: number; command?: string; id?: string | number;
+    result_exit_code?: number | null;
   } | null | undefined) => {
     if (!prop) return;
-    if (prop.status !== 'pending' && prop.status !== 'needs_confirm') return;
+    const isWaiting = prop.status === 'pending' || prop.status === 'needs_confirm';
+    const statusText = isWaiting
+      ? `正在等待用户选择，剩余 ${prop.remaining_seconds}s`
+      : prop.status === 'executed'
+        ? `已执行完成（exit_code=${prop.result_exit_code ?? 'unknown'}）`
+        : `状态：${prop.status}`;
     try {
       window.dispatchEvent(new CustomEvent('code-agent-run-append-step', {
         detail: {
           run_id: prop.run_id,
-          step: `【终端命令审批】正在等待用户选择，剩余 ${prop.remaining_seconds}s：${prop.command}`,
-          dedupe_key: `term-prop-${String(prop.id)}`,
+          step: `【终端命令】${statusText}：${prop.command}`,
+          dedupe_key: `term-prop-${String(prop.id)}-${prop.status}`,
         },
       }));
     } catch { /* noop */ }
@@ -2021,70 +2158,109 @@ export default function ChatInterface() {
     assistantMessageId: string;
     requestToken: number;
     decision: CodeWorkbenchIntentDecision;
-    latestRun?: (typeof agentRuns)[number];
+    recentTurns: CodeIntentTurn[];
+    assistantReferences: CodeIntentTurn[];
   }) => {
     const parsedVfs = parseProjectCode(generatedCode);
-    const files = parsedVfs && Object.keys(parsedVfs).length > 0
-      ? Object.keys(parsedVfs)
-      : generatedCode.trim() ? ['index.html'] : [];
-    const latestRun = input.latestRun;
-    const contextPrompt = buildCodeReadOnlyPrompt(input.userMessage, {
-      projectKind: codeProjectKind,
-      files,
-      latestRun: latestRun ? {
-        request: latestRun.request,
-        phase: latestRun.trace.phase,
-        summary: latestRun.trace.summary || latestRun.trace.answer,
-        taskPlan: latestRun.trace.taskPlan ? {
-          completedCount: latestRun.trace.taskPlan.completedCount,
-          totalCount: latestRun.trace.taskPlan.totalCount,
-          status: latestRun.trace.taskPlan.status,
-        } : undefined,
-      } : undefined,
-    });
     const clarificationHint = input.decision.intent === 'clarify'
       ? '\n\n路由事实：当前没有可恢复的未完成 Agent run。请向用户说明这一点，并等待新的明确需求。'
       : '';
+    const routingUnavailable = input.decision.route_available === false;
     const streamingAssistant: ChatMessage = {
       id: input.assistantMessageId,
       role: 'assistant',
       content: '',
-      codeResponseKind: input.decision.intent === 'clarify' ? 'clarify' : 'conversation',
+      codeResponseKind: routingUnavailable
+        ? 'routing_error'
+        : input.decision.intent === 'clarify' ? 'clarify' : 'conversation',
     };
     messagesRef.current = [...messagesRef.current, streamingAssistant];
     setMessages(messagesRef.current);
 
+    // A failed/empty semantic-route response is not a read-only decision.
+    // Starting the read-only Agent here used to make an explicit follow-up
+    // such as “请你修复吧” produce a manual patch instead of entering the
+    // mutation Agent. Persist the boundary as an execution error and wait for
+    // a fresh user retry; never spend another model call on a misleading
+    // answer.
+    if (routingUnavailable) {
+      const finalContent = '意图路由暂时不可用，本轮没有读取、修改或生成补丁。请稍后重试。';
+      const nextMessages = messagesRef.current.map((message) =>
+        message.id === input.assistantMessageId ? { ...message, content: finalContent } : message,
+      );
+      messagesRef.current = nextMessages;
+      setMessages(nextMessages);
+      const updated = await saveSessionSnapshot(
+        input.requestSessionId,
+        { ...buildSnapshot(), messages: nextMessages },
+        false,
+      );
+      setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+      return;
+    }
+
     let answer = '';
     let streamError = '';
-    const updateAnswer = (nextContent: string) => {
+    let readOnlyRunId = '';
+    let readOnlyTimeline: CodeAgentTimelineEvent[] = [];
+    const updateReadOnlyMessage = (patch: Partial<Pick<ChatMessage, 'content' | 'codeReadOnlyTimeline'>>) => {
       if (input.requestToken !== activeRequestTokenRef.current) return;
-      answer = nextContent;
       const nextMessages = messagesRef.current.map((message) =>
-        message.id === input.assistantMessageId ? { ...message, content: nextContent } : message,
+        message.id === input.assistantMessageId ? { ...message, ...patch } : message,
       );
       messagesRef.current = nextMessages;
       setMessages(nextMessages);
     };
+    const updateAnswer = (nextContent: string) => {
+      answer = nextContent;
+      updateReadOnlyMessage({ content: nextContent });
+    };
+    const appendReadOnlyActivity = (event: CodeAgentActivityEvent) => {
+      readOnlyRunId = event.run_id?.trim() || readOnlyRunId || `read-only:${input.assistantMessageId}`;
+      const timelineEvent = readOnlyActivityToTimelineEvent(
+        event,
+        readOnlyRunId,
+        readOnlyTimeline.length + 1,
+      );
+      if (!timelineEvent) return;
+      readOnlyTimeline = [
+        ...readOnlyTimeline.filter((item) => item.eventId !== timelineEvent.eventId),
+        timelineEvent,
+      ].slice(-80);
+      updateReadOnlyMessage({ codeReadOnlyTimeline: readOnlyTimeline });
+    };
 
-    await sendChatMessage(`${contextPrompt}${clarificationHint}`, 'standard', {
-      onToken: (token) => updateAnswer(`${answer}${token}`),
-      onDone: (event) => {
-        if (event.answer.length > answer.length) updateAnswer(event.answer);
-      },
-      onError: (event) => { streamError = event.message; },
-    }, {
-      sessionId: input.requestSessionId,
-      providerOverride: activeProvider === 'custom' ? 'deepseek' : activeProvider,
-      maxTokensOverride: 4_000,
-      runtimeSettings: {
-        ...runtimeSettings,
-        webSearch: 'off',
-        deepThinking: 'off',
-        mcpMode: 'off',
-        mcpServerIds: [],
-        skillMode: 'off',
-        skillIds: [],
-      },
+    await readCodeWorkbench({
+      message: `${input.userMessage}${clarificationHint}`,
+      vfs: parsedVfs ?? {},
+      project_kind: codeProjectKind,
+      recent_turns: input.recentTurns,
+      assistant_references: input.assistantReferences,
+      session_id: input.requestSessionId,
+    }, (event) => {
+      if (event.type === 'error') {
+        streamError = event.message;
+        appendReadOnlyActivity({
+          type: 'agent_activity',
+          channel: 'status',
+          phase: 'diagnosing',
+          content: event.message,
+          done: true,
+          status: 'failed',
+        });
+        return;
+      }
+      if (event.type === 'agent_activity') {
+        appendReadOnlyActivity(event);
+        if (event.channel === 'answer') {
+          updateAnswer(event.done ? event.content : `${answer}${event.content}`);
+        }
+        return;
+      }
+      if (event.type === 'runtime_summary' && event.intent === 'answer') {
+        updateAnswer(event.content);
+        return;
+      }
     });
     if (streamError) throw new Error(streamError);
     if (input.requestToken !== activeRequestTokenRef.current) return;
@@ -2098,9 +2274,33 @@ export default function ChatInterface() {
     setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
   };
 
+  const persistEditedConversation = useCallback((
+    nextMessages: ChatMessage[],
+    nextAgentRuns: CodeAgentRun[] = agentRuns,
+  ) => {
+    messagesRef.current = nextMessages;
+    setMessages(nextMessages);
+    const sessionId = activeSessionId;
+    if (!sessionId || sessionId === LEGACY_GLOBAL_SESSION_ID) return;
+
+    const operation = memoryBranchSyncRef.current.then(async () => {
+      await replaceSessionChatMemory(sessionId, messagesForMemory(nextMessages));
+      const updated = await saveSessionSnapshot(
+        sessionId,
+        buildSnapshotRef.current(nextMessages, nextAgentRuns),
+        false,
+      );
+      setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+    });
+    memoryBranchSyncRef.current = operation.catch(() => undefined);
+    void operation.catch((requestError) => {
+      setError(requestError instanceof Error ? requestError.message : '保存当前对话分支失败。');
+    });
+  }, [activeSessionId, agentRuns]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isLoading || !isSessionReady) return;
+    if (!input.trim() || isLoading || codeWorkflowBusy || !isSessionReady) return;
 
     const userMessage = input.trim();
     const requestAttachments = attachments;
@@ -2114,6 +2314,28 @@ export default function ChatInterface() {
     const turnBaseMessages = rewritingIndex != null
       ? currentMessages.slice(0, rewritingIndex)
       : currentMessages;
+    const isBranchRewrite = rewritingIndex != null;
+    let agentRunsForTurn = agentRuns;
+    if (mode === 'code' && rewritingIndex != null) {
+      const codePromptsBeforeRewrite = currentMessages
+        .filter((message) => message.role === 'user')
+        .map((message) => message.content);
+      const targetPromptIndex = currentMessages
+        .slice(0, rewritingIndex)
+        .filter((message) => message.role === 'user')
+        .length;
+      const runsToDiscard = mapAgentRunsToPrompts(agentRuns, codePromptsBeforeRewrite)
+        .slice(targetPromptIndex)
+        .flatMap((run) => run ? [run.id] : []);
+      const runIds = getAgentRunFamilyIds(agentRuns, runsToDiscard);
+      agentRunsForTurn = agentRuns.filter((run) => !runIds.includes(run.id));
+      discardAgentRuns(runIds);
+      if (runIds.length) {
+        window.dispatchEvent(new CustomEvent('code-agent-terminal-close', {
+          detail: { run_ids: runIds, reason: 'rewrite' },
+        }));
+      }
+    }
     const userTurnMessage: ChatMessage = {
       id: userMessageId,
       role: 'user',
@@ -2172,55 +2394,64 @@ export default function ChatInterface() {
       }
     }
 
-    let codeIntentDecision: CodeWorkbenchIntentDecision | null = null;
-    if (mode === 'code') {
-      // The newest run is the durable task checkpoint.  Scope is sticky across
-      // turns, but runtime evidence belongs only to an unfinished run that may
-      // be explicitly resumed.
-      const latestCodeRun = [...agentRuns].reverse()[0];
-      const latestUnfinishedRun = [...agentRuns].reverse().find(isCodeAgentRunUnfinished);
+    try {
+      // A delete may still be persisting its branch cut. Serialize the next
+      // request behind it so the provider cannot observe the deleted turn.
+      await memoryBranchSyncRef.current;
+    } catch {
+      setError('当前对话分支尚未保存完成，请稍后重试。');
+      setIsLoading(false);
+      return;
+    }
+
+    if (isBranchRewrite) {
+      // Commit the branch cut before any classifier/provider call. The backend
+      // must never build context from the old ledger while this replacement is
+      // in flight, and the UI snapshot must not be overwritten by a debounce
+      // that still captures the discarded messages/runs.
+      const branchOperation = (async () => {
+        await replaceSessionChatMemory(requestSessionId, messagesForMemory(nextMessagesWithUser));
+        const updated = await saveSessionSnapshot(
+          requestSessionId,
+          buildSnapshot(nextMessagesWithUser, agentRunsForTurn),
+          false,
+        );
+        setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+      })();
+      memoryBranchSyncRef.current = branchOperation.catch(() => undefined);
       try {
-        const recentTurns: CodeIntentTurn[] = turnBaseMessages
-          .slice(-8)
-          .map((item) => ({
-            role: item.role === 'user' || item.role === 'assistant' ? item.role : 'assistant',
-            content: item.content,
-          }));
-        const activeRun: CodeIntentActiveRun | undefined = latestCodeRun
-          ? {
-              run_id: latestCodeRun.id,
-              request: latestCodeRun.request,
-              phase: latestCodeRun.trace.phase,
-              status: latestCodeRun.trace.status,
-              summary: latestCodeRun.trace.summary || latestCodeRun.trace.answer,
-              resume_eligible: latestCodeRun.trace.resumeEligible,
-              runtime_verification: Boolean(latestCodeRun.trace.runtimeVerification),
-              active_scope: latestCodeRun.trace.activeScope,
-              scope_version: latestCodeRun.trace.scopeVersion,
-              allowed_next_action: latestCodeRun.trace.allowedNextAction,
-              target_files: latestCodeRun.trace.fileChanges?.map((change) => change.path),
-              last_verification: latestCodeRun.trace.resumeEligible
-                ? latestCodeRun.trace.runtimeEvidence
-                : undefined,
-            }
-          : undefined;
+        await branchOperation;
+      } catch (branchError) {
+        setError(branchError instanceof Error ? branchError.message : '保存重写后的对话分支失败。');
+        setIsLoading(false);
+        return;
+      }
+    }
+
+    let codeIntentDecision: CodeWorkbenchIntentDecision | null = null;
+    let codeIntentContext: ReturnType<typeof buildCodeIntentContext> | null = null;
+    if (mode === 'code') {
+      try {
+        codeIntentContext = buildCodeIntentContext(turnBaseMessages, agentRunsForTurn);
         codeIntentDecision = await classifyCodeWorkbenchIntent(userMessage, {
           hasProject: Boolean(generatedCode.trim()),
-          hasUnfinishedRun: Boolean(latestUnfinishedRun),
-          recentTurns,
-          activeRun,
+          hasUnfinishedRun: codeIntentContext.resumeCandidates.length > 0,
+          recentTurns: codeIntentContext.recentTurns,
+          assistantReferences: codeIntentContext.assistantReferences,
+          resumeCandidates: codeIntentContext.resumeCandidates.map(toCodeIntentResumeCandidate),
           projectKind: codeProjectKind,
-          activeScope: latestCodeRun?.trace.activeScope,
           sessionId: requestSessionId,
         });
       } catch {
         // Classification failure must fail closed. A temporary router outage
-        // can delay a write, but it must never turn a question into a patch.
+        // must not be reinterpreted as a read-only answer, because that would
+        // make an explicit follow-up look like a request for manual guidance.
         codeIntentDecision = {
           intent: 'conversation',
           confidence: 0,
-          reason: '意图路由暂时不可用，已按只读问题处理。',
+          reason: '意图路由暂时不可用，本轮未开始执行。',
           can_mutate: false,
+          route_available: false,
         };
       }
     }
@@ -2527,8 +2758,9 @@ export default function ChatInterface() {
       const decision = codeIntentDecision ?? {
         intent: 'conversation' as const,
         confidence: 0,
-        reason: '未取得意图路由结果，按只读问题处理。',
+        reason: '未取得意图路由结果，本轮未开始执行。',
         can_mutate: false,
+        route_available: false,
       };
         const isIncrementalChange = Boolean(generatedCode.trim());
         const targetElement = selectedElement;
@@ -2548,45 +2780,36 @@ export default function ChatInterface() {
           || decision.intent === 'conversation'
           || decision.intent === 'clarify'
         ) {
-          const latestUnfinishedRun = [...agentRuns].reverse().find(isCodeAgentRunUnfinished);
+          const context = codeIntentContext ?? buildCodeIntentContext(turnBaseMessages, agentRunsForTurn);
           await handleCodeReadOnlyConversation({
             requestSessionId,
             userMessage,
             assistantMessageId,
             requestToken,
             decision,
-            latestRun: latestUnfinishedRun,
+            recentTurns: context.recentTurns,
+            assistantReferences: context.assistantReferences,
           });
           return;
         }
-        const latestUnfinishedRun = [...agentRuns].reverse().find(isCodeAgentRunUnfinished);
-        const routerRecentTurns: CodeIntentTurn[] = turnBaseMessages
-          .slice(-8)
-          .map((item) => ({
-            role: item.role === 'user' || item.role === 'assistant' ? item.role : 'assistant',
-            content: item.content,
-          }));
-        const latestCodeRun = [...agentRuns].reverse()[0];
-        const routerActiveRun: CodeIntentActiveRun | undefined = latestCodeRun
+        const context = codeIntentContext ?? buildCodeIntentContext(turnBaseMessages, agentRunsForTurn);
+        const routerRecentTurns = context.recentTurns;
+        const selectedResumeRun = decision.intent === 'resume'
+          ? context.resumeCandidates.find((run) => run.id === decision.resume_run_id)
+          : undefined;
+        const routerActiveRun: CodeIntentActiveRun | undefined = selectedResumeRun
           ? {
-              run_id: latestCodeRun.id,
-              request: latestCodeRun.request,
-              phase: latestCodeRun.trace.phase,
-              status: latestCodeRun.trace.status,
-              summary: latestCodeRun.trace.summary || latestCodeRun.trace.answer,
-              resume_eligible: latestCodeRun.trace.resumeEligible,
-              runtime_verification: Boolean(latestCodeRun.trace.runtimeVerification),
-              active_scope: latestCodeRun.trace.activeScope,
-              scope_version: latestCodeRun.trace.scopeVersion,
-              allowed_next_action: latestCodeRun.trace.allowedNextAction,
-              target_files: latestCodeRun.trace.fileChanges?.map((change) => change.path),
-              last_verification: latestCodeRun.trace.resumeEligible
-                ? latestCodeRun.trace.runtimeEvidence
+              ...toCodeIntentResumeCandidate(selectedResumeRun),
+              target_files: selectedResumeRun.trace.fileChanges?.map((change) => change.path),
+              runtime_read_evidence: selectedResumeRun.trace.runtimeReadEvidence,
+              verification_session_id: selectedResumeRun.trace.verificationSessionId,
+              last_verification: selectedResumeRun.trace.resumeEligible
+                ? selectedResumeRun.trace.runtimeEvidence
                 : undefined,
             }
           : undefined;
         const mutationResult = decision.intent === 'resume'
-          ? latestUnfinishedRun
+          ? selectedResumeRun
             ? await modifyCode(
                 userMessage,
                 targetElement,
@@ -2595,14 +2818,16 @@ export default function ChatInterface() {
                 requestSessionId,
                 { ...mutationContext, intent: 'resume', resume: true },
                 {
-                  resumeFromRun: latestUnfinishedRun,
+                  resumeFromRun: selectedResumeRun,
                   intentRouteId: decision.route_id ?? undefined,
                   recentTurns: routerRecentTurns,
+                  assistantReferences: context.assistantReferences,
                   activeRun: routerActiveRun,
                   activeScope: decision.active_scope,
                   scopeVersion: decision.scope_version,
                   scopeSource: decision.scope_source,
                   allowedNextAction: decision.allowed_next_action,
+                  acceptanceGoal: decision.acceptance_goal ?? undefined,
                   runtimeEvidence: decision.intent === 'resume'
                     ? routerActiveRun?.last_verification
                     : undefined,
@@ -2614,13 +2839,15 @@ export default function ChatInterface() {
                 userMessage,
                 assistantMessageId,
                 requestToken,
-                decision: {
-                  intent: 'clarify',
-                  confidence: 1,
-                  reason: '没有找到可恢复的未完成 Agent run。',
-                  can_mutate: false,
-                },
-              }).then(() => false)
+              decision: {
+                intent: 'clarify',
+                confidence: 1,
+                reason: '没有找到可恢复的未完成 Agent run。',
+                can_mutate: false,
+              },
+              recentTurns: routerRecentTurns,
+              assistantReferences: context.assistantReferences,
+            }).then(() => false)
           : isIncrementalChange
             ? await modifyCode(
                 userMessage,
@@ -2632,33 +2859,40 @@ export default function ChatInterface() {
                 {
                   intentRouteId: decision.route_id ?? undefined,
                   recentTurns: routerRecentTurns,
-                  activeRun: routerActiveRun,
+                  // A new action starts with fresh evidence. Only an explicit
+                  // resume may carry the selected run's runtime checkpoint.
+                  activeRun: undefined,
+                  assistantReferences: context.assistantReferences,
                   activeScope: decision.active_scope,
                   scopeVersion: decision.scope_version,
                   scopeSource: decision.scope_source,
                   allowedNextAction: decision.allowed_next_action,
+                  acceptanceGoal: decision.acceptance_goal ?? undefined,
                   runtimeEvidence: undefined,
                 },
                 codeConsoleEntries,
               )
-            : await generateCode(userMessage, codeProjectKind, requestAttachments, requestSessionId, mcpContext);
+            : await generateCode(userMessage, codeProjectKind, requestAttachments, requestSessionId, mcpContext, decision.acceptance_goal ?? undefined);
         const didComplete = typeof mutationResult === 'object'
           ? mutationResult.completed
           : mutationResult;
         const isRuntimeCandidate = typeof mutationResult === 'object' && mutationResult.candidate;
         if (didComplete) {
           setSelectedElement(null);
-          setMessages((previous) => [
-            ...previous,
-            {
-              role: 'assistant',
-              content: isRuntimeCandidate
-                ? '候选补丁已生成，正在等待浏览器重新加载并验证 Console。'
-                : isIncrementalChange
-                ? '修改已应用，正在自动检测运行时错误。'
-                : '网页代码已生成，正在自动检测运行时错误。',
-            },
-          ]);
+          const assistantMessage: ChatMessage = {
+            id: assistantMessageId,
+            role: 'assistant',
+            content: isRuntimeCandidate
+              ? '候选补丁已生成，正在等待浏览器重新加载并验证 Console。'
+              : isIncrementalChange
+              ? '修改已应用，正在自动检测运行时错误。'
+              : '网页代码已生成，正在自动检测运行时错误。',
+          };
+          const nextMessages = messagesRef.current.some((message) => message.id === assistantMessageId)
+            ? messagesRef.current.map((message) => message.id === assistantMessageId ? assistantMessage : message)
+            : [...messagesRef.current, assistantMessage];
+          messagesRef.current = nextMessages;
+          setMessages(nextMessages);
         }
       } catch (requestError) {
         if (
@@ -2701,6 +2935,7 @@ export default function ChatInterface() {
           // Why: 千问原生调研后端已逐 chunk 推 token（answer 阶段），此前前端丢弃；
           //   现接入 pacing 实现报告真流式打字机。
           onToken: (token) => {
+            if (requestToken !== activeRequestTokenRef.current) return;
             answerPacing.push(token);
           },
           onReasoningDelta: (token) => {
@@ -2710,6 +2945,7 @@ export default function ChatInterface() {
           },
           onWebDocs: handleResearchWebDocs,
           onResearchDone: (event) => {
+            if (requestToken !== activeRequestTokenRef.current) return;
             setResearchProgress(null);
             // Why: 仅整块引擎（firecrawl/agent-loop/self-built）的 done 携带 report，走 commit 伪打字机；
             //   千问引擎 done 无 report（占位文案），总量已由 onToken push 累积，不能 commit 回卷。
@@ -2734,27 +2970,33 @@ export default function ChatInterface() {
             persistResearchMessages(requestSessionId, reportMessages);
           },
           onResearchReasonDone: (event) => {
-              answerPacing.commit(event.report);
-              if (event.reasoning) {
-                streamedResearchReasoning = event.reasoning;
-                reasoningPacing.commit(event.reasoning);
-                setReasoningSteps([event.reasoning]);
-              }
-              const updated = [...messagesRef.current];
-              const last = updated[updated.length - 1];
-              if (last && last.role === 'assistant') {
-                updated[updated.length - 1] = {
-                  ...last,
+            if (requestToken !== activeRequestTokenRef.current) return;
+            answerPacing.commit(event.report);
+            if (event.reasoning) {
+              streamedResearchReasoning = event.reasoning;
+              reasoningPacing.commit(event.reasoning);
+              setReasoningSteps([event.reasoning]);
+            }
+            const existingIndex = messagesRef.current.findIndex((message) => message.id === assistantMessageId);
+            const updated = existingIndex >= 0
+              ? messagesRef.current.map((message, index) => index === existingIndex
+                ? {
+                    ...message,
+                    content: event.report,
+                    reasoning: event.reasoning,
+                    reasoning_time: event.reasoning_time,
+                    // 写最终态：把 ref 中累积的所有阶段状态再挂到消息扩展字段
+                    nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : message.nodeProgress,
+                    webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : message.webDocs,
+                    researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : message.researchChunks,
+                  }
+                : message)
+              : [...messagesRef.current, {
+                  id: assistantMessageId,
+                  role: 'assistant' as const,
                   content: event.report,
-                  reasoning: event.reasoning,
-                  reasoning_time: event.reasoning_time,
-                  // 写最终态：把 ref 中累积的所有阶段状态再挂到扩展字段
-                  nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : last.nodeProgress,
-                  webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : last.webDocs,
-                  researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : last.researchChunks,
-                };
-              }
-              persistResearchMessages(requestSessionId, updated);
+                }];
+            persistResearchMessages(requestSessionId, updated);
           },
           onError: (event) => {
             setError(event.message);
@@ -2849,18 +3091,19 @@ export default function ChatInterface() {
             });
           },
           onPlanProgress: (event) => {
+            if (requestToken !== activeRequestTokenRef.current) return;
             perRoundPlanProgressRef.current = event;
             setPlanProgress(event);
             setAgentStatus('');
             const current = messagesRef.current;
-            const existingIndex = [...current].map((message, index) => ({ message, index })).reverse()
-              .find(({ message }) => message.id === assistantMessageId || (message.role === 'assistant' && message.planProgress))?.index ?? -1;
-            const nextMessages = existingIndex >= 0
-              ? current.map((message, index) => index === existingIndex ? { ...message, planProgress: event } : message)
-              : [...current, { role: 'assistant' as const, content: '', planProgress: event }];
+             const existingIndex = current.findIndex((message) => message.id === assistantMessageId);
+             const nextMessages = existingIndex >= 0
+               ? current.map((message, index) => index === existingIndex ? { ...message, planProgress: event } : message)
+               : [...current, { id: assistantMessageId, role: 'assistant' as const, content: '', planProgress: event }];
             persistPlanMessages(requestSessionId, nextMessages);
           },
           onPlanEvent: (event: PlanRuntimeEvent) => {
+            if (requestToken !== activeRequestTokenRef.current) return;
             if (event.type === 'search_started') {
               setAgentStatus(`正在搜索资料：${event.query}`);
               setPlanProgress((previous) => {
@@ -2948,11 +3191,10 @@ export default function ChatInterface() {
                 perRoundPlanProgressRef.current = nextProgress;
                 setPlanProgress(nextProgress);
                 const current = messagesRef.current;
-                const existingIndex = [...current].map((message, index) => ({ message, index })).reverse()
-                  .find(({ message }) => message.id === assistantMessageId || (message.role === 'assistant' && message.planProgress))?.index ?? -1;
-                const nextMessages = existingIndex >= 0
-                  ? current.map((message, index) => index === existingIndex ? { ...message, planProgress: nextProgress } : message)
-                  : [...current, { role: 'assistant' as const, content: '', planProgress: nextProgress }];
+                 const existingIndex = current.findIndex((message) => message.id === assistantMessageId);
+                 const nextMessages = existingIndex >= 0
+                   ? current.map((message, index) => index === existingIndex ? { ...message, planProgress: nextProgress } : message)
+                   : [...current, { id: assistantMessageId, role: 'assistant' as const, content: '', planProgress: nextProgress }];
                 persistPlanMessages(requestSessionId, nextMessages);
               }
               setAgentStatus('');
@@ -2960,12 +3202,11 @@ export default function ChatInterface() {
             }
             if (event.type === 'report_delta') {
               const current = messagesRef.current;
-              const existingIndex = [...current].map((message, index) => ({ message, index })).reverse()
-                .find(({ message }) => message.id === assistantMessageId || (message.role === 'assistant' && message.planProgress))?.index ?? -1;
+               const existingIndex = current.findIndex((message) => message.id === assistantMessageId);
               const previousReport = existingIndex >= 0 ? current[existingIndex]?.streamingReport ?? '' : '';
               const nextMessages = existingIndex >= 0
                 ? current.map((message, index) => index === existingIndex ? { ...message, streamingReport: `${previousReport}${event.delta}` } : message)
-                : [...current, { role: 'assistant' as const, content: '', streamingReport: event.delta, planProgress: perRoundPlanProgressRef.current ?? undefined }];
+                 : [...current, { id: assistantMessageId, role: 'assistant' as const, content: '', streamingReport: event.delta, planProgress: perRoundPlanProgressRef.current ?? undefined }];
               messagesRef.current = nextMessages;
               setMessages(nextMessages);
             }
@@ -2982,14 +3223,14 @@ export default function ChatInterface() {
             setMatchedSkills((prev) => [...prev, event]);
           },
           onDone: (event) => {
+            if (requestToken !== activeRequestTokenRef.current) return;
             answerPacing.commit(event.answer);
             const finalReasoning = streamedPlanReasoning.trim();
             const reasoningTime = finalReasoning
               ? Math.max(1, Math.round((Date.now() - reasoningStartedAt) / 1000))
               : undefined;
             const current = messagesRef.current;
-            const existingIndex = [...current].map((message, index) => ({ message, index })).reverse()
-              .find(({ message }) => message.id === assistantMessageId || (message.role === 'assistant' && message.planProgress))?.index ?? -1;
+             const existingIndex = current.findIndex((message) => message.id === assistantMessageId);
             const nextMessages = existingIndex >= 0
               ? current.map((message, index) => index === existingIndex ? {
                 ...message,
@@ -2999,8 +3240,9 @@ export default function ChatInterface() {
                 streamingReport: undefined,
                 planProgress: perRoundPlanProgressRef.current ?? message.planProgress,
               } : message)
-              : [...current, {
-                role: 'assistant' as const,
+               : [...current, {
+                 id: assistantMessageId,
+                 role: 'assistant' as const,
                 content: event.answer,
                 reasoning: finalReasoning || undefined,
                 reasoning_time: reasoningTime,
@@ -3027,6 +3269,13 @@ export default function ChatInterface() {
     } else if (mode === 'agent') {
       // 多智能体协同模式
       try {
+        const agentAssistant: ChatMessage = {
+          id: assistantMessageId,
+          role: 'assistant',
+          content: '',
+        };
+        messagesRef.current = [...messagesRef.current, agentAssistant];
+        setMessages(messagesRef.current);
         await sendChatMessage(userMessage, mode, {
           onNode: handleNodeEvent,
           onSystemStatus: (event) => {
@@ -3046,8 +3295,14 @@ export default function ChatInterface() {
             setAgentStatus(event.status === 'started' ? `【${event.actor}】正在输出…` : '正在准备下一位讨论成员…');
           },
           onAgentFinalAnswer: (event) => {
+            if (requestToken !== activeRequestTokenRef.current) return;
             answerPacing.commit(event.answer);
-            setMessages((prev) => [...prev, { role: 'assistant', content: event.answer }]);
+            const existingIndex = messagesRef.current.findIndex((message) => message.id === assistantMessageId);
+            const nextMessages = existingIndex >= 0
+              ? messagesRef.current.map((message, index) => index === existingIndex ? { ...message, content: event.answer } : message)
+              : [...messagesRef.current, { id: assistantMessageId, role: 'assistant' as const, content: event.answer }];
+            messagesRef.current = nextMessages;
+            setMessages(nextMessages);
           },
           onSkillMatched: (event) => {
             setMatchedSkills((prev) => [...prev, event]);
@@ -3108,15 +3363,15 @@ export default function ChatInterface() {
             setReasoningSteps([streamedReasoning]);
           },
           onToken: (token) => {
+            if (requestToken !== activeRequestTokenRef.current) return;
             streamedAnswer += token;
             answerPacing.push(token);
-            setMessages((prev) => {
-              const next = [...prev];
-              const last = next[next.length - 1];
-              if (last?.role === 'assistant') next[next.length - 1] = { ...last, content: streamedAnswer };
-              else next.push({ id: assistantMessageId, role: 'assistant', content: streamedAnswer });
-              return next;
-            });
+            const existingIndex = messagesRef.current.findIndex((message) => message.id === assistantMessageId);
+            const nextMessages = existingIndex >= 0
+              ? messagesRef.current.map((message, index) => index === existingIndex ? { ...message, content: streamedAnswer } : message)
+              : [...messagesRef.current, { id: assistantMessageId, role: 'assistant' as const, content: streamedAnswer }];
+            messagesRef.current = nextMessages;
+            setMessages(nextMessages);
           },
           onWebDocs: (event) => {
             // 写入 ref + 同步到最后一条 assistant 消息；右抽屉已移除
@@ -3165,6 +3420,7 @@ export default function ChatInterface() {
             setMatchedSkills((prev) => [...prev, event]);
           },
           onDone: (event) => {
+            if (requestToken !== activeRequestTokenRef.current) return;
             completedAnswer = event.answer || streamedAnswer;
             const finalReasoning = streamedReasoning.trim();
             const reasoningTime = finalReasoning
@@ -3201,26 +3457,25 @@ export default function ChatInterface() {
               // 流式已经写入最后一条消息，再补一次最终状态作为"快照落点"。
               // Persist the reasoning metadata too; otherwise a refreshed
               // session loses the duration and renders the old 0-second label.
-              setMessages((prev) => {
-                const next = [...prev];
-                const lastIndex = [...next].map((message, index) => ({ message, index }))
-                  .reverse().find(({ message }) => message.role === 'assistant')?.index ?? -1;
-                if (lastIndex >= 0) {
-                  next[lastIndex] = {
-                    ...next[lastIndex],
-                    content: event.answer || next[lastIndex].content,
-                    reasoning: finalReasoning || next[lastIndex].reasoning,
-                    reasoning_time: reasoningTime ?? next[lastIndex].reasoning_time,
-                    nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : next[lastIndex].nodeProgress,
-                    webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : next[lastIndex].webDocs,
-                    researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : next[lastIndex].researchChunks,
-                    tokenUsage: event.usage ?? perRoundTokenUsageRef.current ?? next[lastIndex].tokenUsage,
-                    mcpTrace: perRoundMcpTraceRef.current.length > 0 ? perRoundMcpTraceRef.current : next[lastIndex].mcpTrace,
-                  };
-                }
-                messagesRef.current = next;
-                return next;
-              });
+              const existingIndex = messagesRef.current.findIndex((message) => message.id === assistantMessageId);
+              if (existingIndex >= 0) {
+                const existing = messagesRef.current[existingIndex];
+                const nextMessages = messagesRef.current.map((message, index) => index === existingIndex
+                  ? {
+                      ...message,
+                      content: event.answer || existing.content,
+                      reasoning: finalReasoning || existing.reasoning,
+                      reasoning_time: reasoningTime ?? existing.reasoning_time,
+                      nodeProgress: perRoundNodeEventsRef.current.length > 0 ? perRoundNodeEventsRef.current : existing.nodeProgress,
+                      webDocs: perRoundWebDocsRef.current.length > 0 ? perRoundWebDocsRef.current : existing.webDocs,
+                      researchChunks: perRoundResearchChunksRef.current.length > 0 ? perRoundResearchChunksRef.current : existing.researchChunks,
+                      tokenUsage: event.usage ?? perRoundTokenUsageRef.current ?? existing.tokenUsage,
+                      mcpTrace: perRoundMcpTraceRef.current.length > 0 ? perRoundMcpTraceRef.current : existing.mcpTrace,
+                    }
+                  : message);
+                messagesRef.current = nextMessages;
+                setMessages(nextMessages);
+              }
               // Why: done 携带的可能是服务端最终全文（含流式期间未推完的尾部），
               //   commit 对齐总量；队列未排空部分继续匀速展开。
               answerPacing.commit(event.answer);
@@ -3416,11 +3671,32 @@ export default function ChatInterface() {
 
   // 删除单条消息；若删除的是正在重写的消息则清空重写态
   const handleDeleteMessage = useCallback((index: number) => {
+    const current = messagesRef.current;
+    if (!current[index]) return;
+    const nextMessages = current.filter((_, messageIndex) => messageIndex !== index);
+    let nextAgentRuns = agentRuns;
+    if (mode === 'code') {
+      const promptIndex = promptIndexForMessage(current, index);
+      if (promptIndex != null) {
+        const prompts = current.filter((message) => message.role === 'user').map((message) => message.content);
+        const selectedRun = mapAgentRunsToPrompts(agentRuns, prompts)[promptIndex];
+        const discardedRunIds = selectedRun
+          ? getAgentRunFamilyIds(agentRuns, [selectedRun.id])
+          : [];
+        nextAgentRuns = agentRuns.filter((run) => !discardedRunIds.includes(run.id));
+        discardAgentRuns(discardedRunIds);
+        if (discardedRunIds.length) {
+          window.dispatchEvent(new CustomEvent('code-agent-terminal-close', {
+            detail: { run_ids: discardedRunIds, reason: 'delete' },
+          }));
+        }
+      }
+    }
     setRewritingIndex((prev) => (
       prev == null ? null : (prev === index ? null : (prev > index ? prev - 1 : prev))
     ));
-    setMessages((prev) => prev.filter((_, i) => i !== index));
-  }, []);
+    persistEditedConversation(nextMessages, nextAgentRuns);
+  }, [agentRuns, discardAgentRuns, mode, persistEditedConversation]);
 
   // code 模式需求面板：promptIndex 对应第几个 user 消息
   const handleRewritePrompt = useCallback((promptIndex: number) => {
@@ -3437,18 +3713,37 @@ export default function ChatInterface() {
 
   // code 模式需求面板：删除第 promptIndex 条问答（用户问题 + 紧邻的智能体回答）
   const handleDeletePrompt = useCallback((promptIndex: number) => {
-    setMessages((prev) => {
-      const userIndices = prev
-        .map((m, idx) => (m.role === 'user' ? idx : -1))
-        .filter((idx) => idx >= 0);
-      const target = userIndices[promptIndex];
-      if (target == null) return prev;
-      const next = [...prev];
-      next.splice(target, 1);
-      if (next[target] && next[target].role === 'assistant') next.splice(target, 1);
-      return next;
+    const current = messagesRef.current;
+    const userIndices = current
+      .map((message, index) => (message.role === 'user' ? index : -1))
+      .filter((index) => index >= 0);
+    const target = userIndices[promptIndex];
+    if (target == null) return;
+    const next = [...current];
+    next.splice(target, 1);
+    if (next[target]?.role === 'assistant') next.splice(target, 1);
+
+    const prompts = current.filter((message) => message.role === 'user').map((message) => message.content);
+    const selectedRun = mapAgentRunsToPrompts(agentRuns, prompts)[promptIndex];
+    const discardedRunIds = selectedRun
+      ? getAgentRunFamilyIds(agentRuns, [selectedRun.id])
+      : [];
+    const nextAgentRuns = agentRuns.filter((run) => !discardedRunIds.includes(run.id));
+    discardAgentRuns(discardedRunIds);
+    if (discardedRunIds.length) {
+      window.dispatchEvent(new CustomEvent('code-agent-terminal-close', {
+        detail: { run_ids: discardedRunIds, reason: 'delete' },
+      }));
+    }
+    const removedCount = current.length - next.length;
+    setRewritingIndex((previous) => {
+      if (previous == null) return null;
+      if (previous >= target + removedCount) return previous - removedCount;
+      if (previous >= target) return null;
+      return previous;
     });
-  }, []);
+    persistEditedConversation(next, nextAgentRuns);
+  }, [agentRuns, discardAgentRuns, persistEditedConversation]);
 
   // 输入框 CTRL+Enter 发送（重写场景）
   const handleInputCtrlEnter = (e: React.KeyboardEvent) => {
@@ -3521,6 +3816,26 @@ export default function ChatInterface() {
         && index > latestCodeUserIndex,
       )?.message
     : undefined;
+  // CodeWorkspace renders user prompts from a separate projection. Keep all
+  // persisted read-only assistant turns in that same projection; otherwise
+  // adding a new user prompt makes the old single `latestCodeConversationAnswer`
+  // no longer sit after the latest user message and it disappears visually.
+  const codeConversationAnswers = mode === 'code'
+    ? (() => {
+        let promptIndex = -1;
+        return messages.flatMap((message) => {
+          if (message.role === 'user') promptIndex += 1;
+          if (message.role !== 'assistant' || !message.codeResponseKind || promptIndex < 0) return [];
+          return [{
+            promptIndex,
+            content: message.content,
+            kind: message.codeResponseKind,
+            timeline: message.codeReadOnlyTimeline ?? [],
+            isRunning: isLoading && message.id === messages.at(-1)?.id,
+          }];
+        });
+      })()
+    : [];
   const chatNodes = visibleMessages.reduce<ChatNode[]>((nodes, message, index) => {
     if (message.role === 'user') {
       nodes.push({
@@ -3608,7 +3923,7 @@ export default function ChatInterface() {
   } as CSSProperties;
 
   return (
-    <div style={workspaceStyle} className={`bg-gradient-to-b from-slate-50 to-slate-100 ${
+    <div style={workspaceStyle} className={`bg-white ${
       mode === 'code' ? 'h-screen overflow-hidden' : 'min-h-screen'
     }`}>
       <SessionSidebar
@@ -3771,13 +4086,18 @@ export default function ChatInterface() {
       <div className={`${isHistoryCollapsed ? 'lg:pl-14' : 'lg:pl-72'} ${mode === 'research' && !isNewConversation ? 'xl:mr-[var(--research-pane-width)]' : ''} ${isPlanMode && !isNewConversation ? 'xl:mr-[var(--plan-pane-width)]' : ''} ${artifactPanelState.status !== 'closed' && artifactPanelState.displayMode === 'split' ? 'xl:mr-[var(--artifact-panel-width)]' : ''} ${
         mode === 'code' ? 'h-screen overflow-hidden' : ''
       }`}>
-        <div className={`p-6 transition-all duration-300 ${
+        <div className={`${mode === 'code' ? 'px-1' : 'p-6'} transition-all duration-300 ${
           mode === 'code'
-            ? 'flex h-full max-w-none flex-col overflow-hidden pb-4 pt-0'
+            ? 'flex h-full max-w-none flex-col overflow-hidden pb-1 pt-0'
             : 'max-w-none pb-80 sm:pb-72'
         }`}>
         {/* Header */}
-        <header className="sticky top-0 z-30 -mx-6 mb-3 border-b border-slate-200/70 bg-slate-50/85 px-6 py-2.5 backdrop-blur-xl">
+        {mode === 'code' ? (
+        <header className="relative z-30 -mx-1 mb-1 h-[60px] shrink-0 border-b border-slate-200/70 bg-white">
+          <div id="code-workspace-topbar-slot" className="h-full min-w-0" />
+        </header>
+        ) : (
+        <header className="sticky top-0 z-30 shrink-0 -mx-6 mb-3 border-b border-slate-200/70 bg-white px-6 py-2.5">
           <button
             type="button"
             aria-label="打开历史会话"
@@ -3792,7 +4112,7 @@ export default function ChatInterface() {
                 <Sparkles size={16} />
               </span>
               <h1 className="truncate text-base font-semibold tracking-tight text-slate-900 sm:text-lg">
-                {mode === 'code' && (!isNewConversation || codeWorkbenchDraft) ? 'Code 工作台' : '全能型智能助手'}
+                全能型智能助手
               </h1>
             </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -3808,8 +4128,14 @@ export default function ChatInterface() {
           </div>
           </div>
         </header>
+        )}
 
         {/* Error Display */}
+        {notice && (
+          <div className="mb-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-center text-emerald-700">
+            {notice}
+          </div>
+        )}
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-lg p-3 mb-4 text-center">
             <span className="text-red-700">{error}</span>
@@ -3832,7 +4158,7 @@ export default function ChatInterface() {
         )}
 
         {/* Chat Messages */}
-        <div className={`${isNewConversation ? 'bg-transparent shadow-none' : 'bg-white/60 shadow-sm backdrop-blur'} mx-auto w-full rounded-2xl ${mode === 'code' ? 'max-w-none' : 'max-w-4xl'} ${
+        <div className={`${isNewConversation ? 'bg-transparent shadow-none' : 'bg-white shadow-none'} mx-auto w-full rounded-2xl ${mode === 'code' ? 'max-w-none' : 'max-w-4xl'} ${
           mode === 'code' ? 'min-h-0 flex-1 overflow-hidden p-0' : 'mb-6 min-h-[450px] p-6'
         }`}>
           {mode === 'code' && (!isNewConversation || codeWorkbenchDraft) && (
@@ -3840,17 +4166,22 @@ export default function ChatInterface() {
             <CodeWorkspace
               code={generatedCode}
               prompts={codePrompts}
+              topbarTargetId="code-workspace-topbar-slot"
+              topbarActions={(
+                <div className="flex shrink-0 items-center gap-2">
+                  <button
+                    type="button"
+                    aria-label="打开运行设置"
+                    onClick={() => setIsRuntimeSettingsOpen(true)}
+                    className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+                  >
+                    <SlidersHorizontal size={15} /> <span className="hidden sm:inline">运行设置</span>
+                  </button>
+                  <AgentDrawer />
+                </div>
+              )}
               promptAttachments={codePromptAttachments}
               input={input}
-              modeControl={(
-                <ModeSelector
-                  value={mode}
-                  disabled={isLoading || !isSessionReady}
-                  menuPlacement="auto"
-                  allowedGroups={['code']}
-                  onChange={(nextMode) => void handleModeChange(nextMode)}
-                />
-              )}
               modelControl={<ModelQuickSwitcher compact disabled={isLoading || !isSessionReady}/>}
               attachments={attachments}
               onAttachmentsChange={setAttachments}
@@ -3858,6 +4189,7 @@ export default function ChatInterface() {
               onConsoleEntriesChange={setCodeConsoleEntries}
               selectedElement={selectedElement}
               isLoading={isLoading}
+              isWorkflowBusy={codeWorkflowBusy}
               isSessionReady={isSessionReady}
               runId={codeRunId}
               status={codeStatus}
@@ -3870,12 +4202,21 @@ export default function ChatInterface() {
               onAddTrustedTerminalPrefix={addTrustedTerminalPrefix}
               onTerminalPropositionUpdate={handleTerminalPropositionUpdate}
               onRuntimeError={handleRuntimeError}
-              onAcceptanceFinished={({ codeRunId, passed, blocked, report, consoleEntries }) => {
+              onAcceptanceFinished={async ({ codeRunId, passed, blocked, report, consoleEntries }) => {
                 // Runtime-fix candidates are previews until the deterministic
                 // browser verifier passes. A blocked verifier is reported to
                 // the commit gate with boot_completed=false, which records
                 // needs_attention without falsely committing the candidate.
-                if (!agentTrace.runtimeVerification || agentTrace.runtimeVerification.runId !== codeRunId) return;
+                const isCandidate = isRuntimeCandidateForBrowserRun(agentTrace.runtimeVerification, codeRunId);
+                if (!isCandidate) {
+                  // Single-file runtime repairs are already persisted by their
+                  // legacy path and therefore have no backend candidate. They
+                  // still need an explicit terminal transition after the
+                  // browser verifier settles, otherwise the child run keeps
+                  // the whole Code workbench looking active forever.
+                  if (passed || blocked) settleCurrentAgentRunAfterAcceptance(passed);
+                  return false;
+                }
                 const testConsoleEntries = (report.console ?? [])
                   .filter((entry) => ['log', 'info', 'warn', 'error'].includes(entry.level))
                   .map((entry) => ({
@@ -3884,10 +4225,32 @@ export default function ChatInterface() {
                     timestamp: Date.now(),
                   }));
                 const evidence = [...consoleEntries, ...testConsoleEntries].slice(-100);
-                if (!passed && !blocked) return;
-                void verifyRuntimeCandidate(evidence, passed, passed).catch((cause) => {
+                const result = await verifyRuntimeCandidate(
+                  evidence,
+                  !blocked,
+                  passed,
+                  report.goal_verified === true,
+                  report.goal_assertion_ids ?? [],
+                  report.deterministic_findings ?? [],
+                  report.inconclusive === true,
+                ).catch((cause) => {
                   setError(cause instanceof Error ? `运行时验证失败：${cause.message}` : '运行时验证失败，请稍后重试。');
+                  return null;
                 });
+                if (!passed && !blocked && report.inconclusive !== true) {
+                  handleRuntimeError({
+                    type: 'code-sandbox-runtime-error',
+                    runId: codeRunId,
+                    source: 'deterministic-browser-verifier',
+                    message: report.diagnostic ?? '确定性浏览器验证未通过。',
+                    consoleEntries: evidence.map((entry) => ({
+                      level: entry.level,
+                      text: entry.args.join(' '),
+                    })),
+                    runtimeEvidence: result?.runtime_evidence as Record<string, unknown> | undefined,
+                  });
+                }
+                return true;
               }}
               onStopAutoRepair={stopAutoRepair}
               onCaptureSnapshot={captureCodeVersion}
@@ -3899,6 +4262,7 @@ export default function ChatInterface() {
               }}
               onRollbackVersion={rollbackCodeVersion}
               onSaveManualVersion={saveManualCodeVersion}
+              onSaveGoldenTrace={handleSaveGoldenTrace}
               onProjectKindChange={setCodeProjectKind}
               onElementSelected={setSelectedElement}
               onInputChange={setInput}
@@ -3913,8 +4277,11 @@ export default function ChatInterface() {
                 ? {
                     content: latestCodeConversationAnswer.content,
                     kind: latestCodeConversationAnswer.codeResponseKind,
+                    timeline: latestCodeConversationAnswer.codeReadOnlyTimeline ?? [],
+                    isRunning: isLoading && latestCodeConversationAnswer.id === messages.at(-1)?.id,
                   }
                 : null}
+              conversationAnswers={codeConversationAnswers}
             />
             <div className="border-t border-slate-200 bg-white px-3 py-1.5 text-[11px] text-slate-400">
                 <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
@@ -4025,8 +4392,8 @@ export default function ChatInterface() {
 
               return (
               <div
-                id={msg.role === 'user' ? `chat-message-${index}` : undefined}
-                key={index}
+                 id={msg.role === 'user' ? `chat-message-${msg.id ?? index}` : undefined}
+                 key={msg.id ?? `${msg.role}-${index}`}
                 className={`scroll-mt-28 flex ${
                   msg.role === 'user'
                     ? 'justify-end'
@@ -4456,7 +4823,7 @@ export default function ChatInterface() {
 
         {/* Fixed Input Area */}
         {(mode !== 'code' || (isNewConversation && !codeWorkbenchDraft)) && <div
-          className={`fixed left-0 z-40 bg-gradient-to-t from-slate-100 via-slate-50/95 to-transparent pt-8 transition-[left,right,top,bottom] duration-300 ${
+          className={`fixed left-0 z-40 bg-gradient-to-t from-white via-white/95 to-transparent pt-8 transition-[left,right,top,bottom] duration-300 ${
             isHistoryCollapsed ? 'lg:left-14' : 'lg:left-72'
           } ${isNewConversation ? (preferredCapability === 'omni' ? 'bottom-auto top-[43%]' : 'bottom-auto top-[27%]') : 'bottom-0 top-auto'} right-0 ${mode === 'research' && !isNewConversation ? 'xl:right-[var(--research-pane-width)]' : ''} ${isPlanMode && !isNewConversation ? 'xl:right-[var(--plan-pane-width)]' : ''} ${artifactPanelState.status !== 'closed' && artifactPanelState.displayMode === 'split' ? 'xl:right-[var(--artifact-panel-width)]' : ''}`}
         >

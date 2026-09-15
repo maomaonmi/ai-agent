@@ -1,6 +1,7 @@
 import {
   buildInspectorScript,
   SANDBOX_CONSOLE_EVENT,
+  SANDBOX_EVAL_RESULT,
   SANDBOX_DOM_SELECTED,
 } from '../Code/inspectorScript';
 
@@ -22,6 +23,7 @@ export interface RuntimeErrorReport {
     column?: number;
     stack?: string;
   }>;
+  runtimeEvidence?: Record<string, unknown>;
 }
 
 export interface RepairLog {
@@ -53,6 +55,15 @@ export interface SandboxConsoleEntry {
   level: 'log' | 'info' | 'warn' | 'error';
   args: string[];
   timestamp: number;
+}
+
+export interface SandboxEvalResult {
+  type: typeof SANDBOX_EVAL_RESULT;
+  runId: string;
+  requestId: string;
+  ok: boolean;
+  value?: string;
+  error?: string;
 }
 
 export type CodeGenerationStatus =
@@ -162,5 +173,18 @@ export function isSandboxConsoleEntry(
     (candidate.level === 'log' || candidate.level === 'info' || candidate.level === 'warn' || candidate.level === 'error') &&
     Array.isArray(candidate.args) && candidate.args.length <= 10 &&
     candidate.args.every((item) => typeof item === 'string' && item.length <= 1000)
+  );
+}
+
+export function isSandboxEvalResult(value: unknown): value is SandboxEvalResult {
+  if (!value || typeof value !== 'object') return false;
+  const candidate = value as Partial<SandboxEvalResult>;
+  return (
+    candidate.type === SANDBOX_EVAL_RESULT &&
+    typeof candidate.runId === 'string' &&
+    typeof candidate.requestId === 'string' &&
+    typeof candidate.ok === 'boolean' &&
+    (candidate.value === undefined || typeof candidate.value === 'string') &&
+    (candidate.error === undefined || typeof candidate.error === 'string')
   );
 }

@@ -1,6 +1,8 @@
 export const SANDBOX_DOM_SELECTED = 'code-sandbox-dom-selected' as const;
 export const SANDBOX_CONSOLE_EVENT = 'code-sandbox-console' as const;
 export const SANDBOX_SET_INSPECT_MODE = 'code-sandbox-set-inspect-mode' as const;
+export const SANDBOX_EVAL_COMMAND = 'code-sandbox-eval-command' as const;
+export const SANDBOX_EVAL_RESULT = 'code-sandbox-eval-result' as const;
 
 export function buildInspectorScript(runId: string): string {
   const safeRunId = JSON.stringify(runId);
@@ -19,7 +21,10 @@ export function buildInspectorScript(runId: string): string {
     if (value instanceof Error) {
       return (value.name + ': ' + value.message + (value.stack ? '\\n' + value.stack : '')).slice(0, 1000);
     }
-    try { return JSON.stringify(value).slice(0, 1000); } catch (_) { return String(value).slice(0, 1000); }
+    try {
+      var json = JSON.stringify(value);
+      return (typeof json === 'string' ? json : String(value)).slice(0, 1000);
+    } catch (_) { return String(value).slice(0, 1000); }
   };
   ['log', 'info', 'warn', 'error'].forEach(function (level) {
     var original = console[level];
@@ -37,7 +42,32 @@ export function buildInspectorScript(runId: string): string {
   });
   window.addEventListener('message', function (event) {
     var data = event.data;
-    if (event.source !== window.parent || !data || data.type !== '${SANDBOX_SET_INSPECT_MODE}' || data.runId !== runId) return;
+    if (event.source !== window.parent || !data || data.runId !== runId) return;
+    if (data.type === '${SANDBOX_EVAL_COMMAND}') {
+      var requestId = typeof data.requestId === 'string' ? data.requestId : '';
+      var source = typeof data.source === 'string' ? data.source.slice(0, 8000) : '';
+      if (!requestId || !source) return;
+      var sendResult = function (ok, value, error) {
+        post('${SANDBOX_EVAL_RESULT}', {
+          requestId: requestId,
+          ok: ok,
+          value: ok ? stringify(value) : undefined,
+          error: ok ? undefined : stringify(error)
+        });
+      };
+      try {
+        var result = window.eval(source);
+        if (result && typeof result.then === 'function') {
+          result.then(function (value) { sendResult(true, value); }, function (error) { sendResult(false, undefined, error); });
+        } else {
+          sendResult(true, result);
+        }
+      } catch (error) {
+        sendResult(false, undefined, error);
+      }
+      return;
+    }
+    if (data.type !== '${SANDBOX_SET_INSPECT_MODE}') return;
     inspectMode = Boolean(data.enabled);
     if (inspectMode) {
       originalCursor = document.body.style.cursor;

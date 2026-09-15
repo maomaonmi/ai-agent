@@ -7,11 +7,13 @@ export interface TerminalProposition {
   command: string;
   reason: string;
   expected: string;
-  status: 'pending' | 'needs_confirm' | 'approved' | 'rejected' | 'timeout' | 'blocked' | 'executed';
+  status: 'pending' | 'needs_confirm' | 'approved' | 'approved_with_trust' | 'executing' | 'rejected' | 'timeout' | 'blocked' | 'executed';
   status_message: string;
   created_at: number;
   timeout_seconds: number;
   remaining_seconds: number;
+  result_stdout_tail?: string;
+  result_exit_code?: number | null;
 }
 
 export interface TerminalSessionDescriptor {

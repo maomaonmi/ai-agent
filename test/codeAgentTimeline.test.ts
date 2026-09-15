@@ -14,13 +14,19 @@ import {
   type AcceptanceEligibilityState,
 } from '../src/Code/acceptancePolicy.ts';
 import {
+  bindRuntimeVerificationCandidate,
+  isAgentRunExecutionActive,
+  mapAgentRunsToPrompts,
+  getAgentRunLineage,
   resetAgentRuns,
+  settleAgentRunAsSuperseded,
 } from '../src/Code/agentRunLifecycle.ts';
 import {
   classifyCodeGenerationEvent,
   summarizeAgentLoopRound,
 } from '../src/Code/agentEventRouting.ts';
 import { applyCodeTaskEvent } from '../src/Code/codeTaskPlan.ts';
+import type { CodeAgentRun, CodeAgentTrace } from '../src/lib/api.ts';
 
 function input(overrides: Partial<TimelineEventInput> = {}): TimelineEventInput {
   return {
@@ -96,6 +102,19 @@ test('keeps separate AgentLoop thinking turns separate and closes only the compl
     '先读取入口文件',
     '观察写入结果并继续修正',
   ]);
+});
+
+test('keeps the concise CodeAgent preflight as its own timeline stage', () => {
+  const events = appendTimelineEvent([], input({
+    eventId: 'preflight-1',
+    stage: 'preflight',
+    content: '先确认入口，再执行最小修改并验证。',
+    done: true,
+  }));
+
+  assert.equal(events[0]?.stage, 'preflight');
+  assert.equal(events[0]?.done, true);
+  assert.equal(events[0]?.content.length, 17);
 });
 
 test('keeps main, test, and ops actors separate even when stages match', () => {
@@ -211,6 +230,112 @@ test('preserves prior AgentLoop runs for a new request but clears them on explic
 
   assert.strictEqual(resetAgentRuns(previous, { preserveHistory: true }), previous);
   assert.deepEqual(resetAgentRuns(previous), []);
+});
+
+test('binds a prompt to its root run and keeps runtime-repair descendants in that lane', () => {
+  const mainTrace: CodeAgentTrace = {
+    steps: [],
+    output: '',
+    phase: 'completed',
+    isRunning: false,
+  };
+  const mainRun: CodeAgentRun = {
+    id: 'agent-run-1',
+    request: '修复页面按钮',
+    projectKind: 'frontend',
+    createdAt: '2026-09-09T00:00:00.000Z',
+    trace: mainTrace,
+  };
+  const repairRun: CodeAgentRun = {
+    ...mainRun,
+    id: 'agent-run-1-repair-1',
+    parentRunId: 'agent-run-1',
+    runKind: 'runtime_repair',
+    trace: { ...mainTrace, phase: 'repairing', isRunning: true },
+  };
+
+  const mapped = mapAgentRunsToPrompts(
+    [mainRun, repairRun],
+    ['修复页面按钮'],
+  );
+
+  assert.equal(mapped[0]?.id, 'agent-run-1-repair-1');
+  assert.equal(mapped[0]?.parentRunId, 'agent-run-1');
+  assert.deepEqual(
+    getAgentRunLineage(repairRun, [mainRun, repairRun]).map((run) => run.id),
+    ['agent-run-1-repair-1', 'agent-run-1'],
+  );
+});
+
+test('keeps a resumed user turn as a separate run identity', () => {
+  const previous: CodeAgentRun = {
+    id: 'agent-run-old',
+    request: '第一次需求',
+    projectKind: 'fullstack',
+    createdAt: '2026-09-09T00:00:00.000Z',
+    trace: { steps: ['旧轮次'], output: '旧输出', phase: 'needs_attention', isRunning: false, resumeEligible: true },
+  };
+  const next: CodeAgentRun = {
+    id: 'agent-run-new',
+    resumedFromRunId: previous.id,
+    request: '继续修复第二个问题',
+    projectKind: 'fullstack',
+    createdAt: '2026-09-09T00:01:00.000Z',
+    trace: { steps: ['正在恢复上一次未完成的 Code AgentLoop。'], output: '', phase: 'resuming', isRunning: true },
+  };
+  assert.notEqual(next.id, previous.id);
+  assert.equal(next.resumedFromRunId, previous.id);
+  assert.deepEqual(next.trace.steps, ['正在恢复上一次未完成的 Code AgentLoop。']);
+});
+
+test('settling a superseded parent run removes the false executing state', () => {
+  const run: CodeAgentRun = {
+    id: 'agent-run-1',
+    request: '修复页面按钮',
+    projectKind: 'frontend',
+    createdAt: '2026-09-09T00:00:00.000Z',
+    trace: { steps: [], output: '', phase: 'awaiting_runtime_verification', isRunning: true, status: 'running' },
+  };
+
+  const settled = settleAgentRunAsSuperseded(run, 'agent-run-1-repair-1');
+
+  assert.equal(settled.trace.isRunning, false);
+  assert.equal(settled.trace.status, 'superseded');
+  assert.equal(settled.supersededByRunId, 'agent-run-1-repair-1');
+});
+
+test('does not present a candidate waiting for browser verification as model execution', () => {
+  assert.equal(isAgentRunExecutionActive({
+    trace: { isRunning: true, status: 'awaiting_runtime_verification' },
+  } as never), false);
+  assert.equal(isAgentRunExecutionActive({
+    trace: { isRunning: true, status: 'running' },
+  } as never), true);
+});
+
+test('binds a runtime-fix summary to the ops AgentLoop child run', () => {
+  const trace: CodeAgentTrace = {
+    steps: [],
+    output: '',
+    phase: 'repairing',
+    isRunning: true,
+    status: 'running',
+  };
+  const bound = bindRuntimeVerificationCandidate(trace, {
+    run_id: 'agent-run-1-repair-1',
+    base_revision: 'base-1',
+    candidate_revision: 'candidate-1',
+    status: 'awaiting_runtime_verification',
+    resume_eligible: false,
+  });
+
+  assert.deepEqual(bound.runtimeVerification, {
+    runId: 'agent-run-1-repair-1',
+    baseRevision: 'base-1',
+    candidateRevision: 'candidate-1',
+  });
+  assert.equal(bound.status, 'awaiting_runtime_verification');
+  assert.equal(bound.phase, 'awaiting_runtime_verification');
 });
 
 test('does not let runtime errors start ops while the main Agent is still streaming', () => {

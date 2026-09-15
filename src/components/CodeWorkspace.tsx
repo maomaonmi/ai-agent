@@ -1,6 +1,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
+import { createPortal } from 'react-dom';
 import {
   CSSProperties,
   FormEvent,
@@ -12,23 +13,29 @@ import {
   useRef,
   useState,
 } from 'react';
-import { FileCode, Folder, Square, X } from 'lucide-react';
+import { FileCode, Folder, Sparkles, Square, X } from 'lucide-react';
 
 import {
   CodeGenerationStatus,
   injectErrorCatcher,
   isRuntimeErrorReport,
+  isSandboxEvalResult,
   isSandboxConsoleEntry,
   isSelectedElementContext,
   RuntimeErrorReport,
   SandboxConsoleEntry,
   SelectedElementContext,
 } from '../lib/codeSandbox';
-import { SANDBOX_SET_INSPECT_MODE } from '../Code/inspectorScript';
+import { SANDBOX_EVAL_COMMAND, SANDBOX_SET_INSPECT_MODE } from '../Code/inspectorScript';
 import {
   getAcceptanceEligibility,
   type AcceptanceEligibilityState,
 } from '../Code/acceptancePolicy';
+import {
+  getAgentRunLineage,
+  isAgentRunExecutionActive,
+  mapAgentRunsToPrompts,
+} from '../Code/agentRunLifecycle';
 import { bundleVFS, splitHtmlToVFS, VirtualFileSystem } from '../Code/vfsBundler';
 import { VersionSnapshot } from '../Code/versionManager';
 import { VersionTimelineDrawer } from '../Code/VersionTimelineDrawer';
@@ -43,6 +50,7 @@ import {
 } from '../Code/fullstackBundler';
 import { FileTreeExplorer, buildTreeFromVFS, type FileTreeAction } from '../Code/FileTreeExplorer';
 import CodeAgentTimeline from './CodeAgentTimeline';
+import CodeFileMenu from './CodeFileMenu';
 // Why: Phase3 记忆面板——Code 工作台左侧 aside 的「记忆」Tab 内容。
 import MemoryPanel from './MemoryPanel';
 // Why: xterm.js 在模块顶层引用 self（浏览器全局），SSR 阶段 Node 环境下没有 self → ReferenceError。
@@ -55,8 +63,10 @@ const IntegratedTerminal = dynamic(
 import type { TerminalProposition } from './IntegratedTerminal';
 import {
   runCodeAcceptanceTest,
+  postSandboxCommandResult,
   type ChatAttachment,
   type CodeAcceptanceReport,
+  type AcceptanceProgressEvent,
   type CodeAgentRun,
   type CodeAgentTimelineEvent,
 } from '../lib/api';
@@ -72,13 +82,16 @@ import {
 interface CodeWorkspaceProps {
   code: string;
   prompts: string[];
+  topbarActions?: ReactNode;
+  topbarTargetId?: string;
   // Why: 与 prompts 平行，回显每条用户提问附带的图片缩略图。
   promptAttachments?: ChatAttachment[][];
   input: string;
-  modeControl: ReactNode;
   modelControl: ReactNode;
   selectedElement: SelectedElementContext | null;
   isLoading: boolean;
+  /** Blocks a new Code turn while browser verification or candidate commit is pending. */
+  isWorkflowBusy?: boolean;
   isSessionReady: boolean;
   runId: string;
   status: CodeGenerationStatus;
@@ -89,6 +102,7 @@ interface CodeWorkspaceProps {
   terminalWorkspaceId: string;
   trustedTerminalPrefixes: Record<string, string[]>;
   onAddTrustedTerminalPrefix: (runId: string, prefix: string) => void;
+  onOpenAgentTerminal?: (runId?: string) => void;
   onTerminalPropositionUpdate?: (prop: TerminalProposition | null) => void;
   // Why: Code 模式需要把附件状态提升到 ChatInterface，提交时传给后端视觉分析。
   attachments?: ChatAttachment[];
@@ -105,12 +119,13 @@ interface CodeWorkspaceProps {
     blocked: boolean;
     report: CodeAcceptanceReport;
     consoleEntries: SandboxConsoleEntry[];
-  }) => void;
+  }) => boolean | void | Promise<boolean | void>;
   onStopAutoRepair: () => void;
   onCaptureSnapshot: (vfs: VirtualFileSystem, summary: string) => void;
   onPublishProject?: (vfs: VirtualFileSystem) => void;
   onRollbackVersion: (snapshot: VersionSnapshot) => void;
   onSaveManualVersion: (vfs: VirtualFileSystem, summary: string) => void;
+  onSaveGoldenTrace?: (run: CodeAgentRun) => void;
   onProjectKindChange: (kind: 'frontend' | 'fullstack') => void;
   onElementSelected: (element: SelectedElementContext) => void;
   onInputChange: (value: string) => void;
@@ -131,20 +146,32 @@ interface CodeWorkspaceProps {
   /** Latest read-only answer projected from the persisted conversation timeline. */
   conversationAnswer?: {
     content: string;
-    kind: 'conversation' | 'clarify';
+    kind: 'conversation' | 'clarify' | 'routing_error';
+    timeline?: CodeAgentTimelineEvent[];
+    isRunning?: boolean;
   } | null;
+  /** All persisted read-only answers, attached to the user prompt that caused them. */
+  conversationAnswers?: Array<{
+    promptIndex: number;
+    content: string;
+    kind: 'conversation' | 'clarify' | 'routing_error';
+    timeline?: CodeAgentTimelineEvent[];
+    isRunning?: boolean;
+  }>;
 }
 
 type AcceptanceProjection = {
   state: 'idle' | 'running' | 'passed' | 'failed' | 'blocked';
   report: CodeAcceptanceReport | null;
   elapsedSeconds: number;
+  progressMessage?: string;
+  startSequence?: number;
 };
 
 const IDLE_ACCEPTANCE: AcceptanceProjection = {
   state: 'idle',
-  report: null,
-  elapsedSeconds: 0,
+    report: null,
+    elapsedSeconds: 0,
 };
 
 function getTimelineEvents(run: CodeAgentRun): CodeAgentTimelineEvent[] {
@@ -188,12 +215,14 @@ const ACCEPTANCE_UI_TIMEOUT_MS = 50_000;
 export default function CodeWorkspace({
   code,
   prompts,
+  topbarActions,
+  topbarTargetId,
   promptAttachments = [],
   input,
-  modeControl,
   modelControl,
   selectedElement,
   isLoading,
+  isWorkflowBusy = isLoading,
   isSessionReady,
   runId,
   status,
@@ -204,6 +233,7 @@ export default function CodeWorkspace({
   terminalWorkspaceId,
   trustedTerminalPrefixes,
   onAddTrustedTerminalPrefix,
+  onOpenAgentTerminal,
   onTerminalPropositionUpdate,
   attachments = [],
   onAttachmentsChange,
@@ -216,6 +246,7 @@ export default function CodeWorkspace({
   onPublishProject,
   onRollbackVersion,
   onSaveManualVersion,
+  onSaveGoldenTrace,
   onProjectKindChange,
   onElementSelected,
   onInputChange,
@@ -227,8 +258,15 @@ export default function CodeWorkspace({
   onMentionedFilesChange,
   onVfsChange,
   conversationAnswer = null,
+  conversationAnswers = [],
 }: CodeWorkspaceProps) {
   const [activeView, setActiveView] = useState<'preview' | 'source'>('preview');
+  const [topbarTarget, setTopbarTarget] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    if (!topbarTargetId || typeof document === 'undefined') return;
+    setTopbarTarget(document.getElementById(topbarTargetId));
+    return () => setTopbarTarget(null);
+  }, [topbarTargetId]);
   const [vfs, setVfs] = useState<VirtualFileSystem>({});
   const vfsRef = useRef<VirtualFileSystem>({});
   vfsRef.current = vfs;
@@ -243,6 +281,10 @@ export default function CodeWorkspace({
   const [isConsoleOpen, setIsConsoleOpen] = useState(true);
   const [consoleHeight, setConsoleHeight] = useState(144);
   const [consoleEntries, setConsoleEntries] = useState<SandboxConsoleEntry[]>([]);
+  const [consoleCommand, setConsoleCommand] = useState('');
+  const [consoleCommandHistory, setConsoleCommandHistory] = useState<string[]>([]);
+  const [, setConsoleHistoryIndex] = useState(-1);
+  const consoleCommandInputRef = useRef<HTMLTextAreaElement>(null);
   // Why: 终端 Tab 和沙盒 Console 用同一个可伸缩面板承载；默认首次进入时是 console，
   // 用户一旦点"终端"就切过去。提案横幅贴在 Tab 条正上方，也就是 console panel 的顶部
   // （现在把 IntegratedTerminal 放进 console panel 里跟 console 并排）。
@@ -268,6 +310,7 @@ export default function CodeWorkspace({
   // next user request after a new run was appended.
   const [acceptanceByRun, setAcceptanceByRun] = useState<Record<string, AcceptanceProjection>>({});
   const acceptanceByRunRef = useRef<Record<string, AcceptanceProjection>>({});
+  const agentRunsRef = useRef<CodeAgentRun[]>(agentRuns);
   const [leftPanelWidth, setLeftPanelWidth] = useState(360);
   // Why: 图片放大预览弹窗，点击缩略图后显示原图。
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
@@ -294,9 +337,13 @@ export default function CodeWorkspace({
     return document.documentElement.classList.contains('dark') || window.matchMedia('(prefers-color-scheme: dark)').matches;
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const workspaceFileInputRef = useRef<HTMLInputElement>(null);
+  const workspaceFolderInputRef = useRef<HTMLInputElement>(null);
+  const workspaceManifestInputRef = useRef<HTMLInputElement>(null);
   const workspaceRef = useRef<HTMLElement>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const acceptanceControllerRef = useRef<AbortController | null>(null);
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+    const acceptanceControllerRef = useRef<AbortController | null>(null);
   const activeAcceptanceRunIdRef = useRef('');
   const testedRunIdRef = useRef('');
   const acceptanceEligibilityRef = useRef<AcceptanceEligibilityState>({
@@ -304,6 +351,7 @@ export default function CodeWorkspace({
     testedRunId: '',
   });
   const consoleEntriesRef = useRef<SandboxConsoleEntry[]>([]);
+  const sandboxAgentRequestsRef = useRef<Map<string, string>>(new Map());
   const acceptancePreviewRef = useRef('');
   const promptsRef = useRef<string[]>([]);
   const onRuntimeErrorRef = useRef(onRuntimeError);
@@ -311,6 +359,7 @@ export default function CodeWorkspace({
   const initialFileSetRef = useRef(false);
   consoleEntriesRef.current = consoleEntries;
   acceptanceByRunRef.current = acceptanceByRun;
+  agentRunsRef.current = agentRuns;
   promptsRef.current = prompts;
   onRuntimeErrorRef.current = onRuntimeError;
   onAcceptanceFinishedRef.current = onAcceptanceFinished;
@@ -333,15 +382,37 @@ export default function CodeWorkspace({
     : IDLE_ACCEPTANCE;
 
   // 终端面板辅助：创建手动终端 / 关闭会话 / 判断是否手动终端 / 选中的 run_id
-  const createManualTerminal = useCallback(() => {
-    const suffix = Date.now().toString(36).slice(-5);
-    const runId = `manual-${suffix}`;
+  const createManualTerminal = useCallback((reuseStored = false) => {
+    const storageKey = `active-manual-terminal:${terminalWorkspaceId}`;
+    let runId = '';
+    if (reuseStored) {
+      try {
+        runId = window.localStorage.getItem(storageKey) ?? '';
+      } catch { /* noop */ }
+    }
+    if (!runId) {
+      const suffix = Date.now().toString(36).slice(-5);
+      runId = `manual-${suffix}`;
+    }
+    try {
+      window.localStorage.setItem(storageKey, runId);
+    } catch { /* noop */ }
     console.log('[terminal][createManual] runId=%s workspaceId=%s', runId, terminalWorkspaceId);
     setActiveTerminalRunId(runId);
   }, [terminalWorkspaceId]);
 
   const closeTerminalSession = useCallback((runId: string) => {
     console.log('[terminal][close] runId=%s workspaceId=%s', runId, terminalWorkspaceId);
+    if (runId.startsWith('manual-')) {
+      // Do not reuse a run id whose PTY is being closed. Reusing it races the
+      // async close request and can attach the next terminal to a dying shell.
+      const storageKey = `active-manual-terminal:${terminalWorkspaceId}`;
+      try {
+        if (window.localStorage.getItem(storageKey) === runId) {
+          window.localStorage.removeItem(storageKey);
+        }
+      } catch { /* noop */ }
+    }
     setActiveTerminalRunId((prev) => (prev === runId ? '' : prev));
     const wsp = terminalWorkspaceId;
     void (async () => {
@@ -363,6 +434,18 @@ export default function CodeWorkspace({
   }, [terminalWorkspaceId]);
 
   const isManualTerminalRunId = useCallback((runId: string) => runId.startsWith('manual-'), []);
+
+  const focusAgentTerminal = useCallback((targetRunId?: string) => {
+    setActiveTerminalTab('terminal');
+    setIsConsoleOpen(true);
+    if (targetRunId) setActiveTerminalRunId(targetRunId);
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>('[data-code-agent-terminal-panel]')?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'nearest',
+      });
+    });
+  }, []);
 
   // 复制到剪贴板（需求面板问答的"复制"按钮）
   const copyText = useCallback((text: string) => {
@@ -475,11 +558,11 @@ export default function CodeWorkspace({
     // Why: 重写历史问题时支持 CTRL+Enter 直接发送（与标准对话输入框行为一致）
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
-      if (input.trim() && !isLoading && isSessionReady) {
+      if (input.trim() && !isWorkflowBusy && isSessionReady) {
         onSubmit({ preventDefault: () => {} } as FormEvent<HTMLFormElement>);
       }
     }
-  }, [fileDropdownIndex, filteredVfsPaths, selectMentionedFile, showFileDropdown, input, isLoading, isSessionReady, onSubmit]);
+  }, [fileDropdownIndex, filteredVfsPaths, selectMentionedFile, showFileDropdown, input, isWorkflowBusy, isSessionReady, onSubmit]);
 
   // Why: 把图片文件读成 Base64 data URL，与标准对话的 ChatAttachment 格式保持一致。
   const addImageFile = useCallback((file: File) => {
@@ -522,32 +605,7 @@ export default function CodeWorkspace({
   }, [attachments, onAttachmentsChange]);
 
   const runsForPrompts = useMemo(() => {
-    // Why: 同一指令可能被重复提交（重写/重试），产生多个 request 文本完全相同的 run。
-    // 旧逻辑 find(最旧匹配) 会把 prompt 绑定到历史僵尸 run（例如被热重载/断流冻结的
-    // 旧 run，restoreAgentRuns 恢复后 isRunning=false），导致新 run 明明在流式更新，
-    // 面板却显示旧 run 的"已结束"。修正：同一文本按出现次数取【最新的 k 个 run】按序绑定。
-    const runsByText = new Map<string, CodeAgentRun[]>();
-    for (const run of agentRuns) {
-      const key = run.request.trim();
-      const list = runsByText.get(key) ?? [];
-      list.push(run);
-      runsByText.set(key, list);
-    }
-    const totalByText = new Map<string, number>();
-    for (const prompt of prompts) {
-      const key = prompt.trim();
-      totalByText.set(key, (totalByText.get(key) ?? 0) + 1);
-    }
-    const usedByText = new Map<string, number>();
-    return prompts.map((prompt) => {
-      const key = prompt.trim();
-      const candidates = runsByText.get(key);
-      if (!candidates || candidates.length === 0) return undefined;
-      const used = usedByText.get(key) ?? 0;
-      usedByText.set(key, used + 1);
-      const startIndex = Math.max(candidates.length - (totalByText.get(key) ?? 0), 0);
-      return candidates[startIndex + used];
-    });
+    return mapAgentRunsToPrompts(agentRuns, prompts);
   }, [agentRuns, prompts]);
   const instrumentedCode = useMemo(
     () => injectErrorCatcher(
@@ -742,6 +800,172 @@ export default function CodeWorkspace({
     });
   }, [serializeAndSyncVFS, activeFile]);
 
+  const createFileFromMenu = useCallback((defaultName = '未命名.js') => {
+    const name = window.prompt('新建文件', defaultName)?.trim();
+    if (!name) return;
+    handleTreeAction({ type: 'create-file', atFolderPath: '', fileName: name });
+    setLeftPanelTab('resources');
+  }, [handleTreeAction]);
+
+  const openWorkspaceFiles = useCallback(() => {
+    workspaceFileInputRef.current?.click();
+  }, []);
+
+  const openWorkspaceFolder = useCallback(() => {
+    workspaceFolderInputRef.current?.click();
+  }, []);
+
+  const openWorkspaceManifest = useCallback(() => {
+    workspaceManifestInputRef.current?.click();
+  }, []);
+
+  const importWorkspaceFiles = useCallback(async (files: FileList | null) => {
+    if (!files?.length) return;
+    const entries = await Promise.all(Array.from(files).map(async (file) => {
+      const path = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+      return [path, await file.text()] as const;
+    }));
+    const next = { ...vfsRef.current, ...Object.fromEntries(entries) };
+    setVfs(next);
+    setActiveFile(entries[0]?.[0] ?? activeFile);
+    serializeAndSyncVFS(next);
+    setLeftPanelTab('resources');
+  }, [activeFile, serializeAndSyncVFS]);
+
+  const importWorkspaceManifest = useCallback(async (files: FileList | null) => {
+    const file = files?.[0];
+    if (!file) return;
+    try {
+      const next = parseProjectCode(await file.text());
+      if (!next) throw new Error('工作区文件必须是“文件路径 -> 文件内容”的 JSON 对象');
+      setVfs(next);
+      const firstFile = Object.keys(next)[0] ?? '';
+      setActiveFile(firstFile);
+      serializeAndSyncVFS(next);
+      setLeftPanelTab('resources');
+      setArchiveState(`已打开工作区：${file.name}`);
+    } catch (error) {
+      setArchiveState(error instanceof Error ? error.message : '工作区文件格式无效');
+    }
+  }, [serializeAndSyncVFS]);
+
+  const downloadWorkspace = useCallback(() => {
+    const blob = new Blob([serializeProjectVFS(vfsRef.current)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = 'workspace.code-workspace';
+    anchor.click();
+    URL.revokeObjectURL(url);
+    setArchiveState('工作区已另存为 workspace.code-workspace');
+  }, []);
+
+  const copyWorkspace = useCallback(async () => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('当前环境不支持剪贴板');
+      await navigator.clipboard.writeText(serializeProjectVFS(vfsRef.current));
+      setArchiveState('工作区内容已复制');
+    } catch (error) {
+      setArchiveState(error instanceof Error ? `复制失败：${error.message}` : '复制工作区失败');
+    }
+  }, []);
+
+  const executeSandboxCommand = useCallback(() => {
+    const source = consoleCommand.trim().slice(0, 8_000);
+    const target = iframeRef.current?.contentWindow;
+    if (!source) return;
+    const requestId = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-console`;
+    setConsoleCommandHistory((previous) => [...previous.slice(-49), source]);
+    setConsoleHistoryIndex(-1);
+    setConsoleCommand('');
+    setConsoleEntries((previous) => [
+      ...previous.slice(-99),
+      { level: 'info', args: [`> ${source}`], timestamp: Date.now() },
+    ]);
+    if (!target) {
+      setConsoleEntries((previous) => [
+        ...previous.slice(-99),
+        { level: 'error', args: ['当前没有可执行的沙盒页面'], timestamp: Date.now() },
+      ]);
+      return;
+    }
+    target.postMessage({
+      type: SANDBOX_EVAL_COMMAND,
+      runId,
+      requestId,
+      source,
+    }, '*');
+  }, [consoleCommand, runId]);
+
+  // The AgentLoop pauses on the backend until this browser-owned iframe
+  // returns a result. Only the iframe result is forwarded; the model never
+  // gets a path to the parent window or the local filesystem.
+  useEffect(() => {
+    const handleAgentSandboxCommand = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        run_id?: string;
+        request_id?: string;
+        source?: string;
+      }>).detail;
+      const serverRunId = String(detail?.run_id || '').trim();
+      const requestId = String(detail?.request_id || '').trim();
+      const source = String(detail?.source || '').trim().slice(0, 8_000);
+      if (!serverRunId || !requestId || !source) return;
+
+      const bridgeRunId = runId;
+      const target = iframeRef.current?.contentWindow;
+      sandboxAgentRequestsRef.current.set(requestId, serverRunId);
+      if (!target || !bridgeRunId) {
+        sandboxAgentRequestsRef.current.delete(requestId);
+        void postSandboxCommandResult({
+          runId: serverRunId,
+          requestId,
+          ok: false,
+          error: '当前没有可执行的 Code 预览页面。',
+        }).catch(() => undefined);
+        return;
+      }
+      target.postMessage({
+        type: SANDBOX_EVAL_COMMAND,
+        runId: bridgeRunId,
+        requestId,
+        source,
+      }, '*');
+    };
+    window.addEventListener('code-sandbox-agent-command', handleAgentSandboxCommand);
+    return () => window.removeEventListener('code-sandbox-agent-command', handleAgentSandboxCommand);
+  }, [runId]);
+
+  const handleConsoleCommandKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      executeSandboxCommand();
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setConsoleHistoryIndex((previous) => {
+        const next = Math.min(previous + 1, consoleCommandHistory.length - 1);
+        setConsoleCommand(consoleCommandHistory[consoleCommandHistory.length - 1 - next] ?? '');
+        return next;
+      });
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setConsoleHistoryIndex((previous) => {
+        const next = Math.max(previous - 1, -1);
+        setConsoleCommand(next < 0 ? '' : consoleCommandHistory[consoleCommandHistory.length - 1 - next] ?? '');
+        return next;
+      });
+    }
+  }, [consoleCommandHistory, executeSandboxCommand]);
+
+  useEffect(() => {
+    workspaceFolderInputRef.current?.setAttribute('webkitdirectory', '');
+    workspaceFolderInputRef.current?.setAttribute('directory', '');
+  }, []);
+
   // Why: 监听 Agent Loop 的 file_written 事件，高亮文件树里刚写入的文件。
   useEffect(() => {
     const handleFileWritten = (event: Event) => {
@@ -766,6 +990,37 @@ export default function CodeWorkspace({
     const handleMessage = (event: MessageEvent<unknown>) => {
       if (event.source !== iframeRef.current?.contentWindow) return;
       const data = event.data;
+      if (isSandboxEvalResult(data) && data.runId === runId) {
+        setConsoleEntries((previous) => [
+          ...previous.slice(-99),
+          {
+            level: data.ok ? 'info' : 'error',
+            args: [data.ok ? (data.value ?? 'undefined') : (data.error ?? '执行失败')],
+            timestamp: Date.now(),
+          },
+        ]);
+        const serverRunId = sandboxAgentRequestsRef.current.get(data.requestId);
+        if (serverRunId) {
+          sandboxAgentRequestsRef.current.delete(data.requestId);
+          void postSandboxCommandResult({
+            runId: serverRunId,
+            requestId: data.requestId,
+            ok: data.ok,
+            value: data.value,
+            error: data.error,
+          }).catch((error: unknown) => {
+            setConsoleEntries((previous) => [
+              ...previous.slice(-99),
+              {
+                level: 'error',
+                args: [`Agent 沙盒 Console 结果回传失败：${error instanceof Error ? error.message : '未知错误'}`],
+                timestamp: Date.now(),
+              },
+            ]);
+          });
+        }
+        return;
+      }
       if (isRuntimeErrorReport(data) && data.runId === runId) {
         // Runtime exceptions are evidence for the pending verification run.
         // Do not start Ops directly from an iframe boot error; Test Agent must
@@ -849,17 +1104,6 @@ export default function CodeWorkspace({
     }
   }, [runId]);
 
-  // Why: 切到 Terminal Tab 时，如果还没有选中具体 terminal run_id，自动切到"最近的 agent run（
-  // 正在 running 的优先）"；保证用户点 Tab 就立刻能看到终端输出而不是"暂无终端"。
-  useEffect(() => {
-    if (activeTerminalTab !== 'terminal') return;
-    if (activeTerminalRunId) return;
-    const running = agentRuns.find((r) => Boolean(r.trace?.isRunning));
-    const fallback = agentRuns[agentRuns.length - 1];
-    const target = running ?? fallback;
-    if (target && target.id !== activeTerminalRunId) setActiveTerminalRunId(target.id);
-  }, [activeTerminalTab, activeTerminalRunId, agentRuns]);
-
   // Why: 收到 terminal_proposal SSE 事件时自动切到终端 Tab 并选中对应 run_id，
   // 否则用户看不到审批横幅，proposition 会 90s 超时。
   useEffect(() => {
@@ -910,7 +1154,7 @@ export default function CodeWorkspace({
       { runId, status: status.state },
     );
     acceptanceEligibilityRef.current = eligibility.state;
-    const acceptanceTimelineRunId = agentRuns.at(-1)?.id;
+    const acceptanceTimelineRunId = latestRunId;
     if (
       testedRunIdRef.current === runId
       && acceptanceTimelineRunId
@@ -940,26 +1184,58 @@ export default function CodeWorkspace({
     // durable conversation/timeline lane. Keep both identities explicit so a
     // verifier result cannot disappear under a different request.
     const acceptanceLaneId = acceptanceTimelineRunId ?? acceptanceCodeRunId;
+    const acceptanceStartSequence = Math.max(
+      0,
+      ...(agentRunsRef.current.find((run) => run.id === acceptanceLaneId)?.trace.timeline ?? [])
+        .map((event) => event.sequence),
+    ) + 0.5;
     testedRunIdRef.current = acceptanceCodeRunId;
     activeAcceptanceRunIdRef.current = acceptanceLaneId;
     const controller = new AbortController();
     acceptanceControllerRef.current = controller;
     setAcceptanceByRun((previous) => ({
       ...previous,
-      [acceptanceLaneId]: { ...IDLE_ACCEPTANCE, state: 'running' },
+      [acceptanceLaneId]: {
+        ...IDLE_ACCEPTANCE,
+        state: 'running',
+        startSequence: acceptanceStartSequence,
+      },
     }));
     const previewHtml = acceptancePreviewRef.current;
     const expectation = promptsRef.current.at(-1)?.trim() || '验证页面主要交互可以正常工作';
+    const acceptanceGoal = agentRunsRef.current.find((run) => run.id === acceptanceLaneId)?.trace.acceptanceGoal
+      ?? agentRunsRef.current.find((run) => run.id === acceptanceCodeRunId)?.trace.acceptanceGoal;
+    const verificationSessionId = agentRunsRef.current.find((run) => run.id === acceptanceLaneId)?.trace.verificationSessionId
+      ?? agentRunsRef.current.find((run) => run.id === acceptanceCodeRunId)?.trace.verificationSessionId;
 
     void runCodeAcceptanceTest({
       user_request: expectation,
       preview_html: previewHtml,
+      run_id: acceptanceLaneId,
       verification_run_id: acceptanceCodeRunId,
+      verification_session_id: verificationSessionId,
+      acceptance_goal: acceptanceGoal,
+      // Let the backend classify the candidate conservatively. This is the
+      // exact VFS snapshot rendered into the preview, not a user-text guess.
+      changed_files: Object.keys(vfs),
       console_entries: consoleEntriesRef.current.map((entry) => ({
         level: entry.level,
         text: entry.args.join(' '),
       })),
-    }, controller.signal).then((report) => {
+    }, (event: AcceptanceProgressEvent) => {
+      if (controller.signal.aborted || testedRunIdRef.current !== acceptanceCodeRunId) return;
+      setAcceptanceByRun((previous) => ({
+        ...previous,
+        [acceptanceLaneId]: {
+          ...(previous[acceptanceLaneId] ?? IDLE_ACCEPTANCE),
+          state: 'running',
+          elapsedSeconds: event.elapsed_seconds
+            ?? previous[acceptanceLaneId]?.elapsedSeconds
+            ?? 0,
+          progressMessage: event.message,
+        },
+      }));
+    }, controller.signal).then(async (report) => {
       if (controller.signal.aborted || testedRunIdRef.current !== acceptanceCodeRunId) return;
       setAcceptanceByRun((previous) => ({
         ...previous,
@@ -970,15 +1246,15 @@ export default function CodeWorkspace({
         },
       }));
       const observedEntries = consoleEntriesRef.current.slice(-100);
-      onAcceptanceFinishedRef.current?.({
+      const acceptanceHandled = await onAcceptanceFinishedRef.current?.({
         codeRunId: acceptanceCodeRunId,
-        verificationRunId: acceptanceLaneId,
+        verificationRunId: report.verification_run_id ?? acceptanceCodeRunId,
         passed: report.passed,
         blocked: report.blocked,
         report,
         consoleEntries: observedEntries,
       });
-      if (report.blocked) {
+      if (acceptanceHandled === true || report.blocked) {
         return;
       }
       if (report.passed) {
@@ -1052,6 +1328,25 @@ export default function CodeWorkspace({
           },
         },
       }));
+      if (testedRunIdRef.current !== acceptanceCodeRunId) return;
+      // A transport/timeout failure is still a terminal verifier outcome.
+      // Notify the owning Agent lane so a runtime-repair child cannot remain
+      // `isRunning=true` forever simply because no report body was returned.
+      const blockedReport: CodeAcceptanceReport = {
+        passed: false,
+        blocked: true,
+        verification_run_id: acceptanceCodeRunId,
+        run_id: acceptanceLaneId,
+        diagnostic: error instanceof Error ? error.message : '浏览器验证器调用失败',
+      };
+      onAcceptanceFinishedRef.current?.({
+        codeRunId: acceptanceCodeRunId,
+        verificationRunId: acceptanceCodeRunId,
+        passed: false,
+        blocked: true,
+        report: blockedReport,
+        consoleEntries: consoleEntriesRef.current.slice(-100),
+      });
     }).finally(() => {
       if (acceptanceControllerRef.current === controller) {
         acceptanceControllerRef.current = null;
@@ -1059,7 +1354,7 @@ export default function CodeWorkspace({
     });
 
     return () => controller.abort();
-  }, [agentRuns.length, runId, status.state]);
+  }, [latestRunId, runId, status.state]);
 
   useEffect(() => {
     const acceptanceRunId = activeAcceptanceRunIdRef.current;
@@ -1080,6 +1375,7 @@ export default function CodeWorkspace({
     const timeoutId = window.setTimeout(() => {
       const activeController = acceptanceControllerRef.current;
       if (!activeController) return;
+      const ownsCurrentVerification = testedRunIdRef.current === runId;
       activeController.abort();
       acceptanceControllerRef.current = null;
       setAcceptanceByRun((previous) => ({
@@ -1095,12 +1391,29 @@ export default function CodeWorkspace({
           },
         },
       }));
+      if (ownsCurrentVerification) {
+        const blockedReport: CodeAcceptanceReport = {
+          passed: false,
+          blocked: true,
+          verification_run_id: runId,
+          run_id: acceptanceRunId,
+          diagnostic: '测试状态超过 50 秒，已由界面看门狗强制终止。',
+        };
+        onAcceptanceFinishedRef.current?.({
+          codeRunId: runId,
+          verificationRunId: runId,
+          passed: false,
+          blocked: true,
+          report: blockedReport,
+          consoleEntries: consoleEntriesRef.current.slice(-100),
+        });
+      }
     }, ACCEPTANCE_UI_TIMEOUT_MS);
     return () => {
       window.clearInterval(intervalId);
       window.clearTimeout(timeoutId);
     };
-  }, [activeAcceptanceState]);
+  }, [activeAcceptanceState, runId]);
 
   useEffect(() => {
     const latest = agentRuns.at(-1);
@@ -1175,37 +1488,127 @@ export default function CodeWorkspace({
     await workspaceRef.current?.requestFullscreen();
   };
 
-  const beginResize = (event: React.PointerEvent<HTMLDivElement>) => {
+  const getMaximumLeftPanelWidth = () => {
+    const workspaceWidth = workspaceRef.current?.getBoundingClientRect().width;
+    return workspaceWidth ? Math.max(280, Math.floor(workspaceWidth / 2)) : 560;
+  };
+
+  const getMinimumConsoleHeight = () => activeTerminalTab === 'terminal' ? 320 : 96;
+
+  const getMaximumConsoleHeight = () => {
+    const viewportHeight = typeof window === 'undefined' ? 0 : window.innerHeight;
+    const workspaceHeight = workspaceRef.current?.getBoundingClientRect().height ?? viewportHeight;
+    return Math.max(getMinimumConsoleHeight(), workspaceHeight - 48);
+  };
+
+  const getConsoleHeight = () => Math.min(
+    getMaximumConsoleHeight(),
+    Math.max(getMinimumConsoleHeight(), consoleHeight),
+  );
+
+  // Keep both splitters on one pointer lifecycle. Checking buttons on every move
+  // prevents a lost pointerup from turning ordinary mouse movement into a resize.
+  const beginPointerResize = (
+    event: React.PointerEvent<HTMLDivElement>,
+    cursor: 'col-resize' | 'row-resize',
+    onMove: (moveEvent: PointerEvent) => void,
+  ) => {
+    if (!event.isPrimary || event.button !== 0) return false;
+
+    resizeCleanupRef.current?.();
     event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = leftPanelWidth;
-    const resize = (moveEvent: PointerEvent) => {
-      setLeftPanelWidth(Math.min(560, Math.max(280, startWidth + moveEvent.clientX - startX)));
-    };
-    const finish = () => {
+    const handle = event.currentTarget;
+    const pointerId = event.pointerId;
+    const previousUserSelect = document.body.style.userSelect;
+    const previousCursor = document.body.style.cursor;
+
+    const finish = (endEvent?: PointerEvent) => {
+      if (endEvent && endEvent.pointerId !== pointerId) return;
       window.removeEventListener('pointermove', resize);
       window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      window.removeEventListener('blur', finishFromBlur);
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+      document.body.style.userSelect = previousUserSelect;
+      document.body.style.cursor = previousCursor;
+      if (resizeCleanupRef.current === finish) resizeCleanupRef.current = null;
     };
+    const finishFromBlur = () => finish();
+    const resize = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId || moveEvent.buttons !== 1) {
+        finish(moveEvent);
+        return;
+      }
+      onMove(moveEvent);
+    };
+
+    resizeCleanupRef.current = finish;
+    handle.setPointerCapture(pointerId);
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = cursor;
     window.addEventListener('pointermove', resize);
     window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+    window.addEventListener('blur', finishFromBlur);
+    return true;
+  };
+
+  useEffect(() => () => {
+    resizeCleanupRef.current?.();
+  }, []);
+
+  const beginResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    const startX = event.clientX;
+    const startWidth = leftPanelWidth;
+    beginPointerResize(event, 'col-resize', (moveEvent) => {
+      setLeftPanelWidth(Math.min(getMaximumLeftPanelWidth(), Math.max(280, startWidth + moveEvent.clientX - startX)));
+    });
   };
 
   const beginConsoleResize = (event: React.PointerEvent<HTMLDivElement>) => {
+    const startY = event.clientY;
+    const startHeight = getConsoleHeight();
+    const started = beginPointerResize(event, 'row-resize', (moveEvent) => {
+      const maximumHeight = getMaximumConsoleHeight();
+      setConsoleHeight(Math.min(maximumHeight, Math.max(getMinimumConsoleHeight(), startHeight + startY - moveEvent.clientY)));
+    });
+    if (started) setIsConsoleOpen(true);
+  };
+
+  const handleResizeKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 48 : 16;
+    const maximumWidth = getMaximumLeftPanelWidth();
+    const nextWidth = event.key === 'ArrowLeft'
+      ? leftPanelWidth - step
+      : event.key === 'ArrowRight'
+        ? leftPanelWidth + step
+        : event.key === 'Home'
+          ? 280
+          : event.key === 'End'
+            ? maximumWidth
+            : null;
+    if (nextWidth == null) return;
+    event.preventDefault();
+    setLeftPanelWidth(Math.min(maximumWidth, Math.max(280, nextWidth)));
+  };
+
+  const handleConsoleResizeKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const step = event.shiftKey ? 48 : 16;
+    const maximumHeight = getMaximumConsoleHeight();
+    const minimumHeight = getMinimumConsoleHeight();
+    const nextHeight = event.key === 'ArrowUp'
+      ? consoleHeight + step
+      : event.key === 'ArrowDown'
+        ? consoleHeight - step
+        : event.key === 'Home'
+          ? minimumHeight
+          : event.key === 'End'
+            ? maximumHeight
+            : null;
+    if (nextHeight == null) return;
     event.preventDefault();
     setIsConsoleOpen(true);
-    const startY = event.clientY;
-    const startHeight = consoleHeight;
-    const resize = (moveEvent: PointerEvent) => {
-      const workspaceHeight = workspaceRef.current?.getBoundingClientRect().height ?? window.innerHeight;
-      const maximumHeight = Math.max(144, workspaceHeight - 48);
-      setConsoleHeight(Math.min(maximumHeight, Math.max(96, startHeight + startY - moveEvent.clientY)));
-    };
-    const finish = () => {
-      window.removeEventListener('pointermove', resize);
-      window.removeEventListener('pointerup', finish);
-    };
-    window.addEventListener('pointermove', resize);
-    window.addEventListener('pointerup', finish);
+    setConsoleHeight(Math.min(maximumHeight, Math.max(minimumHeight, nextHeight)));
   };
 
   const updateActiveFile = (content: string) => {
@@ -1252,16 +1655,59 @@ export default function CodeWorkspace({
     }
   };
 
-  return (
-    <section
-      ref={workspaceRef}
-      className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white fullscreen:h-screen fullscreen:rounded-none fullscreen:border-0"
-    >
-      <header className="flex min-h-12 flex-wrap items-center justify-between gap-2 border-b border-slate-200 bg-slate-50 px-4 py-5">
-        <div className="flex items-center gap-3 flex-wrap">
-          <h2 className="text-sm font-semibold text-slate-800">
-            网页沙盒 <span className="ml-1 font-normal text-slate-500">· iframe 隔离渲染</span>
-          </h2>
+  const topbar = (
+      <div className="mt-0 flex h-[60px] min-h-[60px] max-h-[60px] shrink-0 flex-nowrap items-center justify-between gap-3 overflow-visible border-b border-slate-200 bg-white px-3 py-2">
+        <input
+          ref={workspaceFileInputRef}
+          type="file"
+          multiple
+          accept=".html,.htm,.css,.js,.jsx,.ts,.tsx,.json,.md,.txt,.py,.sql,.xml,.svg"
+          className="hidden"
+          onChange={(event) => {
+            void importWorkspaceFiles(event.currentTarget.files);
+            event.currentTarget.value = '';
+          }}
+        />
+        <input
+          ref={workspaceFolderInputRef}
+          type="file"
+          multiple
+          accept=".html,.htm,.css,.js,.jsx,.ts,.tsx,.json,.md,.txt,.py,.sql,.xml,.svg"
+          className="hidden"
+          onChange={(event) => {
+            void importWorkspaceFiles(event.currentTarget.files);
+            event.currentTarget.value = '';
+          }}
+        />
+        <input
+          ref={workspaceManifestInputRef}
+          type="file"
+          accept=".json,.code-workspace,application/json"
+          className="hidden"
+          onChange={(event) => {
+            void importWorkspaceManifest(event.currentTarget.files);
+            event.currentTarget.value = '';
+          }}
+        />
+        <div className="flex min-w-0 shrink items-center gap-3">
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-900 text-white" aria-hidden="true">
+              <Sparkles size={16} />
+            </span>
+            <h1 className="whitespace-nowrap text-base font-semibold tracking-tight text-slate-900">Code 工作台</h1>
+          </div>
+          <CodeFileMenu
+            onNewTextFile={() => createFileFromMenu('未命名.txt')}
+            onNewFile={() => createFileFromMenu()}
+            onNewWindow={() => window.open(window.location.href, '_blank', 'noopener,noreferrer')}
+            onOpenFile={openWorkspaceFiles}
+            onOpenFolder={openWorkspaceFolder}
+            onOpenWorkspace={openWorkspaceManifest}
+            onOpenRecent={() => setLeftPanelTab('resources')}
+            onAddFolderToWorkspace={openWorkspaceFolder}
+            onSaveWorkspaceAs={downloadWorkspace}
+            onCopyWorkspace={copyWorkspace}
+          />
           {/* Day58: 方案一 Tab 切换——在标题旁直接切换左侧 aside 内容 */}
           <div className="flex items-center rounded-lg border border-slate-200 bg-white p-0.5 shadow-sm">
             <button
@@ -1303,7 +1749,7 @@ export default function CodeWorkspace({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-end gap-2">
+        <div className="flex min-w-0 shrink-0 flex-nowrap items-center justify-end gap-2">
           <div
             role="status"
             aria-live="polite"
@@ -1440,17 +1886,22 @@ export default function CodeWorkspace({
           >
             {isInspectMode ? '退出检查' : '检查元素'}
           </button>
+          {topbarActions}
         </div>
-      </header>
+      </div>
+  );
 
+  return (
+    <section
+      ref={workspaceRef}
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white fullscreen:h-screen fullscreen:rounded-none fullscreen:border-0"
+    >
+      {topbarTarget ? createPortal(topbar, topbarTarget) : topbar}
       <div
         style={{ '--code-panel-width': `${leftPanelWidth}px` } as CSSProperties}
         className="flex min-h-0 flex-1 flex-col lg:flex-row"
       >
-        <aside className="flex max-h-[45vh] w-full flex-col overflow-hidden border-b border-slate-200 bg-slate-50/70 lg:max-h-none lg:w-[var(--code-panel-width)] lg:shrink-0 lg:border-b-0 lg:border-r">
-          <div className="border-b border-slate-200 p-3">
-            <div className="relative z-20">{modeControl}</div>
-          </div>
+        <aside className="flex max-h-[45vh] w-full flex-col overflow-hidden border-b border-slate-200 bg-white lg:max-h-none lg:w-[var(--code-panel-width)] lg:shrink-0 lg:border-b-0 lg:border-r">
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {/* Day58: Tab 内容切换——需求面板 / 资源管理器 */}
           {/* Why: Phase3 新增「记忆」Tab——优先命中，展示四层记忆面板 */}
@@ -1490,6 +1941,11 @@ export default function CodeWorkspace({
             <ol className="space-y-3">
               {prompts.map((prompt, index) => {
                 const run = runsForPrompts[index];
+                const runAcceptance = run
+                  ? getAgentRunLineage(run, agentRuns)
+                    .map((item) => acceptanceByRun[item.id])
+                    .find((item) => item && item.state !== 'idle') ?? IDLE_ACCEPTANCE
+                  : IDLE_ACCEPTANCE;
                 const isExpanded = Boolean(run && expandedRunIds.has(run.id));
                 return (
                   <li key={`${index}-${prompt.slice(0, 24)}`} className="space-y-3">
@@ -1510,8 +1966,12 @@ export default function CodeWorkspace({
                               })}
                               className="rounded px-1.5 py-0.5 transition-colors hover:bg-white hover:text-slate-600"
                             >
-                              <span className={run.trace.isRunning ? 'text-emerald-600' : 'text-slate-400'}>
-                                {run.trace.isRunning ? '执行中' : 'AgentLoop'}
+                              <span className={isAgentRunExecutionActive(run) ? 'text-emerald-600' : 'text-slate-400'}>
+                                {isAgentRunExecutionActive(run)
+                                  ? '执行中'
+                                  : run.trace.status === 'awaiting_runtime_verification'
+                                    ? '等待验证'
+                                    : 'AgentLoop'}
                               </span>
                               <span className="ml-1" aria-hidden="true">{isExpanded ? '⌃' : '⌄'}</span>
                             </button>
@@ -1564,23 +2024,29 @@ export default function CodeWorkspace({
                       )}
                     </article>
                     {run && isExpanded && (
-                      <div className="border-l-2 border-slate-200 pl-2">
-                        <CodeAgentTimeline
-                          events={getTimelineEvents(run)}
-                          runId={run.id}
-                          isRunning={run.trace.isRunning || (
-                            acceptanceByRun[run.id]?.state === 'running' ||
-                            (run.id === latestRunId && (
+                      <div className="pl-1">
+                          <CodeAgentTimeline
+                            events={getTimelineEvents(run)}
+                            runId={run.id}
+                            isRunning={isAgentRunExecutionActive(run) || (
+                            runAcceptance.state === 'running' ||
+                            (run.trace.status !== 'awaiting_runtime_verification'
+                              && run.id === latestRunId && (
                             status.state === 'generating' ||
                             status.state === 'modifying' ||
                             status.state === 'checking' ||
                             status.state === 'repairing'
                             ))
                           )}
-                          acceptanceState={(acceptanceByRun[run.id] ?? IDLE_ACCEPTANCE).state}
-                          acceptanceReport={(acceptanceByRun[run.id] ?? IDLE_ACCEPTANCE).report}
-                          acceptanceElapsedSeconds={(acceptanceByRun[run.id] ?? IDLE_ACCEPTANCE).elapsedSeconds}
+                          acceptanceState={runAcceptance.state}
+                          acceptanceReport={runAcceptance.report}
+                          acceptanceElapsedSeconds={runAcceptance.elapsedSeconds}
+                          acceptanceProgressMessage={runAcceptance.progressMessage}
+                          acceptanceStartSequence={runAcceptance.startSequence}
                           taskPlan={run.trace.taskPlan}
+                          sourceRun={run}
+                          onSaveGoldenTrace={onSaveGoldenTrace}
+                          onOpenTerminal={onOpenAgentTerminal ?? focusAgentTerminal}
                           onOpenDiff={(path) => {
                             setActiveFile(path);
                             setActiveView('source');
@@ -1588,23 +2054,60 @@ export default function CodeWorkspace({
                         />
                       </div>
                     )}
+                    {conversationAnswers.filter((answer) => answer.promptIndex === index)
+                      .map((answer, answerIndex) => (
+                        <div key={`code-conversation-answer-${index}-${answerIndex}`}>
+                          {answer.timeline && answer.timeline.length > 0 && (
+                            <CodeAgentTimeline
+                              title="只读 Agent · 读取过程"
+                              events={answer.timeline}
+                              runId={answer.timeline[0]?.runId ?? `read-only-${index}`}
+                              isRunning={Boolean(answer.isRunning)}
+                            />
+                          )}
+                          <article
+                            className="rounded-2xl border border-slate-200 bg-white px-3.5 py-3 text-sm leading-6 text-slate-700 shadow-sm"
+                          >
+                            <div className="mb-1.5 text-xs font-medium text-slate-400">
+                              {answer.kind === 'clarify' ? '需要确认' : answer.kind === 'routing_error' ? '未执行' : '只读回答'}
+                            </div>
+                            {answer.content.trim() ? (
+                              <MarkdownMessage content={answer.content} density="compact" />
+                            ) : (
+                              <span className="text-slate-400">正在整理回答…</span>
+                            )}
+                          </article>
+                        </div>
+                      ))}
                   </li>
                 );
               })}
             </ol>
           )}
 
-          {conversationAnswer && (
-            <article className="mt-4 rounded-2xl border border-slate-200 bg-white px-3.5 py-3 text-sm leading-6 text-slate-700 shadow-sm">
-              <div className="mb-1.5 text-xs font-medium text-slate-400">
-                {conversationAnswer.kind === 'clarify' ? '需要确认' : '只读回答'}
-              </div>
-              {conversationAnswer.content.trim() ? (
-                <MarkdownMessage content={conversationAnswer.content} density="compact" />
-              ) : (
-                <span className="text-slate-400">正在整理回答…</span>
+          {conversationAnswers.length === 0 && conversationAnswer && (
+            <div className="mt-4">
+              {conversationAnswer.timeline && conversationAnswer.timeline.length > 0 && (
+                <CodeAgentTimeline
+                  title="只读 Agent · 读取过程"
+                  events={conversationAnswer.timeline}
+                  runId={conversationAnswer.timeline[0]?.runId ?? 'read-only-latest'}
+                  isRunning={Boolean(conversationAnswer.isRunning)}
+                />
               )}
-            </article>
+              <article
+                className="rounded-2xl border border-slate-200 bg-white px-3.5 py-3 text-sm leading-6 text-slate-700 shadow-sm"
+              >
+                <div className="mb-1.5 text-xs font-medium text-slate-400">
+                  {conversationAnswer.kind === 'clarify' ? '需要确认' : conversationAnswer.kind === 'routing_error' ? '未执行' : '只读回答'}
+                </div>
+                {conversationAnswer.content.trim() ? (
+                  <MarkdownMessage content={conversationAnswer.content} density="compact" />
+                ) : (
+                  <span className="text-slate-400">正在整理回答…</span>
+                )}
+              </article>
+            </div>
           )}
 
             </>
@@ -1622,7 +2125,7 @@ export default function CodeWorkspace({
                 )}
               </div>
               {!hasProject ? (
-                <div className="mt-6 rounded-lg border border-dashed border-slate-300 bg-slate-50 px-4 py-8 text-center">
+                <div className="mt-6 rounded-lg border border-dashed border-slate-300 bg-white px-4 py-8 text-center">
                   <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-white">
                     <Folder className="h-6 w-6 text-slate-400" />
                   </div>
@@ -1680,14 +2183,43 @@ export default function CodeWorkspace({
             </div>
           )}
           <form onSubmit={onSubmit}>
-            <div className="mb-2 flex items-center justify-between gap-2">{modelControl}<span className="text-[11px] text-slate-400">Code 生成模型</span></div>
+            <div className="mb-1 flex min-w-0 items-center justify-between gap-2">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                {modelControl}
+                {isMultimodal && (
+                  <>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp,image/gif"
+                      multiple
+                      className="hidden"
+                      onChange={(event) => {
+                        Array.from(event.target.files || []).forEach(addImageFile);
+                        event.currentTarget.value = '';
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      aria-label="添加图片"
+                      title="支持粘贴、点击添加；多模态模型可用"
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-slate-100 px-2 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                    >
+                      + 图片
+                    </button>
+                  </>
+                )}
+              </div>
+              <span className="shrink-0 text-[11px] text-slate-400">Code 生成模型</span>
+            </div>
             {selectedElement && (
               <div className="mb-2 flex items-center justify-between gap-2 rounded-md border border-blue-200 bg-blue-50 px-2 py-1.5 text-xs text-blue-800">
                 <span className="truncate">已选中：<code>{selectedElement.selector}</code></span>
                 <button type="button" onClick={onClearSelectedElement} className="shrink-0 text-blue-700 hover:text-blue-950">取消</button>
               </div>
             )}
-            <div className="mb-2 space-y-2">
+            <div className="mb-1 space-y-1">
               {attachments.length > 0 && (
                 <div className="flex flex-wrap gap-2">
                   {attachments.map((item, index) => (
@@ -1712,29 +2244,6 @@ export default function CodeWorkspace({
                       </button>
                     </div>
                   ))}
-                </div>
-              )}
-              {isMultimodal && (
-                <div className="flex items-center gap-2">
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp,image/gif"
-                    multiple
-                    className="hidden"
-                    onChange={(event) => {
-                      Array.from(event.target.files || []).forEach(addImageFile);
-                      event.currentTarget.value = '';
-                    }}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
-                  >
-                    + 图片
-                  </button>
-                  <span className="text-[11px] text-slate-400">支持粘贴、点击添加；多模态模型可用</span>
                 </div>
               )}
             </div>
@@ -1810,20 +2319,20 @@ export default function CodeWorkspace({
                 onChange={handleCodeInputChange}
                 onKeyDown={handleCodeInputKeyDown}
                 onPaste={handlePaste}
-                disabled={isLoading || !isSessionReady}
+                disabled={isWorkflowBusy || !isSessionReady}
                 placeholder={
                   hasCode
                     ? (hasProject ? '例如：把选中的按钮改成红色… (敲 @ 或从上方拖拽 可指定文件/文件夹)' : '例如：把选中的按钮改成红色，其他内容不变…')
                     : '描述你想创建的网页…'
                 }
                 rows={3}
-                className="w-full resize-y rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-100"
+                className="w-full resize-y rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500/20 disabled:bg-slate-100"
               />
             </div>
             <div className="mt-2 flex items-center gap-2">
               <button
                 type="submit"
-                disabled={isLoading || !isSessionReady || !input.trim()}
+                disabled={isWorkflowBusy || !isSessionReady || !input.trim()}
                 className="flex-1 rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
               >
                 {isLoading ? (hasCode ? '正在修改…' : '正在生成…') : (hasCode ? '应用修改' : '生成网页')}
@@ -1848,9 +2357,19 @@ export default function CodeWorkspace({
           role="separator"
           aria-label="调整需求栏宽度"
           aria-orientation="vertical"
+          aria-valuemin={280}
+          aria-valuemax={getMaximumLeftPanelWidth()}
+          aria-valuenow={leftPanelWidth}
+          tabIndex={0}
           onPointerDown={beginResize}
-          className="hidden w-1 shrink-0 cursor-col-resize bg-slate-200 transition-colors hover:bg-blue-400 lg:block"
-        />
+          onKeyDown={handleResizeKeyDown}
+          className="group relative z-20 hidden -mx-2 w-5 shrink-0 cursor-col-resize lg:block"
+        >
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-y-0 left-2 w-1 bg-slate-200 transition-colors group-hover:bg-blue-400 group-focus-visible:bg-blue-400"
+          />
+        </div>
 
         <div className="relative min-h-[28rem] min-w-0 flex-1 bg-white lg:min-h-0 fullscreen:min-h-0">
           {!hasCode && status.state !== 'generating' && (
@@ -1889,19 +2408,30 @@ export default function CodeWorkspace({
                 className="min-h-0 flex-1 w-full border-0 bg-white"
               />
               <section
-                // Why: 终端活动时面板若沿用 144px 的 consoleHeight，减去 Tab 头与会话条后
-                // 终端 host 会被 flex 压到 0 高，term.open() 拿不到非零尺寸而无限跳过。
-                // 切换到 Terminal Tab 时给足 320px，保证终端有可用的渲染高度。
-                style={{ height: isConsoleOpen ? (activeTerminalTab === 'terminal' ? 320 : consoleHeight) : 40 }}
+                data-code-agent-terminal-panel
+                  // Why: 终端活动时面板若沿用 144px 的 consoleHeight，减去 Tab 头与会话条后
+                  // 终端 host 会被 flex 压到 0 高，term.open() 拿不到非零尺寸而无限跳过。
+                  // 切换到 Terminal Tab 时保证至少 320px，同时保留拖拽后的实际高度。
+                  style={{ height: isConsoleOpen ? getConsoleHeight() : 40 }}
                 className="relative flex shrink-0 flex-col border-t border-slate-200 bg-slate-950 text-slate-200"
               >
                 <div
                   role="separator"
                   aria-label="调整控制台高度"
                   aria-orientation="horizontal"
+                  aria-valuemin={getMinimumConsoleHeight()}
+                  aria-valuemax={getMaximumConsoleHeight()}
+                  aria-valuenow={consoleHeight}
+                  tabIndex={0}
                   onPointerDown={beginConsoleResize}
-                  className="absolute inset-x-0 top-0 z-10 h-1 cursor-row-resize bg-transparent transition-colors hover:bg-blue-400"
-                />
+                  onKeyDown={handleConsoleResizeKeyDown}
+                  className="group flex h-3 shrink-0 cursor-row-resize items-center justify-center border-b border-slate-800 bg-slate-950/95 outline-none transition-colors hover:bg-slate-900 focus-visible:bg-slate-900"
+                >
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none h-1 w-16 rounded-full bg-slate-700 transition-colors group-hover:bg-blue-400 group-focus-visible:bg-blue-400"
+                  />
+                </div>
                 {/* 顶部 Tab 条：Console / Terminal 二选一，紧贴 banner 与终端，满足“紧靠着”需求 */}
                 <header className="flex shrink-0 items-center justify-between border-b border-slate-800 px-3 py-2 gap-3">
                   <div className="flex min-w-0 items-center gap-2">
@@ -1919,7 +2449,13 @@ export default function CodeWorkspace({
                       </button>
                       <button
                         type="button"
-                        onClick={() => setActiveTerminalTab('terminal')}
+                        onClick={() => {
+                          setActiveTerminalTab('terminal');
+                          const hasRunningAgent = agentRuns.some((run) => Boolean(run.trace?.isRunning));
+                          if (!activeTerminalRunId || !isManualTerminalRunId(activeTerminalRunId)) {
+                            if (!hasRunningAgent) createManualTerminal(true);
+                          }
+                        }}
                         className={`rounded px-2.5 py-1 font-medium transition-colors ${
                           activeTerminalTab === 'terminal'
                             ? 'bg-slate-700 text-white shadow-sm'
@@ -1943,26 +2479,58 @@ export default function CodeWorkspace({
                   </div>
                 </header>
                 {activeTerminalTab === 'console' ? (
-                  <div className={`${isConsoleOpen ? 'min-h-0 flex-1' : 'hidden'} overflow-y-auto px-3 py-2 font-mono text-xs leading-5`}>
-                    {consoleEntries.length === 0 ? (
-                      <p className="text-slate-500">等待沙盒日志…</p>
-                    ) : consoleEntries.map((entry, index) => (
-                      <p key={`${entry.timestamp}-${index}`} className={
-                        entry.level === 'error'
-                          ? 'text-red-300'
-                          : entry.level === 'warn'
-                            ? 'text-amber-300'
-                            : 'text-slate-300'
-                      }>
-                        <span className="mr-2 text-slate-500">[{entry.level}]</span>
-                        {entry.args.join(' ')}
-                      </p>
-                    ))}
+                  <div className={`${isConsoleOpen ? 'min-h-0 flex-1' : 'hidden'} flex flex-col`}>
+                    <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2 font-mono text-xs leading-5">
+                      {consoleEntries.length === 0 ? (
+                        <p className="text-slate-500">等待沙盒日志…</p>
+                      ) : consoleEntries.map((entry, index) => (
+                        <p key={`${entry.timestamp}-${index}`} className={
+                          entry.level === 'error'
+                            ? 'text-red-300'
+                            : entry.level === 'warn'
+                              ? 'text-amber-300'
+                              : 'text-slate-300'
+                        }>
+                          <span className="mr-2 text-slate-500">[{entry.level}]</span>
+                          {entry.args.join(' ')}
+                        </p>
+                      ))}
+                    </div>
+                    <form
+                      className="flex shrink-0 items-center gap-2 border-t border-slate-800 bg-slate-950 px-3 py-2"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        executeSandboxCommand();
+                      }}
+                    >
+                      <span className="select-none font-mono text-xs text-emerald-400" aria-hidden="true">›</span>
+                      <textarea
+                        ref={consoleCommandInputRef}
+                        value={consoleCommand}
+                        onChange={(event) => {
+                          setConsoleCommand(event.target.value);
+                          setConsoleHistoryIndex(-1);
+                        }}
+                        onKeyDown={handleConsoleCommandKeyDown}
+                        aria-label="沙盒 Console 输入"
+                        placeholder="输入 JavaScript，可粘贴多行；Enter 执行，Shift+Enter 换行"
+                        rows={4}
+                        spellCheck={false}
+                        autoComplete="off"
+                        className="min-h-24 min-w-0 flex-1 resize-y bg-transparent font-mono text-xs leading-5 text-slate-100 outline-none placeholder:text-slate-600"
+                      />
+                      <button
+                        type="submit"
+                        disabled={!consoleCommand.trim()}
+                        className="shrink-0 rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 transition-colors hover:border-slate-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        执行
+                      </button>
+                    </form>
                   </div>
                 ) : (
                   <div className={`${isConsoleOpen ? 'relative flex-1 overflow-hidden' : 'hidden'}`}>
-                    {activeTerminalRunId ? (
-                      <div className="absolute inset-0">
+                    <div className="absolute inset-0">
                       <IntegratedTerminal
                         workspaceId={terminalWorkspaceId}
                         activeRunId={activeTerminalRunId}
@@ -1972,7 +2540,7 @@ export default function CodeWorkspace({
                         onCreateManual={createManualTerminal}
                         onCloseTerminal={closeTerminalSession}
                         dark={isDarkTheme}
-                        allowUserStdin={isManualTerminalRunId(activeTerminalRunId)}
+                        allowUserStdin={Boolean(activeTerminalRunId && isManualTerminalRunId(activeTerminalRunId))}
                         onPropositionUpdate={(prop) => {
                           // Why: IntegratedTerminal 内的提案横幅紧贴终端顶部（用户要求"紧靠着终端上方"），
                           // 此处额外转发给上层以便通过 CustomEvent 同步把“正在等待用户选择”注入 agent trace steps。
@@ -1981,21 +2549,7 @@ export default function CodeWorkspace({
                         onTrustedPrefixAdd={(runIdValue, prefix) => onAddTrustedTerminalPrefix(runIdValue, prefix)}
                         trustedPrefixesByRun={trustedTerminalPrefixes}
                       />
-                      </div>
-                    ) : (
-                      <div className="flex h-full min-h-[180px] items-center justify-center text-xs text-slate-500">
-                        <div className="text-center">
-                          <p className="mb-2">暂无终端会话。</p>
-                          <button
-                            type="button"
-                            onClick={createManualTerminal}
-                            className="rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 font-medium text-slate-200 hover:bg-slate-800"
-                          >
-                            + 新建手动终端
-                          </button>
-                        </div>
-                      </div>
-                    )}
+                    </div>
                   </div>
                 )}
               </section>

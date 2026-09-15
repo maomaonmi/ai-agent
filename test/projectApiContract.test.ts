@@ -8,6 +8,7 @@ import {
   removeConversationFromProject,
   updateProject,
 } from '../src/features/projects/api.ts';
+import { persistCodeAgentTelemetry as persistCodeAgentRunTelemetry } from '../src/lib/api.ts';
 
 type FetchCall = { url: string; init?: RequestInit };
 
@@ -55,5 +56,42 @@ test('conversation assignment and removal preserve explicit project identity', a
     assert.equal(removed.projectId, null);
     assert.equal(calls[0].init?.method, 'POST');
     assert.equal(calls[1].init?.method, 'DELETE');
+  });
+});
+
+test('Code Agent telemetry uses an idempotent run-scoped persistence endpoint', async () => {
+  await withFakeFetch([{ status: 'success' }], async (calls) => {
+    await persistCodeAgentRunTelemetry('session-1', 'run-1', {
+      tokenUsage: { total_tokens: 321 },
+      contextUsage: {
+        type: 'context_usage',
+        run_id: 'run-1',
+        iteration: 4,
+        timestamp_ms: 400,
+        phase: 'measured',
+        context_tokens: 1200,
+        context_limit_tokens: 10000,
+        usage_ratio: 0.12,
+        message_count: 2,
+      },
+    });
+
+    assert.match(calls[0].url, /\/api\/sessions\/session-1\/code-agent-runs\/run-1\/telemetry$/);
+    assert.equal(calls[0].init?.method, 'PATCH');
+    assert.deepEqual(JSON.parse(String(calls[0].init?.body)), {
+      run_id: 'run-1',
+      token_usage: { total_tokens: 321 },
+      context_usage: {
+        type: 'context_usage',
+        run_id: 'run-1',
+        iteration: 4,
+        timestamp_ms: 400,
+        phase: 'measured',
+        context_tokens: 1200,
+        context_limit_tokens: 10000,
+        usage_ratio: 0.12,
+        message_count: 2,
+      },
+    });
   });
 });

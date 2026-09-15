@@ -50,7 +50,7 @@ export default function CodeTaskListCard({ plan, onOpenFile }: CodeTaskListCardP
   return (
     <section
       aria-label="AgentLoop 任务列表"
-      className="mb-3 rounded-xl border border-slate-200 bg-white px-3.5 py-3 shadow-sm"
+      className="mb-2 border-b border-slate-100 bg-white px-0 py-2"
     >
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2 text-slate-600">
@@ -61,12 +61,12 @@ export default function CodeTaskListCard({ plan, onOpenFile }: CodeTaskListCardP
           {plan.completedCount}/{plan.totalCount} 已完成
         </span>
       </div>
-      <ol className="mt-2 divide-y divide-slate-100">
+      <ol className="mt-1 space-y-0.5">
         {plan.tasks.map((task) => (
           <TaskRow key={task.task_key || String(task.id)} task={task} />
         ))}
       </ol>
-      <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-slate-100 pt-2">
+      <div className="mt-1.5 flex flex-wrap items-center gap-1.5 pt-1">
         <span className="text-[11px] text-slate-400">执行文件</span>
         {[plan.planPath, plan.todoPath].map((path) => (
           onOpenFile ? (
@@ -74,12 +74,12 @@ export default function CodeTaskListCard({ plan, onOpenFile }: CodeTaskListCardP
               key={path}
               type="button"
               onClick={() => onOpenFile(path)}
-              className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-500 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[10px] text-slate-500 transition hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             >
               <FileText className="h-3 w-3" aria-hidden="true" />{path}
             </button>
           ) : (
-            <span key={path} className="inline-flex items-center gap-1 rounded-md bg-slate-50 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">
+            <span key={path} className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-1.5 py-0.5 font-mono text-[10px] text-slate-500">
               <FileText className="h-3 w-3" aria-hidden="true" />{path}
             </span>
           )

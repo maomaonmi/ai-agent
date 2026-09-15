@@ -13,7 +13,11 @@ import {
   getMemoryEvents,
   getMemorySummaries,
   getProfileCards,
+  enqueueGoldenTraceEvaluation,
+  listGoldenTraces,
+  setGoldenTraceStatus,
   listVfsCheckpoints,
+  type GoldenTraceCase,
   type MemoryEvent,
   type MemorySummary,
   type ProfileCard,
@@ -38,12 +42,25 @@ function formatTime(ts: number): string {
   return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false });
 }
 
-type Tab = 'profile' | 'summary' | 'vfs' | 'skill' | 'events';
+function goldenEvaluationLabel(status: string | undefined): string {
+  switch (status) {
+    case 'passed': return '通过';
+    case 'failed': return '失败';
+    case 'blocked': return '阻塞';
+    case 'running': return '执行中';
+    case 'queued': return '排队中';
+    case 'cancelled': return '已取消';
+    default: return '未评估';
+  }
+}
+
+type Tab = 'profile' | 'summary' | 'vfs' | 'golden' | 'skill' | 'events';
 
 const TABS: Array<{ key: Tab; label: string }> = [
   { key: 'profile', label: '档案卡' },
   { key: 'summary', label: '摘要' },
   { key: 'vfs', label: 'VFS' },
+  { key: 'golden', label: 'Golden' },
   { key: 'skill', label: 'Skill' },
   { key: 'events', label: '事件' },
 ];
@@ -81,6 +98,10 @@ export default function MemoryPanel() {
   const [cards, setCards] = useState<ProfileCard[]>([]);
   const [summaries, setSummaries] = useState<MemorySummary[]>([]);
   const [checkpoints, setCheckpoints] = useState<VFSCheckpointMeta[]>([]);
+  const [goldenTraces, setGoldenTraces] = useState<GoldenTraceCase[]>([]);
+  const [goldenTraceError, setGoldenTraceError] = useState<string | null>(null);
+  const [goldenTraceBusy, setGoldenTraceBusy] = useState<string | null>(null);
+  const [goldenTraceNotice, setGoldenTraceNotice] = useState<string | null>(null);
   const [events, setEvents] = useState<MemoryEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -107,6 +128,15 @@ export default function MemoryPanel() {
       setSummaries(summaryRes.summaries);
       setCheckpoints(vfsRes.checkpoints);
       setEvents(eventRes.events);
+      try {
+        const goldenRes = await listGoldenTraces({ page: 1, pageSize: 50 });
+        setGoldenTraces(goldenRes.data);
+        setGoldenTraceError(null);
+      } catch (e) {
+        // Golden Trace is an additive memory capability; an older backend
+        // should not make the existing memory tabs unusable during rollout.
+        setGoldenTraceError(e instanceof Error ? e.message : 'Golden Trace 暂不可用');
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载记忆数据失败');
     } finally {
@@ -131,6 +161,58 @@ export default function MemoryPanel() {
     },
     [loadAll],
   );
+
+  const handleReplay = useCallback(async (item: GoldenTraceCase) => {
+    setGoldenTraceBusy(item.case_id);
+    setGoldenTraceNotice(null);
+    setGoldenTraceError(null);
+    try {
+      const clientRequestId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `golden-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const result = await enqueueGoldenTraceEvaluation(item.case_id, {
+        clientRequestId,
+        mode: 'replay',
+      });
+      const evaluationLabel = goldenEvaluationLabel(result.evaluation.status);
+      setGoldenTraceNotice(result.existing
+        ? `${item.title}：该回放请求已存在，当前状态：${evaluationLabel}。`
+        : `${item.title}：回放评估${evaluationLabel}。`);
+      await loadAll();
+    } catch (e) {
+      setGoldenTraceError(e instanceof Error ? e.message : '回放评估失败');
+    } finally {
+      setGoldenTraceBusy(null);
+    }
+  }, [loadAll]);
+
+  const handleGoldenStatus = useCallback(async (
+    item: GoldenTraceCase,
+    status: 'draft' | 'golden' | 'retired',
+  ) => {
+    setGoldenTraceBusy(`${status}:${item.case_id}`);
+    setGoldenTraceNotice(null);
+    setGoldenTraceError(null);
+    try {
+      const result = await setGoldenTraceStatus(item.case_id, status);
+      setGoldenTraces((previous) => previous.map((candidate) => (
+        candidate.case_id === item.case_id
+          ? { ...result.case, latest_evaluation: candidate.latest_evaluation }
+          : candidate
+      )));
+      setGoldenTraceNotice(
+        status === 'golden'
+          ? 'Golden Trace 已上架。'
+          : status === 'draft'
+            ? 'Golden Trace 已恢复为草稿。'
+            : 'Golden Trace 已退役。',
+      );
+    } catch (e) {
+      setGoldenTraceError(e instanceof Error ? e.message : 'Golden Trace 状态更新失败');
+    } finally {
+      setGoldenTraceBusy(null);
+    }
+  }, []);
 
   // 清空会话全部记忆（核弹操作）：二次确认，Skill 为全局资产不受影响。
   const handleClearAll = useCallback(() => {
@@ -178,7 +260,7 @@ export default function MemoryPanel() {
         </div>
       </div>
 
-      {/* 子 Tab：档案卡 / 摘要 / VFS / Skill / 事件 */}
+      {/* 子 Tab：档案卡 / 摘要 / VFS / Golden / Skill / 事件 */}
       <div className="flex flex-wrap items-center gap-1 rounded-lg border border-slate-200 bg-white p-0.5">
         {TABS.map((t) => (
           <button
@@ -205,6 +287,120 @@ export default function MemoryPanel() {
       )}
 
       {!loading && !error && tab === 'skill' && <SkillInspector />}
+
+      {!loading && !error && tab === 'golden' && (
+        <div className="space-y-2">
+          {goldenTraceNotice && (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+              {goldenTraceNotice}
+            </div>
+          )}
+          {goldenTraceError && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+              {goldenTraceError}
+            </div>
+          )}
+          {goldenTraces.length === 0 && !goldenTraceError && (
+            <div className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm leading-6 text-slate-500">
+              暂无 Golden Trace。请在通过真实浏览器验收的 AgentLoop 时间线上保存成功轨迹。
+            </div>
+          )}
+          {goldenTraces.map((item) => (
+            <div key={item.case_id} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="truncate text-xs font-semibold text-slate-800" title={item.title}>{item.title}</div>
+                  <div className="mt-1 truncate font-mono text-[10px] text-slate-400" title={item.case_id}>
+                    {item.case_id} · 来源 {item.source_quality === 'complete' ? '完整轨迹' : '摘要轨迹'}
+                  </div>
+                </div>
+                <div className="flex shrink-0 flex-col items-end gap-1">
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] ${item.quality_state === 'invalidated' ? 'bg-rose-50 text-rose-700' : item.status === 'golden' ? 'bg-emerald-50 text-emerald-700' : item.status === 'retired' ? 'bg-slate-100 text-slate-500' : 'bg-amber-50 text-amber-700'}`}>
+                    {item.quality_state === 'invalidated' ? '已失效' : item.status === 'golden' ? '已上架' : item.status === 'retired' ? '已退役' : '待确认'}
+                  </span>
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] ${item.latest_evaluation?.status === 'passed' ? 'bg-emerald-50 text-emerald-700' : item.latest_evaluation?.status === 'failed' || item.latest_evaluation?.status === 'blocked' ? 'bg-rose-50 text-rose-700' : 'bg-slate-100 text-slate-500'}`}>
+                    回放 · {goldenEvaluationLabel(item.latest_evaluation?.status)}
+                  </span>
+                </div>
+              </div>
+              <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-slate-400">
+                <span>范围 · {item.contract.required_scope}</span>
+                <div className="flex items-center gap-1.5">
+                  {item.status === 'draft' && item.quality_state !== 'invalidated' && (
+                    <>
+                      <button
+                        type="button"
+                        disabled={goldenTraceBusy === `golden:${item.case_id}`}
+                        onClick={() => void handleGoldenStatus(item, 'golden')}
+                        className="rounded border border-emerald-200 bg-white px-2 py-1 text-[10px] font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-50"
+                      >
+                        上架
+                      </button>
+                      <button
+                        type="button"
+                        disabled={goldenTraceBusy === `retired:${item.case_id}`}
+                        onClick={() => void handleGoldenStatus(item, 'retired')}
+                        className="rounded border border-rose-200 bg-white px-2 py-1 text-[10px] font-medium text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                      >
+                        退役
+                      </button>
+                    </>
+                  )}
+                  {item.status === 'retired' && item.quality_state !== 'invalidated' && (
+                    <button
+                      type="button"
+                      disabled={goldenTraceBusy === `draft:${item.case_id}`}
+                      onClick={() => void handleGoldenStatus(item, 'draft')}
+                      className="rounded border border-amber-200 bg-white px-2 py-1 text-[10px] font-medium text-amber-700 hover:bg-amber-50 disabled:opacity-50"
+                    >
+                      恢复草稿
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={goldenTraceBusy === item.case_id}
+                    onClick={() => void handleReplay(item)}
+                    className="rounded border border-blue-200 bg-white px-2 py-1 text-[10px] font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                  >
+                    {goldenTraceBusy === item.case_id ? '评估中…' : '回放评估'}
+                  </button>
+                </div>
+              </div>
+              {item.quality_state === 'invalidated' && item.invalidated_reason && (
+                <div className="mt-2 rounded border border-rose-100 bg-rose-50/70 px-2 py-1.5 text-[10px] leading-relaxed text-rose-700">
+                  已从可复用记忆移除 · {item.invalidated_reason}
+                </div>
+              )}
+              <div className="mt-3 grid gap-2 text-[10px] leading-relaxed text-slate-600 sm:grid-cols-2">
+                <div className="rounded border border-violet-100 bg-violet-50/60 px-2 py-1.5">
+                  <div className="font-medium text-violet-700">Semantic Trace · 可复用策略</div>
+                  <div className="mt-0.5">
+                    根因 · {item.semantic_trace?.root_cause_category || '未归纳'}
+                  </div>
+                  <div>
+                    验收 · {item.semantic_trace?.verification_strategy?.join(' → ') || '—'}
+                  </div>
+                  <div>
+                    成功标准 · {item.semantic_trace?.success_criteria?.join('、') || '—'}
+                  </div>
+                </div>
+                <div className="rounded border border-slate-200 bg-slate-50/70 px-2 py-1.5">
+                  <div className="font-medium text-slate-700">Concrete Trace · 本次证据</div>
+                  <div className="mt-0.5">
+                    读取 {item.concrete_trace?.read_count ?? item.concrete_trace?.read_order?.length ?? 0} 次 · 工具 {item.concrete_trace?.tool_order?.length ?? 0} 次
+                  </div>
+                  <div>
+                    修改文件 · {valueToString(item.concrete_trace?.patch?.changed_files)}
+                  </div>
+                  <div>
+                    浏览器 · {valueToString(item.concrete_trace?.browser_evidence?.browser_run_id)}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {!loading && !error && tab === 'profile' && (
         <div className="space-y-3">
