@@ -84,6 +84,11 @@ import ChatNodeNavigator, { ChatNode } from './ChatNodeNavigator';
 import CodeWorkspace from './CodeWorkspace';
 import CodeShowcasePage from './code-showcase/CodeShowcasePage';
 import { isRuntimeCandidateForBrowserRun } from '../Code/agentRunIdentity';
+import { CodeAgentActivityDeltaBuffer } from '../Code/codeEventStream';
+import {
+  canTriggerAcceptanceRepair,
+  reduceAcceptanceProofOutcome,
+} from '../Code/acceptanceProofOutcome';
 import { isCodeWorkflowBusy } from '../Code/codeWorkflowState';
 import { mapAgentRunsToPrompts } from '../Code/agentRunLifecycle';
 import { getAgentRunFamilyIds } from '../Code/terminalSessionPolicy';
@@ -2203,6 +2208,9 @@ export default function ChatInterface() {
     let streamError = '';
     let readOnlyRunId = '';
     let readOnlyTimeline: CodeAgentTimelineEvent[] = [];
+    const readOnlyActivityBuffer = new CodeAgentActivityDeltaBuffer(
+      `read-only:${input.assistantMessageId}`,
+    );
     const updateReadOnlyMessage = (patch: Partial<Pick<ChatMessage, 'content' | 'codeReadOnlyTimeline'>>) => {
       if (input.requestToken !== activeRequestTokenRef.current) return;
       const nextMessages = messagesRef.current.map((message) =>
@@ -2215,7 +2223,7 @@ export default function ChatInterface() {
       answer = nextContent;
       updateReadOnlyMessage({ content: nextContent });
     };
-    const appendReadOnlyActivity = (event: CodeAgentActivityEvent) => {
+    const appendTimelineActivity = (event: CodeAgentActivityEvent) => {
       readOnlyRunId = event.run_id?.trim() || readOnlyRunId || `read-only:${input.assistantMessageId}`;
       const timelineEvent = readOnlyActivityToTimelineEvent(
         event,
@@ -2228,6 +2236,11 @@ export default function ChatInterface() {
         timelineEvent,
       ].slice(-80);
       updateReadOnlyMessage({ codeReadOnlyTimeline: readOnlyTimeline });
+    };
+    const appendReadOnlyActivity = (event: CodeAgentActivityEvent) => {
+      for (const projectedEvent of readOnlyActivityBuffer.accept(event)) {
+        appendTimelineActivity(projectedEvent);
+      }
     };
 
     await readCodeWorkbench({
@@ -2262,6 +2275,9 @@ export default function ChatInterface() {
         return;
       }
     });
+    for (const projectedEvent of readOnlyActivityBuffer.flush()) {
+      appendTimelineActivity(projectedEvent);
+    }
     if (streamError) throw new Error(streamError);
     if (input.requestToken !== activeRequestTokenRef.current) return;
     const finalContent = answer.trim() || '当前没有收到可用的回答。';
@@ -2436,6 +2452,7 @@ export default function ChatInterface() {
         codeIntentDecision = await classifyCodeWorkbenchIntent(userMessage, {
           hasProject: Boolean(generatedCode.trim()),
           hasUnfinishedRun: codeIntentContext.resumeCandidates.length > 0,
+          entrypoint: isBranchRewrite ? 'rewrite' : undefined,
           recentTurns: codeIntentContext.recentTurns,
           assistantReferences: codeIntentContext.assistantReferences,
           resumeCandidates: codeIntentContext.resumeCandidates.map(toCodeIntentResumeCandidate),
@@ -4233,11 +4250,16 @@ export default function ChatInterface() {
                   report.goal_assertion_ids ?? [],
                   report.deterministic_findings ?? [],
                   report.inconclusive === true,
+                  reduceAcceptanceProofOutcome(report),
                 ).catch((cause) => {
                   setError(cause instanceof Error ? `运行时验证失败：${cause.message}` : '运行时验证失败，请稍后重试。');
                   return null;
                 });
-                if (!passed && !blocked && report.inconclusive !== true) {
+                // Only a conclusive contradiction may start code repair.
+                // `passed=false` is not enough: the verifier may have emitted
+                // legacy failed flags while its evidence was inconclusive or
+                // unobservable.
+                if (!blocked && canTriggerAcceptanceRepair(report)) {
                   handleRuntimeError({
                     type: 'code-sandbox-runtime-error',
                     runId: codeRunId,

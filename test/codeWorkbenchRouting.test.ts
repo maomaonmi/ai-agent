@@ -23,6 +23,10 @@ const autoRepairSource = fs.readFileSync(
   path.resolve(process.cwd(), 'src/hooks/useCodeAutoRepair.ts'),
   'utf8',
 );
+const apiSource = fs.readFileSync(
+  path.resolve(process.cwd(), 'src/lib/api.ts'),
+  'utf8',
+);
 
 test('只读 Code 回答使用有边界的项目上下文，不把旧 Agent run 当作当前事实', () => {
   const prompt = buildCodeReadOnlyPrompt('请总结当前项目状态', {
@@ -139,6 +143,15 @@ test('只有未完成或明确可恢复的 Agent run 才能进入 resume', () =>
 
   assert.equal(isCodeAgentRunUnfinished(resumable), true);
   assert.equal(isCodeAgentRunUnfinished(completed), false);
+});
+
+test('重写提交把入口上下文交给服务端语义路由器，而不是强制修改', () => {
+  assert.match(
+    chatInterfaceSource,
+    /entrypoint:\s*isBranchRewrite\s*\?\s*'rewrite'\s*:\s*undefined/,
+  );
+  assert.match(apiSource, /entrypoint:\s*input\.entrypoint/);
+  assert.doesNotMatch(chatInterfaceSource, /buildExplicitCodeRewriteDecision/);
 });
 
 test('Code 工作台在调用写入 AgentLoop 之前必须先经过意图路由', () => {

@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { CodeAgentEventBuffer } from '../src/Code/codeEventStream.ts';
+import {
+  CodeAgentActivityDeltaBuffer,
+  CodeAgentEventBuffer,
+} from '../src/Code/codeEventStream.ts';
 
 const event = (overrides: Record<string, unknown> = {}) => ({
   type: 'agent_activity' as const,
@@ -34,4 +37,58 @@ test('ignores older sequence numbers after a reconnect replay', () => {
 
   assert.equal(buffer.accept(event({ sequence: 3, event_id: 'agent-run-1:sse:3' })).length, 1);
   assert.equal(buffer.accept(event({ sequence: 2, event_id: 'agent-run-1:sse:2' })).length, 0);
+});
+
+test('coalesces delta activity from one model turn into one logical event', () => {
+  const buffer = new CodeAgentActivityDeltaBuffer('agent-run-1');
+
+  const first = buffer.accept(event({
+    content: '不影响',
+    content_mode: 'delta',
+    turn_id: 'turn-1',
+    event_id: 'turn-1:1',
+    sequence: 1,
+  }));
+  const second = buffer.accept(event({
+    content: '你',
+    content_mode: 'delta',
+    turn_id: 'turn-1',
+    event_id: 'turn-1:2',
+    sequence: 2,
+  }));
+
+  assert.equal(first.length, 1);
+  assert.equal(second.length, 1);
+  assert.equal(first[0].content, '不影响');
+  assert.equal(second[0].content, '不影响你');
+  assert.equal(second[0].event_id, 'turn-1:1');
+  assert.equal(second[0].done, false);
+});
+
+test('turn boundary closes the aggregate without creating an empty timeline event', () => {
+  const buffer = new CodeAgentActivityDeltaBuffer('agent-run-1');
+
+  buffer.accept(event({
+    content: '完整回答',
+    content_mode: 'delta',
+    turn_id: 'turn-1',
+    event_id: 'turn-1:1',
+    sequence: 1,
+  }));
+  const closed = buffer.accept(event({
+    content: '',
+    phase: 'done',
+    turn_id: 'turn-1',
+    boundary: 'turn_completed',
+    done: true,
+    event_id: 'turn-1:2',
+    sequence: 2,
+  }));
+
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0].content, '完整回答');
+  assert.equal(closed[0].event_id, 'turn-1:1');
+  assert.equal(closed[0].done, true);
+  assert.equal(closed[0].boundary, 'turn_completed');
+  assert.equal(buffer.flush().length, 0);
 });

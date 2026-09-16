@@ -1313,6 +1313,8 @@ export interface CodeAgentActivityEvent {
   channel: 'status' | 'output' | 'answer';
   phase: 'preflight' | 'analyzing' | 'diagnosing' | 'thinking' | 'generating' | 'patching' | 'validating' | 'planning' | 'tool_calling' | 'tool_result' | 'done';
   content: string;
+  /** Provider chunks are deltas; summary/status events may omit this field. */
+  content_mode?: 'delta' | 'summary' | string;
   done: boolean;
   // AgentLoop 轮次边界：同一个 run 内的每个模型回合必须单独渲染，
   // 不能把工具前后的 reasoning 增量合并到同一张卡片。
@@ -1386,6 +1388,7 @@ export interface TestAgentContractReplanEvent {
   verification_session_id?: string;
   candidate_revision?: string;
   affected_obligations?: string[];
+  acceptance_goal?: AcceptanceGoalContract;
   metadata?: Record<string, unknown>;
 }
 
@@ -1431,6 +1434,12 @@ export interface RuntimeSummaryEvent {
   scope_source?: 'orchestrator' | 'inherited' | 'explicit';
   allowed_next_action?: string;
   runtime_evidence?: RuntimeVerificationEvidence;
+  /** Runtime-owned acceptance contract compiled from the current candidate evidence. */
+  acceptance_goal?: AcceptanceGoalContract;
+  acceptance_validation?: string;
+  verification_status?: string;
+  validation_errors?: Array<Record<string, unknown>>;
+  reason?: string;
   verification_session_id?: string;
 }
 
@@ -1857,6 +1866,7 @@ export interface RuntimeVerificationEvidence {
   boot_completed: boolean;
   deterministic_verifier_passed?: boolean;
   goal_verified?: boolean;
+  proof_outcome?: string;
   goal_assertion_ids?: string[];
   console_errors: string[];
   deterministic_findings?: DeterministicBrowserFinding[];
@@ -2038,6 +2048,8 @@ export interface CodeAcceptanceReport {
   interaction_scenario?: Record<string, unknown>;
   goal_verified?: boolean;
   inconclusive?: boolean;
+  proof_outcome?: 'verified' | 'contradicted' | 'inconclusive' | 'unverifiable' | 'invalid_test' | 'infra_failure' | string;
+  outcome?: string;
   verification_status?: 'passed' | 'failed' | 'blocked' | 'inconclusive';
   goal_assertion_ids?: string[];
   /** Evidence produced by the autonomous, isolated Test Agent child. */
@@ -2144,6 +2156,8 @@ export async function classifyCodeWorkbenchIntent(
   input: {
     hasProject: boolean;
     hasUnfinishedRun: boolean;
+    /** UI submission context only; the server still decides intent. */
+    entrypoint?: 'rewrite';
     recentTurns?: CodeIntentTurn[];
     assistantReferences?: CodeIntentTurn[];
     activeRun?: CodeIntentActiveRun;
@@ -2162,6 +2176,7 @@ export async function classifyCodeWorkbenchIntent(
       message,
       has_project: input.hasProject,
       has_unfinished_run: input.hasUnfinishedRun,
+      entrypoint: input.entrypoint,
       recent_turns: input.recentTurns ?? [],
       assistant_references: input.assistantReferences ?? [],
       active_run: input.activeRun,
@@ -3206,6 +3221,7 @@ export async function verifyFullstackRuntime(
     deterministic_verifier_passed: boolean;
     goal_verified?: boolean;
     verification_inconclusive?: boolean;
+    proof_outcome?: string;
     goal_assertion_ids?: string[];
     deterministic_findings?: DeterministicBrowserFinding[];
     console_entries: Array<{

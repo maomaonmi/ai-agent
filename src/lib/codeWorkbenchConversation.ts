@@ -1,4 +1,8 @@
-import type { CodeAgentRun, CodeIntentActiveRun, CodeIntentTurn } from './api';
+import type {
+  CodeAgentRun,
+  CodeIntentActiveRun,
+  CodeIntentTurn,
+} from './api';
 import { mapAgentRunsToPrompts } from '../Code/agentRunLifecycle.ts';
 
 export interface CodeReadOnlyRunContext {

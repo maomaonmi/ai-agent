@@ -33,6 +33,7 @@ import {
   type DeterministicBrowserFinding,
   type RuntimeReadEvidence,
   type AcceptanceGoalContract,
+  type TestAgentContractReplanEvent,
 } from '../lib/api';
 import { appendTimelineEvent, completeTimelineEvent } from '../Code/agentTimeline';
 import { classifyCodeGenerationEvent, summarizeAgentLoopRound } from '../Code/agentEventRouting';
@@ -45,6 +46,7 @@ import {
   settleAgentRunAsSuperseded,
 } from '../Code/agentRunLifecycle';
 import { canStartRuntimeRepair } from '../Code/acceptancePolicy';
+import { reduceAcceptanceProofOutcome } from '../Code/acceptanceProofOutcome';
 import {
   bundleFullstackVFS,
   isFullstackVFS,
@@ -649,6 +651,16 @@ export default function useCodeAutoRepair() {
         ?? currentAgentRunIdRef.current;
       const testRunId = testEvent.run_id ?? currentAgentRunIdRef.current;
       const sourceEventId = testEvent.source_event_id ?? testEvent.event_id;
+      const compiledAcceptanceGoal = (
+        event.type === 'test_agent_contract_replan'
+          ? (event as TestAgentContractReplanEvent).acceptance_goal
+          : undefined
+      ) ?? (
+        event.metadata?.acceptance_goal
+          && typeof event.metadata.acceptance_goal === 'object'
+          ? event.metadata.acceptance_goal as AcceptanceGoalContract
+          : undefined
+      );
       appendActivity(
         testEvent.content,
         testEvent.done,
@@ -675,6 +687,7 @@ export default function useCodeAutoRepair() {
       );
       commitAgentTrace((previous) => ({
         ...previous,
+        acceptanceGoal: compiledAcceptanceGoal ?? previous.acceptanceGoal,
         verificationSessionId: lifecycleId,
       }));
       return true;
@@ -768,6 +781,10 @@ export default function useCodeAutoRepair() {
           scopeSource: event.scope_source ?? previous.scopeSource,
           allowedNextAction: event.allowed_next_action ?? previous.allowedNextAction,
           runtimeEvidence: event.runtime_evidence ?? previous.runtimeEvidence,
+          // A Runtime replan supersedes the semantic-router draft.  Preserve
+          // it in the trace so the browser verifier receives the same
+          // candidate-bound contract instead of the original empty one.
+          acceptanceGoal: event.acceptance_goal ?? previous.acceptanceGoal,
           verificationSessionId: event.verification_session_id
             ?? previous.verificationSessionId,
         };
@@ -1148,6 +1165,7 @@ export default function useCodeAutoRepair() {
     goalAssertionIds: string[] = [],
     deterministicFindings: DeterministicBrowserFinding[] = [],
     verificationInconclusive = false,
+    proofOutcome = '',
   ) => {
     const candidate = agentTraceRef.current.runtimeVerification;
     if (!candidate) return null;
@@ -1183,6 +1201,7 @@ export default function useCodeAutoRepair() {
         deterministic_verifier_passed: deterministicVerifierPassed,
         goal_verified: goalVerified,
         verification_inconclusive: verificationInconclusive,
+        proof_outcome: proofOutcome,
         goal_assertion_ids: goalAssertionIds.slice(0, 20),
         deterministic_findings: deterministicFindings.slice(0, 20),
         console_entries: evidence,
