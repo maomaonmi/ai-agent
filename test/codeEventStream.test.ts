@@ -92,3 +92,33 @@ test('turn boundary closes the aggregate without creating an empty timeline even
   assert.equal(closed[0].boundary, 'turn_completed');
   assert.equal(buffer.flush().length, 0);
 });
+
+test('read-only mode coalesces legacy reasoning deltas without content_mode', () => {
+  const buffer = new CodeAgentActivityDeltaBuffer('read-only-run', {
+    mergeLegacyOutputDeltas: true,
+  });
+
+  const first = buffer.accept(event({
+    channel: 'output',
+    phase: 'thinking',
+    content: 'Let',
+    turn_id: 'turn-4',
+    event_id: 'turn-4:1',
+    sequence: 1,
+    content_mode: undefined,
+  }));
+  const second = buffer.accept(event({
+    channel: 'output',
+    phase: 'thinking',
+    content: "'s read",
+    turn_id: 'turn-4',
+    event_id: 'turn-4:2',
+    sequence: 2,
+    content_mode: undefined,
+  }));
+
+  assert.equal(first.length, 1);
+  assert.equal(second.length, 1);
+  assert.equal(second[0].content, "Let's read");
+  assert.equal(second[0].event_id, 'turn-4:1');
+});

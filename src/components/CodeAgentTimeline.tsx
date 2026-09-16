@@ -46,6 +46,7 @@ const ACTOR_LABEL: Record<CodeAgentActorKind, string> = {
   test: '测试子 Agent / 浏览器验证器',
   ops: '运维 Agent',
   system: '系统',
+  readonly: '只读 Agent',
 };
 
 const ACTOR_STYLE: Record<CodeAgentActorKind, string> = {
@@ -53,6 +54,7 @@ const ACTOR_STYLE: Record<CodeAgentActorKind, string> = {
   test: 'text-slate-500',
   ops: 'text-slate-500',
   system: 'text-slate-400',
+  readonly: 'text-slate-500',
 };
 
 const STAGE_LABEL: Record<CodeAgentTimelineEvent['stage'], string> = {
@@ -244,7 +246,9 @@ function thoughtSummary(event: CodeAgentTimelineEvent, isRunning: boolean): stri
   const durationMs = event.metrics?.durationMs;
   const duration = durationMs == null ? (!event.done && isRunning ? '计时中' : '已结束') : `${Math.max(0, Math.round(durationMs / 1_000))} 秒`;
   const iteration = event.iteration == null ? '' : `第 ${event.iteration} 轮 · `;
-  const label = event.stage === 'preflight' ? '执行前思考' : '思考';
+  const label = event.actorKind === 'readonly'
+    ? event.stage === 'preflight' ? '读取前置分析' : '读取分析'
+    : event.stage === 'preflight' ? '执行前思考' : '思考';
   return `${iteration}${label} · ${duration} · ${event.content.length.toLocaleString()} 字`;
 }
 

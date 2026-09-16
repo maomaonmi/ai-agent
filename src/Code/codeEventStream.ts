@@ -52,10 +52,20 @@ function activityKey(
   event: CodeAgentActivityEvent,
   fallbackRunId?: string,
   includePhase = true,
+  mergeLegacyOutputDeltas = false,
 ): string | null {
   const turnId = event.turn_id?.trim();
   if (!turnId) return null;
-  if (event.boundary !== 'turn_completed' && event.content_mode !== 'delta') return null;
+  const isLegacyOutputDelta = (
+    mergeLegacyOutputDeltas
+    && event.channel === 'output'
+    && event.content_mode == null
+  );
+  if (
+    event.boundary !== 'turn_completed'
+    && event.content_mode !== 'delta'
+    && !isLegacyOutputDelta
+  ) return null;
   const parts = [
     activityRunId(event, fallbackRunId),
     turnId,
@@ -77,13 +87,23 @@ function activityKey(
 export class CodeAgentActivityDeltaBuffer {
   private readonly active = new Map<string, CodeAgentActivityEvent>();
   private readonly fallbackRunId?: string;
+  private readonly mergeLegacyOutputDeltas: boolean;
 
-  constructor(fallbackRunId?: string) {
+  constructor(
+    fallbackRunId?: string,
+    options?: { mergeLegacyOutputDeltas?: boolean },
+  ) {
     this.fallbackRunId = fallbackRunId;
+    this.mergeLegacyOutputDeltas = options?.mergeLegacyOutputDeltas ?? false;
   }
 
   accept(event: CodeAgentActivityEvent): CodeAgentActivityEvent[] {
-    const exactKey = activityKey(event, this.fallbackRunId);
+    const exactKey = activityKey(
+      event,
+      this.fallbackRunId,
+      true,
+      this.mergeLegacyOutputDeltas,
+    );
     const isBoundary = event.boundary === 'turn_completed';
     if (!exactKey && !isBoundary) return [event];
 
@@ -128,13 +148,23 @@ export class CodeAgentActivityDeltaBuffer {
   }
 
   private findBoundaryKey(event: CodeAgentActivityEvent): string | null {
-    const prefix = activityKey(event, this.fallbackRunId, false);
+    const prefix = activityKey(
+      event,
+      this.fallbackRunId,
+      false,
+      this.mergeLegacyOutputDeltas,
+    );
     if (!prefix) return null;
     return [...this.active.keys()].find((key) => key.startsWith(`${prefix}${ACTIVITY_KEY_SEPARATOR}`)) || null;
   }
 
   private syntheticEventId(event: CodeAgentActivityEvent): string {
-    const key = activityKey(event, this.fallbackRunId);
+    const key = activityKey(
+      event,
+      this.fallbackRunId,
+      true,
+      this.mergeLegacyOutputDeltas,
+    );
     return `${key || activityRunId(event, this.fallbackRunId)}:activity`;
   }
 

@@ -1914,7 +1914,7 @@ export interface AcceptanceGoalContract {
   valid?: boolean;
 }
 
-export type CodeAgentActorKind = 'main' | 'test' | 'ops' | 'system';
+export type CodeAgentActorKind = 'main' | 'test' | 'ops' | 'system' | 'readonly';
 
 export type CodeAgentRunKind = 'main' | 'runtime_repair';
 

@@ -268,8 +268,8 @@ function readOnlyActivityToTimelineEvent(
 ): CodeAgentTimelineEvent | null {
   if (!event.content.trim()) return null;
   const runId = event.run_id?.trim() || fallbackRunId;
-  const actorId = event.actor_id?.trim() || `main:${runId}`;
-    const stage: CodeAgentTimelineEvent['stage'] = event.channel === 'status'
+  const actorId = `readonly:${runId}`;
+  const stage: CodeAgentTimelineEvent['stage'] = event.channel === 'status'
       ? 'status'
       : event.channel === 'answer'
         ? 'summary'
@@ -297,7 +297,7 @@ function readOnlyActivityToTimelineEvent(
     eventId: event.event_id || `${runId}:read-only:${event.sequence ?? fallbackSequence}`,
     runId,
     actorId,
-    actorKind: 'main',
+    actorKind: 'readonly',
     stage,
     content: event.content,
     done: event.done,
@@ -2210,6 +2210,7 @@ export default function ChatInterface() {
     let readOnlyTimeline: CodeAgentTimelineEvent[] = [];
     const readOnlyActivityBuffer = new CodeAgentActivityDeltaBuffer(
       `read-only:${input.assistantMessageId}`,
+      { mergeLegacyOutputDeltas: true },
     );
     const updateReadOnlyMessage = (patch: Partial<Pick<ChatMessage, 'content' | 'codeReadOnlyTimeline'>>) => {
       if (input.requestToken !== activeRequestTokenRef.current) return;
