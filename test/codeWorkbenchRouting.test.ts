@@ -76,6 +76,30 @@ test('新问题的路由上下文只保留用户对话，并排除未绑定到�
   assert.equal(context.resumeCandidates.length, 0);
 });
 
+test('已完成的当前成果作为修订基线传给语义路由，而不是被误判为 resume', () => {
+  const context = buildCodeIntentContext(
+    [{ id: 'user-1', role: 'user', content: '增大画布面积' }],
+    [{
+      id: 'run-completed',
+      request: '增大画布面积',
+      projectKind: 'frontend',
+      createdAt: '2026-09-16T00:00:00.000Z',
+      trace: {
+        steps: [], output: '', phase: 'completed', isRunning: false,
+        resumeEligible: false, status: 'completed',
+      },
+    }],
+    { activeRevisionId: 'revision-33' },
+  );
+
+  assert.equal(context.resumeCandidates.length, 0);
+  assert.deepEqual(context.latestCompletedResult, {
+    run_id: 'run-completed',
+    revision_id: 'revision-33',
+  });
+  assert.match(chatInterfaceSource, /completedResult: codeIntentContext\.latestCompletedResult/);
+});
+
 test('上一条助手回答作为参考保留，但不混入用户事实或运行时证据', () => {
   const context = buildCodeIntentContext(
     [
@@ -156,12 +180,28 @@ test('重写提交把入口上下文交给服务端语义路由器，而不是�
 
 test('Code 工作台在调用写入 AgentLoop 之前必须先经过意图路由', () => {
   assert.match(chatInterfaceSource, /classifyCodeWorkbenchIntent\(userMessage/);
-  assert.match(chatInterfaceSource, /decision\.intent === 'conversation'/);
+  assert.match(chatInterfaceSource, /requestId:\s*userMessageId/);
+  assert.match(apiSource, /request_id:\s*input\.requestId/);
+  assert.match(chatInterfaceSource, /capabilityDisposition/);
   assert.match(chatInterfaceSource, /decision\.intent === 'resume'/);
   assert.match(chatInterfaceSource, /mcpMode:\s*'off'/);
   assert.match(workspaceSource, /conversationAnswer/);
   assert.match(chatInterfaceSource, /conversationAnswers=\{codeConversationAnswers\}/);
   assert.match(workspaceSource, /conversationAnswers\.filter/);
+});
+
+test('语义路由异常要展示结构化原因，不能吞成无上下文的固定提示', () => {
+  assert.match(
+    chatInterfaceSource,
+    /const routeReason = input\.decision\.reason/,
+  );
+  assert.match(chatInterfaceSource, /codeResponseKind: routingUnavailable/);
+  assert.match(chatInterfaceSource, /本轮没有执行修改/);
+});
+
+test('写入请求在流开始前失败时必须结算主 Agent 时间线', () => {
+  assert.match(autoRepairSource, /failCurrentAgentRun/);
+  assert.match(chatInterfaceSource, /failCurrentAgentRun\(message\)/);
 });
 
 test('只读回答使用聊天消息真相持久化，不能被旧 render 快照覆盖', () => {

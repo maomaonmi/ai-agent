@@ -20,7 +20,21 @@ export class CodeAgentEventBuffer {
   }
 
   accept(event: CodeGenerationEvent): CodeGenerationEvent[] {
-    if (this.expectedRunId && event.run_id && event.run_id !== this.expectedRunId) {
+    // A Runtime/Test Agent may emit the final completion ledger under its
+    // backend-owned child identity. It is still the durable result of this
+    // accepted request, and dropping it here makes the UI lose the only
+    // source-of-truth list of changed files and verification. Ordinary
+    // cross-run events remain rejected.
+    const isCompletionLedger = (
+      event.type === 'runtime_summary'
+      && Boolean((event as { completion_feedback?: unknown }).completion_feedback)
+    );
+    if (
+      this.expectedRunId
+      && event.run_id
+      && event.run_id !== this.expectedRunId
+      && !isCompletionLedger
+    ) {
       return [];
     }
 
@@ -30,8 +44,11 @@ export class CodeAgentEventBuffer {
     }
 
     if (typeof event.sequence === 'number') {
-      if (event.sequence <= this.lastSequence) return [];
-      this.lastSequence = event.sequence;
+      // Child-owned terminal ledgers can use a local sequence domain. Their
+      // durable payload must still reach the projector even when that local
+      // number is lower than the parent stream's last sequence.
+      if (event.sequence <= this.lastSequence && !isCompletionLedger) return [];
+      this.lastSequence = Math.max(this.lastSequence, event.sequence);
     }
 
     return [event];

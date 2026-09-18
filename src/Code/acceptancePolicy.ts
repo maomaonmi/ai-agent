@@ -15,6 +15,8 @@ export interface AcceptanceEligibilityState {
 interface AcceptanceEligibilityInput {
   runId: string;
   status: AcceptanceObservedStatus;
+  /** Runtime already attempted acceptance and recorded an unavailable proof. */
+  acceptanceUnavailable?: boolean;
 }
 
 export function canStartRuntimeRepair(input: {
@@ -38,6 +40,7 @@ export function getAcceptanceEligibility(
     ? input.runId
     : current.candidateRunId;
   const shouldStart = input.status === 'done'
+    && !input.acceptanceUnavailable
     && Boolean(input.runId)
     && candidateRunId === input.runId
     && current.testedRunId !== input.runId;

@@ -1053,6 +1053,8 @@ export async function getMemoryTracesMarkdown(scope: 'global' | 'code'): Promise
 export interface ChatMessage {
   /** Stable identity used by artifact/version links; legacy snapshots are normalized on restore. */
   id?: string;
+  /** Code workbench branch base captured immediately before this prompt ran. */
+  codeBaseVersionId?: string;
   role: 'user' | 'assistant';
   content: string;
   /** AI 写作论文正文生成的可持久化文档卡片状态。 */
@@ -1295,6 +1297,8 @@ export interface CodeUpdateEvent {
 
 export interface CodeAgentEventEnvelope {
   run_id?: string;
+  operation_id?: string;
+  payload_version?: number;
   event_id?: string;
   sequence?: number;
   timestamp_ms?: number;
@@ -1439,8 +1443,27 @@ export interface RuntimeSummaryEvent {
   acceptance_validation?: string;
   verification_status?: string;
   validation_errors?: Array<Record<string, unknown>>;
+  /** Durable final feedback: source changes and verification are separate ledgers. */
+  completion_feedback?: CodeCompletionFeedback;
   reason?: string;
   verification_session_id?: string;
+}
+
+export interface CodeCompletionFeedback {
+  summary: string;
+  changes: Array<CodeFileChange & {
+    operation?: 'create' | 'modify' | 'delete' | string;
+  }>;
+  verification: {
+    status: string;
+    static_validation: string;
+    acceptance_validation: string;
+    proof_outcome?: string;
+    verification_status?: string;
+    validation_errors?: Array<Record<string, unknown>>;
+  };
+  base_revision?: string;
+  candidate_revision?: string;
 }
 
 export interface RuntimeVerificationResponse {
@@ -1664,8 +1687,12 @@ export type PlanRuntimeEvent =
   | { type: 'task_started'; task_id: number; title?: string; requires_web?: boolean }
   | { type: 'task_delta'; task_id: number; delta: string }
   | { type: 'task_completed'; task_id: number; status: PlanTaskStatus; result?: string | null; error?: string | null }
+  | { type: 'task_failed'; task_id: number; error?: string | null }
+  | { type: 'chain_log'; delta: string }
   | { type: 'report_delta'; delta: string }
-  | { type: 'reasoning_delta'; delta: string; task_id?: number };
+  | { type: 'reasoning_delta'; delta: string; task_id?: number }
+  | { type: 'reasoning_round_start'; step: number; total_steps: number; action_hint: string }
+  | { type: 'reasoning_round_end'; step: number; action: string };
 
 export interface PlanProgressEvent {
   phase: 'planning' | 'executing' | 'replanning' | 'completed';
@@ -1781,6 +1808,11 @@ export interface RuntimeSettings {
   webSearchOptions: WebSearchOptions;
   // 会话级千问原生搜索参数（仅 Qwen + 直连/chat_node 路径生效）
   qwenNativeSearchOptions: QwenNativeSearchOptions;
+  // AgentLoop（distributed_plan）反思迭代开关：True 时主 Agent 叠加
+  // Reflexion（执行-反思-修正）双层闭环，False 时走基础 ReAct 循环。
+  reflexion?: boolean;
+  // AgentLoop 主 Agent 的 ReAct 最大步数（每步=思考+行动+观察）。
+  agentLoopSteps?: number;
 }
 
 export interface CodeAgentTrace {
@@ -1807,7 +1839,7 @@ export interface CodeAgentTrace {
     candidateRevision: string;
   };
   /** Terminal outcome of the orchestrated run, including a resumable checkpoint. */
-  status?: 'running' | 'awaiting_runtime_verification' | 'completed' | 'needs_attention' | 'failed' | 'superseded';
+  status?: 'running' | 'awaiting_runtime_verification' | 'completed' | 'completed_unverified' | 'needs_attention' | 'failed' | 'superseded';
   /** The orchestrator left durable unfinished work that a later turn may resume. */
   resumeEligible?: boolean;
   // Why: 预留——终端命令提案缓存列表，等后续 UI 渲染“执行/拒绝/编辑后执行”横幅。
@@ -1834,6 +1866,8 @@ export interface CodeAgentTrace {
   runtimeReadEvidence?: Record<string, RuntimeReadEvidence>;
   /** Semantic browser-acceptance contract selected by the intent router. */
   acceptanceGoal?: AcceptanceGoalContract;
+  /** Final user-facing report projected from the Runtime candidate ledger. */
+  completionFeedback?: CodeCompletionFeedback;
   /** Resident Test Agent identity shared by initial and repair runs. */
   verificationSessionId?: string;
 }
@@ -1886,32 +1920,22 @@ export interface RuntimeReadEvidence {
   source_run_id?: string;
 }
 
-export type AcceptanceGoalType =
-  | 'page_health'
-  | 'primary_interaction'
-  | 'game_start'
-  | 'entity_presence'
-  | 'entity_presence_and_motion'
-  | 'game_growth_over_time'
-  | 'custom_measurement'
-  | 'unknown';
+/** Open goal label; concrete domains are supplied by adapters/metadata. */
+export type AcceptanceGoalType = string;
 
 export interface AcceptanceGoalContract {
   goal_type: AcceptanceGoalType;
-  entity?: string;
-  interaction_target?: 'primary' | 'start' | 'submit' | 'save';
-  minimum_count?: number;
-  requires_position_change?: boolean;
-  interaction_required?: boolean;
-  growth_ticks?: number;
   user_goal?: string;
   success_criteria?: string[];
   required_assertion_ids?: string[];
   confidence?: number;
   source?: string;
   adapter_id?: string;
+  metadata?: Record<string, unknown> | null;
   measurement_contract?: Record<string, unknown> | null;
   valid?: boolean;
+  /** Adapter-owned extension fields remain transport data, not core rules. */
+  [key: string]: unknown;
 }
 
 export type CodeAgentActorKind = 'main' | 'test' | 'ops' | 'system' | 'readonly';
@@ -1973,15 +1997,12 @@ export interface CodeAgentRun {
 
 export interface AcceptanceAssertionResult {
   assertion: {
-    kind: 'visible' | 'hidden' | 'text_contains' | 'count_gte' | 'console_contains'
-      | 'forbidden_visible_text' | 'console_error' | 'page_error' | 'dom_unreadable'
-      | 'enemy_snake_count_gte' | 'enemy_snake_position_changed'
-      | 'player_body_length_growth' | 'enemy_body_segment_length_growth'
-      | 'canvas_non_empty' | 'control_enabled' | 'observable_state_changed'
-      | 'canvas_changed_after_tick';
+    /** Assertion kinds are adapter-owned; the core only transports their shape. */
+    kind: string;
     selector: string;
-    expected: string;
-    minimum: number;
+    expected?: unknown;
+    minimum?: number;
+    metadata?: Record<string, unknown>;
   };
   passed: boolean;
   actual: unknown;
@@ -2040,7 +2061,8 @@ export interface CodeAcceptanceReport {
   runner_stdout?: string;
   returncode?: number;
   model_output?: string;
-  artifacts?: CodeFileChange[];
+  /** Generated verification artifacts; never source-file diffs. */
+  artifacts?: Array<CodeFileChange & { artifact_role?: 'verification' | string }>;
   deterministic?: boolean;
   deterministic_findings?: DeterministicBrowserFinding[];
   page_errors?: Array<{ type: string; text: string }>;
@@ -2133,6 +2155,13 @@ export interface CodeIntentActiveRun {
   verification_session_id?: string;
 }
 
+export interface CodeIntentCompletedResult {
+  operation_id?: string;
+  artifact_id?: string;
+  revision_id?: string;
+  run_id?: string;
+}
+
 export interface CodeWorkbenchIntentDecision {
   intent: CodeWorkbenchIntent;
   confidence: number;
@@ -2148,6 +2177,16 @@ export interface CodeWorkbenchIntentDecision {
   acceptance_goal?: AcceptanceGoalContract | null;
   /** The router produced a trustworthy decision; false must not fall back to read-only. */
   route_available?: boolean;
+  speech_act?: string;
+  desired_effect?: string;
+  target_reference?: string;
+  readiness?: string;
+  missing_information?: Array<{ key: string; description: string }>;
+  operation_relation?: string;
+  operation_id?: string | null;
+  parent_operation_id?: string | null;
+  source_run_id?: string | null;
+  capability_disposition?: 'read_only' | 'workspace_mutation' | 'request_clarification' | 'require_approval' | 'deny' | string;
 }
 
 /** Classify a Code workbench turn before dispatching any write-capable call. */
@@ -2165,7 +2204,13 @@ export async function classifyCodeWorkbenchIntent(
     projectKind?: 'frontend' | 'fullstack';
     activeScope?: CodeTaskScope;
     acceptanceGoal?: AcceptanceGoalContract;
+    pendingOperation?: Record<string, unknown>;
+    completedResult?: CodeIntentCompletedResult;
+    workspaceMode?: 'edit' | 'read_only';
+    riskClass?: string;
     sessionId?: string;
+    /** Stable identity for this user submission; transport retries reuse it. */
+    requestId?: string;
   },
   signal?: AbortSignal,
 ): Promise<CodeWorkbenchIntentDecision> {
@@ -2184,7 +2229,12 @@ export async function classifyCodeWorkbenchIntent(
       project_kind: input.projectKind ?? 'frontend',
       active_scope: input.activeScope,
       acceptance_goal: input.acceptanceGoal,
+      pending_operation: input.pendingOperation,
+      completed_result: input.completedResult,
+      workspace_mode: input.workspaceMode ?? 'edit',
+      risk_class: input.riskClass ?? 'local_reversible',
       session_id: input.sessionId,
+      request_id: input.requestId,
     }),
     signal,
   });
@@ -2212,6 +2262,7 @@ export interface SessionSnapshot {
   discussionLength: DiscussionLength;
   discussionAgentIds: string[];
   discussionRounds: number;
+  reflexion?: boolean;
   webSearch?: CapabilityMode;
   deepThinking?: CapabilityMode;
   mcpMode?: McpMode;
@@ -2481,6 +2532,8 @@ export async function sendChatMessage(
             web_search: options.runtimeSettings.webSearch,
             deep_thinking: options.runtimeSettings.deepThinking,
             discussion_rounds: options.runtimeSettings.discussionRounds,
+            reflexion: options.runtimeSettings.reflexion ?? false,
+            agent_loop_steps: options.runtimeSettings.agentLoopSteps ?? 6,
             mcp_mode: options.runtimeSettings.mcpMode,
             mcp_server_ids: options.runtimeSettings.mcpServerIds,
             skill_mode: options.runtimeSettings.skillMode,
@@ -2616,7 +2669,15 @@ export async function sendChatMessage(
             'task_started',
             'task_delta',
             'task_completed',
+            'task_failed',
             'report_delta',
+            'chain_log',
+            // Q2：ReAct 每轮思考分节事件。Why 必须加入白名单：这两个事件
+            // 携带的是轮次边界元数据（step/action），不属于任何通用字段，
+            // 不加会被下方 fallback 静默丢弃 → 前端 reasoningRounds 永远为空
+            // → 深度思考回退成单字符串大坨。
+            'reasoning_round_start',
+            'reasoning_round_end',
           ]);
           if (typeof parsed.type === 'string' && planRuntimeTypes.has(parsed.type)) {
             handlers.onPlanEvent?.(parsed as unknown as PlanRuntimeEvent);
@@ -2751,12 +2812,6 @@ export async function sendChatMessage(
               content: parsed.content ? String(parsed.content) : undefined,
               timestamp: Number(parsed.timestamp) || 0,
             });
-          } else if (parsed.answer !== undefined && parsed.handled_by !== undefined) {
-            // 多智能体 final_answer 事件
-            handlers.onAgentFinalAnswer?.({
-              answer: String(parsed.answer),
-              handled_by: String(parsed.handled_by),
-            });
           } else if (parsed.status === 'success' && parsed.mode === 'agent') {
             handlers.onDone?.({
               answer: '',
@@ -2836,6 +2891,8 @@ export async function sendDeepResearch(
             web_search: runtimeSettings.webSearch,
             deep_thinking: runtimeSettings.deepThinking,
             discussion_rounds: runtimeSettings.discussionRounds,
+            reflexion: runtimeSettings.reflexion ?? false,
+            agent_loop_steps: runtimeSettings.agentLoopSteps ?? 6,
             mcp_mode: runtimeSettings.mcpMode,
             mcp_server_ids: runtimeSettings.mcpServerIds,
             skill_mode: runtimeSettings.skillMode,
@@ -3059,6 +3116,7 @@ export interface CodeRequestMeta {
   intent?: 'action' | 'runtime_fix' | 'resume';
   resume?: boolean;
   intent_route_id?: string;
+  operation_id?: string;
   recent_turns?: CodeIntentTurn[];
   assistant_references?: CodeIntentTurn[];
   active_run?: CodeIntentActiveRun;
@@ -3113,6 +3171,7 @@ function applyCodeRequestMeta(base: Record<string, unknown>, meta?: CodeRequestM
   if (meta?.intent) base.intent = meta.intent;
   if (meta?.resume !== undefined) base.resume = meta.resume;
   if (meta?.intent_route_id) base.intent_route_id = meta.intent_route_id;
+  if (meta?.operation_id) base.operation_id = meta.operation_id;
   if (meta?.recent_turns) base.recent_turns = meta.recent_turns;
   if (meta?.assistant_references) base.assistant_references = meta.assistant_references;
   if (meta?.active_run) base.active_run = meta.active_run;

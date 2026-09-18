@@ -6,6 +6,7 @@ import {
   ExternalLink,
   Check,
 } from 'lucide-react';
+import MarkdownMessage from './MarkdownMessage';
 import { NodeEvent, WebDoc, ResearchChunk, AgentLoopStageKind } from '../lib/api';
 
 /**
@@ -227,7 +228,12 @@ export default function NodeProgressPanel({
                 <span className="text-gray-400">思考</span>
                 <span className="text-gray-800">深度思考过程 · {reasoningWordCount} 字</span>
               </button>
-              {reasoningOpen && <div className="mt-1 whitespace-pre-wrap text-[13px] leading-7 text-gray-700">{normalizedReasoning}</div>}
+              {reasoningOpen && (
+                  <div className="mt-1 text-[13px] leading-7 text-gray-700">
+                    {/* ReAct 主控模式分节格式（## 第 N 轮）需要 markdown 渲染才能按轮次分节展示 */}
+                    <MarkdownMessage content={normalizedReasoning} />
+                  </div>
+                )}
             </li>
           )}
           {renderItems.map((item, index) => {
@@ -372,8 +378,8 @@ export default function NodeProgressPanel({
                       {isExpanded ? '收起思考脉络' : '展开思考脉络'}
                     </button>
                     {isExpanded && (
-                      <div className="mt-2 whitespace-pre-wrap text-[13px] leading-7 text-gray-700">
-                        {activeReasoningText}
+                      <div className="mt-2 text-[13px] leading-7 text-gray-700">
+                        <MarkdownMessage content={activeReasoningText} />
                       </div>
                     )}
                   </div>

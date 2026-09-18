@@ -95,10 +95,24 @@ function extractTitle(markdown: string) {
   return headings[0] || '自主任务规划报告';
 }
 
+function stripMarkdownInline(text: string): string {
+  return text
+    .replace(/^#{1,6}\s+/, '') // 去除 markdown 标题标记（### 一、）
+    .replace(/^[-*_]{2,}\s*$/, '') // 去除水平分割线（--、---、***、___）
+    .replace(/[*_`~>#]/g, '') // 去除行内 markdown 符号（粗体、斜体、代码、删除线、引用）
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1') // 链接只保留文字
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1') // 图片只保留 alt
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function extractSummary(markdown: string) {
   const match = markdown.match(/##\s*结论摘要([\s\S]*?)(?=\n##\s|$)/i);
   const block = match?.[1] || markdown.slice(0, 900);
-  const items = block.split(/\n+/).map((line) => line.replace(/^\s*[-*•]\s*/, '').replace(/^\s*\d+[.)]\s*/, '').trim()).filter(Boolean);
+  const items = block
+    .split(/\n+/)
+    .map((line) => stripMarkdownInline(line.replace(/^\s*[-*•]\s*/, '').replace(/^\s*\d+[.)]\s*/, '')))
+    .filter((item) => item.length >= 4);
   return items.slice(0, 3).map((item) => item.length > 180 ? `${item.slice(0, 177)}…` : item);
 }
 

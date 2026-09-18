@@ -32,6 +32,27 @@ test('rejects events from a different Agent run', () => {
   assert.equal(buffer.accept(event({ run_id: 'agent-run-2' })).length, 0);
 });
 
+test('keeps a child-owned completion ledger so the final feedback card is not lost', () => {
+  const buffer = new CodeAgentEventBuffer('agent-run-1');
+
+  const accepted = buffer.accept(event({
+    type: 'runtime_summary',
+    run_id: 'runtime-test-child',
+    done: true,
+    completion_feedback: {
+      summary: '已完成修改',
+      changes: [{ path: 'frontend/index.html', additions: 1, deletions: 0 }],
+      verification: {
+        status: 'completed',
+        static_validation: 'passed',
+        acceptance_validation: 'verified',
+      },
+    },
+  }));
+
+  assert.equal(accepted.length, 1);
+});
+
 test('ignores older sequence numbers after a reconnect replay', () => {
   const buffer = new CodeAgentEventBuffer('agent-run-1');
 

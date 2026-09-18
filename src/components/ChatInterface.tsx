@@ -101,6 +101,8 @@ import ResearchWorkspace from '../features/deep-research/ResearchWorkspace';
 import PlanWorkspace from '../features/autonomous-plan/PlanWorkspace';
 import PlanChainTimeline from '../features/autonomous-plan/PlanChainTimeline';
 import ResearchDocumentCard from '../features/deep-research/ResearchDocumentCard';
+import PlanReportDocument from '../features/autonomous-plan/PlanReportDocument';
+import { adaptPlanReport } from '../features/autonomous-plan/planReportAdapter';
 import { pptApi, type PptHistoryRun } from '../features/ppt/api';
 import { deriveReportTitle } from '../features/deep-research/report/researchReportAdapter';
 import { useTypewriterPacing } from '../lib/useTypewriterPacing';
@@ -135,7 +137,7 @@ import type { Artifact, ArtifactSummary, ArtifactVersion, MessageArtifactLink } 
 import { documentFromV1Result } from '../features/ai-writing/writingDocumentTypes';
 import useCodeAutoRepair from '../hooks/useCodeAutoRepair';
 import { SelectedElementContext, SandboxConsoleEntry } from '../lib/codeSandbox';
-import { bundleVFS, VirtualFileSystem } from '../Code/vfsBundler';
+import { bundleVFS, splitHtmlToVFS, VirtualFileSystem } from '../Code/vfsBundler';
 import { isFullstackVFS, isManifestProjectVFS, parseProjectCode, serializeProjectVFS } from '../Code/fullstackBundler';
 import {
   buildCodeIntentContext,
@@ -148,6 +150,11 @@ import {
   nextVersionNumber,
   VersionSnapshot,
 } from '../Code/versionManager';
+import {
+  copyRewriteBase,
+  ensureCodeBaseSnapshot,
+  resolveCodeRewriteBase,
+} from '../Code/codeRewriteBranch';
 
 const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   responseLength: 'balanced',
@@ -160,12 +167,26 @@ const DEFAULT_RUNTIME_SETTINGS: RuntimeSettings = {
   skillIds: [],
   webSearchOptions: DEFAULT_WEB_SEARCH_OPTIONS,
   qwenNativeSearchOptions: DEFAULT_QWEN_NATIVE_SEARCH_OPTIONS,
+  reflexion: false,
+  agentLoopSteps: 6,
 };
 
 // Legacy telemetry used this identifier for memory-only turns. It is not a
 // real conversation and must never own Omni artifacts or artifact links.
 const LEGACY_GLOBAL_SESSION_ID = '__global__';
 const ARTIFACT_PANEL_WIDTH_STORAGE_KEY = 'omni-artifact-panel-width';
+
+function codeToSnapshotVFS(code: string): VirtualFileSystem {
+  if (!code.trim()) return {};
+  return parseProjectCode(code) ?? splitHtmlToVFS(code);
+}
+
+function serializeSnapshotVFS(vfs: VirtualFileSystem): string {
+  if (Object.keys(vfs).length === 0) return '';
+  return isFullstackVFS(vfs) || isManifestProjectVFS(vfs)
+    ? serializeProjectVFS(vfs)
+    : bundleVFS(vfs, { injectInspector: false });
+}
 
 function readRuntimeDefaults(): RuntimeSettings {
   if (typeof window === 'undefined') return DEFAULT_RUNTIME_SETTINGS;
@@ -506,6 +527,14 @@ export default function ChatInterface() {
   }, [syncRoundStateToLastMessage]);
 
   const [reasoningSteps, setReasoningSteps] = useState<string[]>([]);
+  // ReAct 主控模式每轮思考分节（Q2：避免所有轮次思考挤成一个大字符串）。
+  // 旧 reasoningSteps 保留为兜底（普通对话/其他模式仍用），
+  // 主控模式事件处理里会同时填充 reasoningRounds。
+  interface ReasoningRound { step: number; action: string; tokens: string; done: boolean }
+  const [reasoningRounds, setReasoningRounds] = useState<ReasoningRound[]>([]);
+  const activeReasoningRoundStepRef = useRef<number | null>(null);
+  const reasoningRoundsRef = useRef<ReasoningRound[]>([]);
+  reasoningRoundsRef.current = reasoningRounds;
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   // Why 保留 setWebDocs / setResearchChunks 仅作旧链路兼容：
@@ -521,11 +550,17 @@ export default function ChatInterface() {
   const [agentStatus, setAgentStatus] = useState<string>('');
   const [agentStreaming, setAgentStreaming] = useState<AgentDeltaEvent | null>(null);
   const [planProgress, setPlanProgress] = useState<PlanProgressEvent | null>(null);
+  // Why: D3 思考/链路分离后，流程日志（🧭📐✅⚠️📋）走独立 chain_log 事件，
+  //   与深度思考正文（reasoning_delta）分开展示，避免"链路日志冒充思考"。
+  const [chainLog, setChainLog] = useState('');
+  const perRoundChainLogRef = useRef('');
   const [discussionLength, setDiscussionLength] = useState<DiscussionLength>('balanced');
   const [discussionAgentIds, setDiscussionAgentIds] = useState<string[]>([]);
   const [discussionRounds, setDiscussionRounds] = useState(2);
   const [webSearch, setWebSearch] = useState<CapabilityMode>('auto');
   const [deepThinking, setDeepThinking] = useState<CapabilityMode>('auto');
+  // AgentLoop（distributed_plan）反思迭代开关，与 discussionRounds 同持久化链路。
+  const [reflexion, setReflexion] = useState(false);
   // Why: MCP 会话级注入三态（off/auto/custom）+ 自定义模式下的服务器多选，
   //   与 webSearch/deepThinking 走完全相同的持久化与 meta 透传链路。
   const [mcpMode, setMcpMode] = useState<McpMode>('auto');
@@ -737,6 +772,10 @@ export default function ChatInterface() {
   const [isHistoryCollapsed, setIsHistoryCollapsed] = useState(false);
   const [selectedElement, setSelectedElement] = useState<SelectedElementContext | null>(null);
   const [codeVersions, setCodeVersions] = useState<VersionSnapshot[]>([]);
+  // Version snapshots are also read synchronously while a rewrite is being
+  // prepared. React state alone can lag one render behind the branch cut.
+  const codeVersionsRef = useRef<VersionSnapshot[]>([]);
+  codeVersionsRef.current = codeVersions;
   const [activeCodeVersionId, setActiveCodeVersionId] = useState('');
   const [codeProjectKind, setCodeProjectKind] = useState<'frontend' | 'fullstack'>('frontend');
   const [codeConsoleEntries, setCodeConsoleEntries] = useState<SandboxConsoleEntry[]>([]);
@@ -767,6 +806,7 @@ export default function ChatInterface() {
     discardAgentRuns,
     handleRuntimeError,
     stopAutoRepair,
+    failCurrentAgentRun,
     compactContext,
     addTrustedTerminalPrefix,
     verifyRuntimeCandidate,
@@ -945,9 +985,16 @@ export default function ChatInterface() {
     localStorage.setItem('historySidebarCollapsed', String(collapsed));
   };
 
+  type CodeSnapshotOverrides = {
+    generatedCode?: string;
+    codeVersions?: VersionSnapshot[];
+    activeCodeVersionId?: string;
+  };
+
   const buildSnapshot = (
     snapshotMessages: ChatMessage[] = messagesRef.current,
     snapshotAgentRuns: CodeAgentRun[] = agentRuns,
+    overrides: CodeSnapshotOverrides = {},
   ): SessionSnapshot => {
     // 为什么这里单独拼一次 global nodeProgress/webDocs/researchChunks：
     //   - SessionSnapshot 顶层字段是「老会话恢复兼容」所需（applySnapshot 里会把这些字段迁移到最后一条 assistant 消息）；
@@ -977,6 +1024,7 @@ export default function ChatInterface() {
       discussionLength,
       discussionAgentIds,
       discussionRounds,
+      reflexion,
       webSearch,
       deepThinking,
       mcpMode,
@@ -987,9 +1035,11 @@ export default function ChatInterface() {
       researchEngine,
       researchOptions,
       qwenNativeSearchOptions,
-      generatedCode,
-      codeVersions,
-      activeCodeVersionId,
+      generatedCode: overrides.generatedCode ?? generatedCode,
+      // Read the ref so an immediately preceding baseline capture cannot be
+      // lost when a session snapshot is written before React re-renders.
+      codeVersions: overrides.codeVersions ?? codeVersionsRef.current,
+      activeCodeVersionId: overrides.activeCodeVersionId ?? activeCodeVersionId,
       codeProjectKind,
       codeAgentRuns: snapshotAgentRuns,
     };
@@ -1154,6 +1204,8 @@ export default function ChatInterface() {
     perRoundWebDocsRef.current = [];
     perRoundResearchChunksRef.current = [];
     perRoundPlanProgressRef.current = null;
+    perRoundChainLogRef.current = '';
+    setChainLog('');
     perRoundTokenUsageRef.current = null;
     perRoundMcpTraceRef.current = [];
     perRoundCurrentNodeRef.current = null;
@@ -1164,6 +1216,7 @@ export default function ChatInterface() {
     setMcpActive(false);
     setMsgPanelOpenKeys({});
     resetCode();
+    codeVersionsRef.current = [];
     setCodeVersions([]);
     setActiveCodeVersionId('');
     setCodeProjectKind('frontend');
@@ -1241,6 +1294,7 @@ export default function ChatInterface() {
     setDiscussionRounds(
       snapshot.discussionRounds ?? defaults.discussionRounds,
     );
+    setReflexion(snapshot.reflexion ?? defaults.reflexion ?? false);
     setWebSearch(snapshot.webSearch ?? defaults.webSearch);
     setDeepThinking(snapshot.deepThinking ?? defaults.deepThinking);
     setMcpMode(snapshot.mcpMode ?? defaults.mcpMode);
@@ -1253,10 +1307,12 @@ export default function ChatInterface() {
     setQwenNativeSearchOptions(snapshot.qwenNativeSearchOptions ?? DEFAULT_QWEN_NATIVE_SEARCH_OPTIONS);
     restoreCode(snapshot.generatedCode ?? '');
     restoreAgentRuns(snapshot.codeAgentRuns ?? []);
-    setCodeVersions((snapshot.codeVersions ?? []).map((version) => ({
+    const restoredCodeVersions = (snapshot.codeVersions ?? []).map((version) => ({
       ...version,
       vfs: deepCopyVFS(version.vfs),
-    })));
+    }));
+    codeVersionsRef.current = restoredCodeVersions;
+    setCodeVersions(restoredCodeVersions);
     setActiveCodeVersionId(snapshot.activeCodeVersionId ?? '');
     setCodeProjectKind(
       snapshot.codeProjectKind ?? (parseProjectCode(snapshot.generatedCode ?? '') ? 'fullstack' : 'frontend'),
@@ -1274,16 +1330,17 @@ export default function ChatInterface() {
   // Why: 作为 useEffect dep 注入到 CodeWorkspace（L462、L482）。未包 useCallback → 每轮
   //   render 新引用 → useEffect 每轮触发 → 内部 setState → 又 render → 无限循环。
   const captureCodeVersion = useCallback((vfs: VirtualFileSystem, summary: string) => {
-    setCodeVersions((previousVersions) => {
-      const existing = previousVersions.find((version) => isSameVFS(version.vfs, vfs));
-      if (existing) {
-        setActiveCodeVersionId(existing.versionId);
-        return previousVersions;
-      }
-      const next = createSnapshot(nextVersionNumber(previousVersions), summary, vfs);
-      setActiveCodeVersionId(next.versionId);
-      return [...previousVersions, next];
-    });
+    const previousVersions = codeVersionsRef.current;
+    const existing = previousVersions.find((version) => isSameVFS(version.vfs, vfs));
+    if (existing) {
+      setActiveCodeVersionId(existing.versionId);
+      return;
+    }
+    const next = createSnapshot(nextVersionNumber(previousVersions), summary, vfs);
+    const nextVersions = [...previousVersions, next];
+    codeVersionsRef.current = nextVersions;
+    setActiveCodeVersionId(next.versionId);
+    setCodeVersions(nextVersions);
   }, []);
 
   const rollbackCodeVersion = useCallback((version: VersionSnapshot) => {
@@ -1791,7 +1848,9 @@ export default function ChatInterface() {
     skillIds: selectedSkillIds,
     webSearchOptions,
     qwenNativeSearchOptions,
-  }), [discussionLength, webSearch, deepThinking, discussionRounds, mcpMode, selectedMcpServerIds, skillMode, selectedSkillIds, webSearchOptions, qwenNativeSearchOptions]);
+    reflexion,
+    agentLoopSteps: 6,
+  }), [discussionLength, webSearch, deepThinking, discussionRounds, mcpMode, selectedMcpServerIds, skillMode, selectedSkillIds, webSearchOptions, qwenNativeSearchOptions, reflexion]);
 
   // Why: 内联箭头函数作为 prop 传给 CodeWorkspace，每轮 render 新引用 → CodeWorkspace
   //   内部 useCallback/useMemo 把它们当 dep → 每轮失效 → 连环 setState → 无限循环。
@@ -1848,6 +1907,11 @@ export default function ChatInterface() {
   const changeDiscussionRounds = (value: number) => {
     setDiscussionRounds(value);
     updateRuntimeDefaults({ discussionRounds: value });
+  };
+
+  const changeReflexion = (value: boolean) => {
+    setReflexion(value);
+    updateRuntimeDefaults({ reflexion: value });
   };
 
   const changeMcpMode = (value: McpMode) => {
@@ -2043,6 +2107,7 @@ export default function ChatInterface() {
     setWebSearch(DEFAULT_RUNTIME_SETTINGS.webSearch);
     setDeepThinking(DEFAULT_RUNTIME_SETTINGS.deepThinking);
     setDiscussionRounds(DEFAULT_RUNTIME_SETTINGS.discussionRounds);
+    setReflexion(DEFAULT_RUNTIME_SETTINGS.reflexion ?? false);
     setMcpMode(DEFAULT_RUNTIME_SETTINGS.mcpMode);
     setSelectedMcpServerIds(DEFAULT_RUNTIME_SETTINGS.mcpServerIds);
     setSkillMode(DEFAULT_RUNTIME_SETTINGS.skillMode);
@@ -2189,9 +2254,46 @@ export default function ChatInterface() {
     // a fresh user retry; never spend another model call on a misleading
     // answer.
     if (routingUnavailable) {
-      const finalContent = '意图路由暂时不可用，本轮没有读取、修改或生成补丁。请稍后重试。';
+      const routeReason = input.decision.reason?.trim();
+      const finalContent = [
+        '本轮没有执行修改。',
+        routeReason ? `路由状态：${routeReason}` : '语义路由暂时不可用，未开始执行。',
+        '请稍后重试；如果问题持续，请检查后端路由服务日志。',
+      ].join('\n\n');
       const nextMessages = messagesRef.current.map((message) =>
         message.id === input.assistantMessageId ? { ...message, content: finalContent } : message,
+      );
+      messagesRef.current = nextMessages;
+      setMessages(nextMessages);
+      const updated = await saveSessionSnapshot(
+        input.requestSessionId,
+        { ...buildSnapshot(), messages: nextMessages },
+        false,
+      );
+      setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+      return;
+    }
+
+    const capabilityDisposition = input.decision.capability_disposition;
+    const needsClarification = capabilityDisposition === 'request_clarification'
+      || input.decision.intent === 'clarify';
+    const needsApproval = capabilityDisposition === 'require_approval';
+    if (needsClarification || needsApproval) {
+      const missing = (input.decision.missing_information ?? [])
+        .map((item) => `${item.key}：${item.description}`)
+        .join('\n');
+      const prefix = needsApproval
+        ? '当前操作涉及需要确认的外部副作用，尚未执行。'
+        : '为了继续当前操作，还需要补充以下信息：';
+      const finalContent = [
+        prefix,
+        input.decision.reason,
+        missing,
+      ].filter(Boolean).join('\n\n');
+      const nextMessages: ChatMessage[] = messagesRef.current.map((message): ChatMessage =>
+        message.id === input.assistantMessageId
+          ? { ...message, content: finalContent, codeResponseKind: 'clarify' as const }
+          : message,
       );
       messagesRef.current = nextMessages;
       setMessages(nextMessages);
@@ -2328,17 +2430,65 @@ export default function ChatInterface() {
     // branch had already read messagesRef, so the user prompt could disappear
     // from the turn that opened an artifact panel.
     const currentMessages = messagesRef.current;
-    const turnBaseMessages = rewritingIndex != null
-      ? currentMessages.slice(0, rewritingIndex)
+    const rewriteIndex = rewritingIndex;
+    const turnBaseMessages = rewriteIndex != null
+      ? currentMessages.slice(0, rewriteIndex)
       : currentMessages;
-    const isBranchRewrite = rewritingIndex != null;
+    const isBranchRewrite = rewriteIndex != null;
+    // A rewrite is a code branch operation, not only a conversation edit.
+    // Capture the current candidate first, then resolve the selected prompt's
+    // pre-run snapshot so the replacement request cannot inherit later work.
+    let codeForTurn = generatedCode;
+    let codeVersionsForTurn = codeVersionsRef.current;
+    let codeBaseVersionId: string | undefined;
+    let branchActiveCodeVersionId = activeCodeVersionId;
     let agentRunsForTurn = agentRuns;
-    if (mode === 'code' && rewritingIndex != null) {
+    if (mode === 'code') {
+      const currentVfs = codeToSnapshotVFS(generatedCode);
+      const ensuredBase = ensureCodeBaseSnapshot(
+        codeVersionsRef.current,
+        currentVfs,
+        `需求基线：${userMessage.slice(0, 72)}`,
+      );
+      codeVersionsForTurn = ensuredBase.snapshots;
+      codeBaseVersionId = ensuredBase.versionId;
+      if (ensuredBase.created) {
+        codeVersionsRef.current = ensuredBase.snapshots;
+        setCodeVersions(ensuredBase.snapshots);
+      }
+
+      if (isBranchRewrite) {
+        const rewriteBase = resolveCodeRewriteBase({
+          messages: currentMessages,
+          targetMessageIndex: rewriteIndex,
+          snapshots: codeVersionsForTurn,
+        });
+        if (rewriteBase) {
+          const copiedBase = copyRewriteBase(rewriteBase);
+          codeForTurn = serializeSnapshotVFS(copiedBase.vfs);
+          codeBaseVersionId = copiedBase.versionId;
+          branchActiveCodeVersionId = copiedBase.versionId;
+          setActiveCodeVersionId(copiedBase.versionId);
+          setSelectedElement(null);
+          // restore() updates the hook's ref synchronously, so the mutation
+          // request below reads the restored branch even before React renders.
+          restoreCode(codeForTurn);
+          if (!rewriteBase.exact) {
+            setNotice('这条历史消息缺少精确的重写基线，已使用可确认的兼容快照；后续代码轮次会自动保存精确基线。');
+          }
+        } else {
+          // Never pretend an unknown historical base was restored. Keep the
+          // current candidate intact and let the replacement run from it.
+          setNotice('这条历史消息没有可恢复的重写基线，已保留当前候选代码继续执行；新的代码轮次会自动保存基线。');
+        }
+      }
+    }
+    if (mode === 'code' && rewriteIndex != null) {
       const codePromptsBeforeRewrite = currentMessages
         .filter((message) => message.role === 'user')
         .map((message) => message.content);
       const targetPromptIndex = currentMessages
-        .slice(0, rewritingIndex)
+        .slice(0, rewriteIndex)
         .filter((message) => message.role === 'user')
         .length;
       const runsToDiscard = mapAgentRunsToPrompts(agentRuns, codePromptsBeforeRewrite)
@@ -2358,6 +2508,7 @@ export default function ChatInterface() {
       role: 'user',
       content: userMessage,
       attachments: requestAttachments.length ? requestAttachments : undefined,
+      ...(codeBaseVersionId ? { codeBaseVersionId } : {}),
     };
     const nextMessagesWithUser = [...turnBaseMessages, userTurnMessage];
     messagesRef.current = nextMessagesWithUser;
@@ -2430,7 +2581,11 @@ export default function ChatInterface() {
         await replaceSessionChatMemory(requestSessionId, messagesForMemory(nextMessagesWithUser));
         const updated = await saveSessionSnapshot(
           requestSessionId,
-          buildSnapshot(nextMessagesWithUser, agentRunsForTurn),
+          buildSnapshot(nextMessagesWithUser, agentRunsForTurn, {
+            generatedCode: codeForTurn,
+            codeVersions: codeVersionsForTurn,
+            activeCodeVersionId: branchActiveCodeVersionId,
+          }),
           false,
         );
         setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
@@ -2449,16 +2604,20 @@ export default function ChatInterface() {
     let codeIntentContext: ReturnType<typeof buildCodeIntentContext> | null = null;
     if (mode === 'code') {
       try {
-        codeIntentContext = buildCodeIntentContext(turnBaseMessages, agentRunsForTurn);
+        codeIntentContext = buildCodeIntentContext(turnBaseMessages, agentRunsForTurn, {
+          activeRevisionId: branchActiveCodeVersionId,
+        });
         codeIntentDecision = await classifyCodeWorkbenchIntent(userMessage, {
-          hasProject: Boolean(generatedCode.trim()),
+          hasProject: Boolean(codeForTurn.trim()),
           hasUnfinishedRun: codeIntentContext.resumeCandidates.length > 0,
           entrypoint: isBranchRewrite ? 'rewrite' : undefined,
           recentTurns: codeIntentContext.recentTurns,
           assistantReferences: codeIntentContext.assistantReferences,
+          completedResult: codeIntentContext.latestCompletedResult,
           resumeCandidates: codeIntentContext.resumeCandidates.map(toCodeIntentResumeCandidate),
           projectKind: codeProjectKind,
           sessionId: requestSessionId,
+          requestId: userMessageId,
         });
       } catch {
         // Classification failure must fail closed. A temporary router outage
@@ -2780,7 +2939,7 @@ export default function ChatInterface() {
         can_mutate: false,
         route_available: false,
       };
-        const isIncrementalChange = Boolean(generatedCode.trim());
+        const isIncrementalChange = Boolean(codeForTurn.trim());
         const targetElement = selectedElement;
         // Why: MCP 会话级注入——与 webSearch/deepThinking 同链路，随 code 请求 meta 透传后端。
         const mcpContext = { mode: mcpMode, serverIds: selectedMcpServerIds };
@@ -2793,11 +2952,10 @@ export default function ChatInterface() {
               : 'action' as const,
         };
       try {
-        if (
-          !decision.can_mutate
-          || decision.intent === 'conversation'
-          || decision.intent === 'clarify'
-        ) {
+        const capabilityDisposition = decision.capability_disposition;
+        const canWorkspaceMutate = capabilityDisposition === 'workspace_mutation'
+          || (capabilityDisposition == null && decision.can_mutate);
+        if (!canWorkspaceMutate) {
           const context = codeIntentContext ?? buildCodeIntentContext(turnBaseMessages, agentRunsForTurn);
           await handleCodeReadOnlyConversation({
             requestSessionId,
@@ -2838,6 +2996,7 @@ export default function ChatInterface() {
                 {
                   resumeFromRun: selectedResumeRun,
                   intentRouteId: decision.route_id ?? undefined,
+                  operationId: decision.operation_id ?? undefined,
                   recentTurns: routerRecentTurns,
                   assistantReferences: context.assistantReferences,
                   activeRun: routerActiveRun,
@@ -2876,6 +3035,7 @@ export default function ChatInterface() {
                 { ...mutationContext, intent: decision.intent === 'runtime_fix' ? 'runtime_fix' : 'action', resume: false },
                 {
                   intentRouteId: decision.route_id ?? undefined,
+                  operationId: decision.operation_id ?? undefined,
                   recentTurns: routerRecentTurns,
                   // A new action starts with fresh evidence. Only an explicit
                   // resume may carry the selected run's runtime checkpoint.
@@ -2890,7 +3050,15 @@ export default function ChatInterface() {
                 },
                 codeConsoleEntries,
               )
-            : await generateCode(userMessage, codeProjectKind, requestAttachments, requestSessionId, mcpContext, decision.acceptance_goal ?? undefined);
+            : await generateCode(
+                userMessage,
+                codeProjectKind,
+                requestAttachments,
+                requestSessionId,
+                mcpContext,
+                decision.acceptance_goal ?? undefined,
+                decision.operation_id ?? undefined,
+              );
         const didComplete = typeof mutationResult === 'object'
           ? mutationResult.completed
           : mutationResult;
@@ -2923,6 +3091,7 @@ export default function ChatInterface() {
           requestError instanceof Error
             ? requestError.message
             : '网页代码生成失败。';
+        failCurrentAgentRun(message);
         setError(message);
       } finally {
         setIsLoading(false);
@@ -3082,6 +3251,11 @@ export default function ChatInterface() {
     } else if (mode === 'plan' || mode === 'distributed_plan') {
       try {
         let streamedPlanReasoning = '';
+        perRoundChainLogRef.current = '';
+        setChainLog('');
+        // Q2 reset：清空每轮思考分节 state（上次请求的轮次不能残留到本次）
+        setReasoningRounds([]);
+        activeReasoningRoundStepRef.current = null;
         const reasoningStartedAt = Date.now();
         const planAssistant: ChatMessage = {
           id: assistantMessageId,
@@ -3188,6 +3362,18 @@ export default function ChatInterface() {
                     : task),
                 };
                 perRoundPlanProgressRef.current = next;
+                // Why 同步到消息快照：右侧 PlanWorkspace 的 progress 优先取
+                // latestPlanReportMessage.planProgress（历史恢复用），不同步的话
+                // 任务执行期间它拿到的是旧快照，streaming_result 打字机不更新。
+                const current = messagesRef.current;
+                const existingIndex = current.findIndex((message) => message.id === assistantMessageId);
+                if (existingIndex >= 0) {
+                  const nextMessages = current.map((message, index) => index === existingIndex
+                    ? { ...message, planProgress: next }
+                    : message);
+                  messagesRef.current = nextMessages;
+                  setMessages(nextMessages);
+                }
                 return next;
               });
               return;
@@ -3218,6 +3404,48 @@ export default function ChatInterface() {
               setAgentStatus('');
               return;
             }
+            if (event.type === 'task_failed') {
+              setAgentStatus(event.error ? `Task ${event.task_id} 失败：${event.error}` : `Task ${event.task_id} 执行失败`);
+              setPlanProgress((previous) => {
+                if (!previous) return previous;
+                const next = {
+                  ...previous,
+                  current_task_id: null,
+                  active_task_ids: (previous.active_task_ids ?? []).filter((id) => id !== event.task_id),
+                  tasks: previous.tasks.map((task) => task.id === event.task_id
+                    ? { ...task, status: 'failed' as const, error: event.error ?? null, streaming_result: null }
+                    : task),
+                };
+                perRoundPlanProgressRef.current = next;
+                return next;
+              });
+              return;
+            }
+            if (event.type === 'chain_log') {
+              // D3：流程日志与思考正文分离，独立累积供"🧵 链路日志"折叠区展示。
+              perRoundChainLogRef.current += event.delta;
+              setChainLog(perRoundChainLogRef.current);
+              return;
+            }
+            // Q2：每轮 ReAct 主控思考分节（避免全部挤成一个大字符串）。
+            if (event.type === 'reasoning_round_start') {
+              const step = Number(event.step);
+              activeReasoningRoundStepRef.current = step;
+              setReasoningRounds((prev) => {
+                // 防止重复 start（断线重连）：同 step 已存在就复用，不存在就新开
+                if (prev.some((r) => r.step === step)) return prev;
+                return [...prev, { step, action: String(event.action_hint ?? ''), tokens: '', done: false }];
+              });
+              return;
+            }
+            if (event.type === 'reasoning_round_end') {
+              const step = Number(event.step);
+              setReasoningRounds((prev) => prev.map((r) => r.step === step
+                ? { ...r, action: String(event.action ?? r.action), done: true }
+                : r));
+              if (activeReasoningRoundStepRef.current === step) activeReasoningRoundStepRef.current = null;
+              return;
+            }
             if (event.type === 'report_delta') {
               const current = messagesRef.current;
                const existingIndex = current.findIndex((message) => message.id === assistantMessageId);
@@ -3232,10 +3460,18 @@ export default function ChatInterface() {
           // Planner/executor reasoning uses the same pacing channel as the
           // ordinary chat path, so the chain panel can render it immediately
           // instead of waiting for the final plan snapshot.
+          // Q2：同时按 reasoning_round_start 维护的分节状态填充 reasoningRounds
           onReasoningDelta: (token) => {
             streamedPlanReasoning += token;
             reasoningPacing.push(token);
             setReasoningSteps([streamedPlanReasoning]);
+            // 把 token append 到当前活跃轮次（有 round_start 标记时）
+            const activeStep = activeReasoningRoundStepRef.current;
+            if (activeStep !== null) {
+              setReasoningRounds((prev) => prev.map((r) => r.step === activeStep
+                ? { ...r, tokens: r.tokens + token }
+                : r));
+            }
           },
           onSkillMatched: (event) => {
             setMatchedSkills((prev) => [...prev, event]);
@@ -4081,6 +4317,7 @@ export default function ChatInterface() {
         webSearch={webSearch}
         deepThinking={deepThinking}
         discussionRounds={discussionRounds}
+        reflexion={reflexion}
         selectedAgentIds={discussionAgentIds}
         mcpMode={mcpMode}
         selectedMcpServerIds={selectedMcpServerIds}
@@ -4091,6 +4328,7 @@ export default function ChatInterface() {
         onWebSearchChange={changeWebSearch}
         onDeepThinkingChange={changeDeepThinking}
         onDiscussionRoundsChange={changeDiscussionRounds}
+        onReflexionChange={changeReflexion}
         onSelectedAgentIdsChange={setDiscussionAgentIds}
         onMcpModeChange={changeMcpMode}
         onSelectedMcpServerIdsChange={changeSelectedMcpServerIds}
@@ -4399,7 +4637,25 @@ export default function ChatInterface() {
                 : (isAssistant && isLoading && perRoundResearchChunksRef.current.length > 0
                     ? perRoundResearchChunksRef.current
                     : undefined);
-              const liveReasoning = reasoningSteps.join('\n\n');
+              // Q2 分节格式：有 reasoningRounds（ReAct 主控模式）时把各轮拼成
+              // 带 H2 标题的 markdown，让 MarkdownMessage 自动分节渲染；
+              // 否则保持旧逻辑（reasoningSteps.join）。
+              // Why 打字机预算按轮分配：reasonPacedLength 计的是原始 token 流
+              // 长度，轮次标题等格式化字符不占预算；先按轮切片再拼 markdown，
+              // 避免「拼接串按原始长度整体 slice」把第 2 轮内容切错位。
+              const usingLiveRounds = reasoningRounds.length > 0 && !msg.reasoning;
+              const liveReasoning = reasoningRounds.length > 0
+                ? (() => {
+                    let budget = reasonPacingActive || reasonPacedLength > 0
+                      ? reasonPacedLength
+                      : Number.POSITIVE_INFINITY;
+                    return reasoningRounds.map((r) => {
+                      const visible = r.tokens.slice(0, Math.max(0, budget));
+                      budget -= r.tokens.length;
+                      return `## 第 ${r.step} 轮 · ${r.action || '思考中…'}\n${visible}`;
+                    }).join('\n\n');
+                  })()
+                : reasoningSteps.join('\n\n');
               const rawReasoningText = isAssistant
                 ? (msg.reasoning || (index === visibleMessages.length - 1 ? liveReasoning : ''))
                 : '';
@@ -4407,7 +4663,9 @@ export default function ChatInterface() {
               // deltas.  Otherwise replacing the placeholder with the full
               // reasoning string makes the entire thought block appear in one
               // render at stream completion.
+              // rounds 路径的预算切片已在 liveReasoning 内完成，不重复切
               const msgReasoningText = isAssistant && index === visibleMessages.length - 1
+                && !usingLiveRounds
                 && (reasonPacingActive || reasonPacedLength > 0)
                 ? rawReasoningText.slice(0, reasonPacedLength)
                 : rawReasoningText;
@@ -4509,13 +4767,15 @@ export default function ChatInterface() {
                     selected={selectedResearchReportIndex === index}
                     onSelect={() => setSelectedResearchMessageIndex(index)}
                   />
-                ) : <div className={`
-                  ${showPanel ? 'mt-1' : ''}
-                  ${hasArtifactLinks ? 'w-full max-w-full' : 'max-w-[85%]'} rounded-2xl px-5 py-3 ${
+                ) : <div className={
                   msg.role === 'user'
-                    ? 'bg-blue-600 text-white rounded-br-md'
-                    : 'bg-gray-100 text-gray-900 rounded-bl-md'
-                }`}>
+                    ? `${hasArtifactLinks ? 'w-full max-w-full' : 'max-w-[85%]'} rounded-2xl rounded-br-md bg-blue-600 px-5 py-3 text-white`
+                    : msgPlanProgress
+                      // 计划/AgentLoop 最终报告：白色文档卡片，无灰色气泡底色
+                      ? 'w-full max-w-full rounded-xl border border-slate-200 bg-white px-5 py-3 shadow-sm'
+                      // 普通 assistant 消息：去灰色气泡底色，内容直接落在背景上
+                      : `${showPanel ? 'mt-1' : ''} ${hasArtifactLinks ? 'w-full max-w-full' : 'max-w-[85%]'} rounded-2xl rounded-bl-md px-5 py-3 text-gray-900`
+                }>
                   {/* 附件图片缩略图 */}
                   {msg.attachments && msg.attachments.length > 0 && (
                     <div className="mb-2 flex flex-wrap gap-2">
@@ -4531,29 +4791,78 @@ export default function ChatInterface() {
                       ))}
                     </div>
                   )}
-                  {/* 报告正文 */}
-                  {msgPlanProgress && (
-                    <p className="mb-2 text-xs font-semibold text-cyan-700">
-                      {mode === 'distributed_plan' ? '🕸️' : '🧭'} Final Summarizer · 最终报告
-                    </p>
+                  {/* 报告正文：计划/AgentLoop 最终报告收敛为文档卡片形式——
+                      planReportAdapter 解析为标题/摘要/章节/表格/图表文档，
+                      与右侧 PlanWorkspace 共用 PlanReportDocument，不再是纯文本。
+                      有报告内容时默认展开（用户可见文档），标题栏仍可收起。 */}
+                  {msgPlanProgress ? (
+                    <details className="group mt-1" open={Boolean(msg.streamingReport || msg.content)}>
+                      <summary className="flex cursor-pointer select-none list-none items-center gap-2 rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2 text-xs font-semibold text-cyan-700 hover:border-cyan-300 hover:bg-cyan-50/50">
+                        <span aria-hidden="true">{mode === 'distributed_plan' ? '🕸️' : '🧭'}</span>
+                        <span>Final Summarizer · 最终报告</span>
+                        <span className="ml-auto flex shrink-0 items-center gap-2 font-normal text-slate-400">
+                          <span className="hidden sm:inline">{(msg.content || msg.streamingReport || '').length} 字</span>
+                          {(msgResearchChunks?.length ?? msg.webDocs?.length ?? 0) > 0 && (
+                            <span className="hidden sm:inline">{msgResearchChunks?.length ?? msg.webDocs?.length} 条来源</span>
+                          )}
+                          <span className="group-open:hidden">展开 ▾</span>
+                          <span className="hidden group-open:inline">收起 ▴</span>
+                        </span>
+                      </summary>
+                      <div className="mt-2">
+                        {(() => {
+                          const reportMarkdown = msg.streamingReport ?? msg.content;
+                          if (!reportMarkdown) {
+                            return <p className="px-1 py-2 text-xs text-slate-400">最终报告生成中，请稍候…</p>;
+                          }
+                          return (
+                            <>
+                              <PlanReportDocument
+                                document={adaptPlanReport(
+                                  reportMarkdown,
+                                  // ResearchFigure 字段是 PlanFigure 的严格子集，显式映射为
+                                  // 文档组件要求的 PlanFigure 形状（image_url 去 null）。
+                                  (msg.researchFigures ?? []).map((figure) => ({
+                                    id: figure.id,
+                                    job_id: figure.job_id,
+                                    ordinal: figure.ordinal,
+                                    image_url: figure.image_url ?? undefined,
+                                    caption: figure.caption,
+                                    alt: figure.caption,
+                                    status: figure.status,
+                                    error_message: figure.error_message,
+                                    section_title: figure.section_title,
+                                  })),
+                                  msg.planProgress ?? null,
+                                )}
+                              />
+                              {isAssistant && index === visibleMessages.length - 1 && msg.streamingReport && (
+                                <span className="ml-0.5 inline-block h-3.5 w-0.5 animate-pulse bg-cyan-600 align-middle" aria-hidden="true" />
+                              )}
+                            </>
+                          );
+                        })()}
+                      </div>
+                    </details>
+                  ) : (
+                    <MarkdownMessage
+                      content={
+                        isAssistant && index === visibleMessages.length - 1 && (answerPacingActive || answerPacedLength > 0)
+                          ? msg.content.slice(0, answerPacedLength)
+                          : msg.content
+                      }
+                    />
                   )}
                   {msg.writingArtifact && (
-                    <div className="mb-3 flex max-w-md items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-3 shadow-sm">
+                    <div className="mb-3 mt-2 flex max-w-md items-center gap-3 rounded-xl border border-slate-200 bg-white px-3 py-3 shadow-sm">
                       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-blue-600 text-sm font-bold text-white">W</span>
                       <span className="min-w-0"><strong className="block truncate text-sm text-slate-900">{msg.writingArtifact.title}</strong><span className="mt-0.5 block text-xs text-slate-400">{msg.writingArtifact.status === 'generating' ? '正在生成中…' : msg.writingArtifact.status === 'complete' ? 'Word 文档已生成' : '生成失败，请重试'}</span></span>
                     </div>
                   )}
-                  <MarkdownMessage
-                    content={
-                      isAssistant && index === visibleMessages.length - 1 && (answerPacingActive || answerPacedLength > 0)
-                        ? msg.content.slice(0, answerPacedLength)
-                        : msg.content
-                    }
-                  />
                   {hasArtifactLinks && msg.id && (
                     <ArtifactMessageCards conversationId={activeSessionId ?? ''} links={artifactLinksByMessageId.get(msg.id) ?? []} onOpen={openArtifactPanel} />
                   )}
-                  {isAssistant && answerPacingActive && index === visibleMessages.length - 1 && (
+                  {isAssistant && !msgPlanProgress && answerPacingActive && index === visibleMessages.length - 1 && (
                     <span className="ml-0.5 inline-block h-4 w-0.5 animate-pulse bg-blue-600 align-middle" aria-hidden="true" />
                   )}
                   {msg.role === 'assistant' && msg.tokenUsage && (
@@ -4583,9 +4892,10 @@ export default function ChatInterface() {
                     </div>
                   )}
 
-                  {/* 可折叠的 R1 深度思考过程：仅在没有链路面板时保留在答案末尾；
-                      有 NodeProgressPanel 时，思考内容与字数统一在链路面板中展示，避免重复。 */}
-                  {msg.reasoning && mode !== 'research' && !(msg.nodeProgress && msg.nodeProgress.length > 0) && (
+                  {/* 可折叠的 R1 深度思考过程：仅在普通对话且没有链路面板时保留在答案末尾；
+                      有 NodeProgressPanel 或计划报告（msgPlanProgress）时，思考内容已在
+                      上方的链路面板中展示，这里不重复渲染。 */}
+                  {msg.reasoning && mode !== 'research' && !msgPlanProgress && !(msg.nodeProgress && msg.nodeProgress.length > 0) && (
                     <details className="mt-3">
                       <summary className="cursor-pointer text-xs font-semibold text-purple-600 hover:text-purple-800 flex items-center gap-1.5 py-1 select-none">
                         <span>🧠</span>
@@ -4794,7 +5104,9 @@ export default function ChatInterface() {
                 progress={planProgress}
                 status={agentStatus}
                 reasoningText={reasoningSteps.join('\n\n')}
+                reasoningRounds={reasoningRounds}
                 reasoningDisplayedLength={reasonPacingActive || reasonPacedLength > 0 ? reasonPacedLength : undefined}
+                chainLogText={chainLog}
               />
             )}
 

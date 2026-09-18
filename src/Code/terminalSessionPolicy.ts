@@ -40,12 +40,16 @@ export function getStaleAgentTerminalRunIds(
   sessions: AgentTerminalSessionLike[],
   visibleRunId: string | null,
   closedRunIds: ReadonlySet<string>,
+  selectedRunId: string | null = null,
 ): string[] {
   return Array.from(new Set(
     sessions
       .filter((session) => !session.is_manual)
       .map((session) => session.run_id)
-      .filter((runId) => Boolean(runId) && runId !== visibleRunId && !closedRunIds.has(runId)),
+      .filter((runId) => Boolean(runId)
+        && runId !== visibleRunId
+        && runId !== selectedRunId
+        && !closedRunIds.has(runId)),
   ));
 }
 

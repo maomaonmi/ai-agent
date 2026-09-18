@@ -50,7 +50,7 @@ export default function CodeTaskListCard({ plan, onOpenFile }: CodeTaskListCardP
   return (
     <section
       aria-label="AgentLoop 任务列表"
-      className="mb-2 border-b border-slate-100 bg-white px-0 py-2"
+      className="mb-2 bg-white px-0 py-2"
     >
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2 text-slate-600">

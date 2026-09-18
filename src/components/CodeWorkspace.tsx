@@ -1149,9 +1149,16 @@ export default function CodeWorkspace({
   }, [status.state, vfs]);
 
   useEffect(() => {
+    const latestAgentRun = latestRunId
+      ? agentRunsRef.current.find((run) => run.id === latestRunId)
+      : undefined;
     const eligibility = getAcceptanceEligibility(
       acceptanceEligibilityRef.current,
-      { runId, status: status.state },
+      {
+        runId,
+        status: status.state,
+        acceptanceUnavailable: latestAgentRun?.trace.status === 'completed_unverified',
+      },
     );
     acceptanceEligibilityRef.current = eligibility.state;
     const acceptanceTimelineRunId = latestRunId;

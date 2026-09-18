@@ -12,6 +12,10 @@ const chatInterfaceSource = readFileSync(
   resolve(testDirectory, '../src/components/ChatInterface.tsx'),
   'utf8',
 );
+const timelineSource = readFileSync(
+  resolve(testDirectory, '../src/components/CodeAgentTimeline.tsx'),
+  'utf8',
+);
 
 const codeHeader = workspaceSource.match(
   /<div className="([^"]*h-\[60px\][^"]*border-b border-slate-200 bg-white[^"]*)">/,
@@ -134,6 +138,26 @@ assert.match(chatInterfaceSource, /readCodeWorkbench/, 'Read-only Code conversat
 assert.match(chatInterfaceSource, /codeReadOnlyTimeline/, 'Read-only answers should retain their Agent read timeline');
 assert.match(workspaceSource, /answer\.timeline/, 'CodeWorkspace should render the read-only Agent timeline');
 assert.match(workspaceSource, /只读 Agent · 读取过程/, 'Read-only timeline should identify the file-reading process');
+assert.match(timelineSource, /px-4[^\n]*sm:px-6/, 'Agent timeline should have consistent horizontal inner padding');
+assert.match(timelineSource, /StageIcon/, 'Agent timeline should show an icon for each stage');
+assert.match(timelineSource, /bg-slate-200/, 'Agent timeline should use a shared neutral connector color');
+assert.doesNotMatch(timelineSource, /timelineOffsetClass\(index\)/, '平级 Agent 事件不应按索引错位');
+assert.match(timelineSource, /timelineDetailIndent/, 'Expandable event details should own the nested indentation');
+assert.doesNotMatch(timelineSource, /w-28 shrink-0/, '平级标签不应通过固定列制造额外间距');
+assert.match(timelineSource, /text-xs font-medium text-slate-500/, 'Timeline metadata should remain readable at the shared text size');
+assert.match(timelineSource, /const timelinePanelSurface = 'bg-white'/, 'Timeline panels should use the shared white surface');
+assert.doesNotMatch(timelineSource, /rounded-md border border-slate-200 bg-slate-50/, 'Timeline panels should not retain visible card borders');
+assert.doesNotMatch(timelineSource, /rounded bg-amber-50/, 'Timeline detail panels should not retain tinted surfaces');
+assert.match(timelineSource, /border-l border-slate-200/, 'Only expandable detail content should keep a hierarchy connector');
+assert.match(timelineSource, /function TimelineActorControls\(/, 'Each Agent actor should have a collapsible peer control');
+assert.match(timelineSource, /aria-expanded=\{!collapsedActorKinds\.has\(kind\)\}/, 'Agent controls should expose their expanded state');
+assert.match(timelineSource, /const actorKinds = useMemo/, 'Timeline should discover actor lanes without regrouping their events');
+assert.match(timelineSource, /const renderEvents = useMemo/, 'Timeline should preserve the original event order while collapsing an actor');
+assert.doesNotMatch(timelineSource, /const timelineLanes = useMemo/, 'Timeline should not regroup interleaved events into separate lists');
+assert.ok(
+  timelineSource.indexOf('<CompletionFeedbackCard') > timelineSource.lastIndexOf('<TimelineEventList'),
+  'Completion feedback should render after the interleaved event list',
+);
 assert.match(
   chatInterfaceSource,
   /mode === 'code'\n\s*\? 'flex h-full max-w-none flex-col overflow-hidden pb-1 pt-0'/,

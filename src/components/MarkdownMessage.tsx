@@ -30,30 +30,33 @@ export default function MarkdownMessage({ content, className = '', density = 'no
           h2: ({ children }) => <h2 className={compact ? 'mb-2 text-lg font-bold leading-7' : 'mb-3 text-lg font-bold'}>{children}</h2>,
           h3: ({ children }) => <h3 className={compact ? 'mb-1.5 font-semibold leading-6' : 'mb-2 font-semibold'}>{children}</h3>,
           table: ({ children }) => (
-            <div className="mb-4 w-full overflow-x-auto rounded-lg border border-slate-200">
+            // Why 首列 min-w + URL 断行：auto 表格布局下首列（趋势/结论等短标签列）
+            // 会被长内容列挤到 CJK 逐字竖排；长 URL 会横向溢出。首列给 6em 下限，
+            // 单元格允许在任意字符处断行，表头不换行保持可读。
+            <div className="mb-4 w-full overflow-x-auto rounded-lg border border-slate-200 dark:border-white/10 [&_td:first-child]:min-w-[6em] [&_td]:[overflow-wrap:anywhere] [&_th:first-child]:min-w-[6em] [&_th]:whitespace-nowrap">
               <table className="w-full min-w-[560px] border-collapse text-left text-sm">
                 {children}
               </table>
             </div>
           ),
           thead: ({ children }) => (
-            <thead className="bg-slate-100 text-slate-700">{children}</thead>
+            <thead className="bg-slate-100 text-slate-700 dark:bg-white/10 dark:text-slate-200">{children}</thead>
           ),
           tbody: ({ children }) => (
-            <tbody className="divide-y divide-slate-200 bg-white">{children}</tbody>
+            <tbody className="divide-y divide-slate-200 bg-white dark:divide-white/10 dark:bg-transparent">{children}</tbody>
           ),
           th: ({ children }) => (
-            <th className="border-r border-slate-200 px-3 py-2 font-semibold last:border-r-0">
+            <th className="border-r border-slate-200 px-3 py-2 font-semibold last:border-r-0 dark:border-white/10">
               {children}
             </th>
           ),
           td: ({ children }) => (
-            <td className={`border-r border-slate-100 px-3 py-2 align-top ${compact ? 'leading-5' : 'leading-6'} last:border-r-0`}>
+            <td className={`border-r border-slate-100 px-3 py-2 align-top dark:border-white/[0.06] ${compact ? 'leading-5' : 'leading-6'} last:border-r-0`}>
               {children}
             </td>
           ),
           tr: ({ children }) => (
-            <tr className="transition-colors hover:bg-slate-50">{children}</tr>
+            <tr className="transition-colors hover:bg-slate-50 dark:hover:bg-white/[0.04]">{children}</tr>
           ),
         }}
       >

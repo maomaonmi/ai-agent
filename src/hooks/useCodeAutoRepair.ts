@@ -28,6 +28,7 @@ import {
   type ContextUsageEvent,
   type HookEvent,
   type TokenUsageEvent,
+  type RuntimeSummaryEvent,
   type McpMode,
   type RuntimeVerificationEvidence,
   type DeterministicBrowserFinding,
@@ -42,11 +43,11 @@ import { createRuntimeRepairRunId, rebindRuntimeEvidenceToRun } from '../Code/ag
 import {
   bindRuntimeVerificationCandidate,
   projectRuntimeVerificationCandidate,
+  projectRuntimeSummaryStatus,
   resetAgentRuns,
   settleAgentRunAsSuperseded,
 } from '../Code/agentRunLifecycle';
 import { canStartRuntimeRepair } from '../Code/acceptancePolicy';
-import { reduceAcceptanceProofOutcome } from '../Code/acceptanceProofOutcome';
 import {
   bundleFullstackVFS,
   isFullstackVFS,
@@ -54,6 +55,7 @@ import {
   parseProjectCode,
 } from '../Code/fullstackBundler';
 import { bundleVFS } from '../Code/vfsBundler';
+import { diffLines as calculateLineDiff } from '../lib/syntaxHighlight';
 import {
   CodeGenerationStatus,
   RepairLog,
@@ -237,26 +239,17 @@ function codeToFiles(code: string): Record<string, string> {
 }
 
 function countChangedLines(before: string, after: string) {
-  const beforeLines = before ? before.split(/\r?\n/) : [];
-  const afterLines = after ? after.split(/\r?\n/) : [];
-  let prefix = 0;
-  while (
-    prefix < beforeLines.length &&
-    prefix < afterLines.length &&
-    beforeLines[prefix] === afterLines[prefix]
-  ) prefix += 1;
-
-  let suffix = 0;
-  while (
-    suffix < beforeLines.length - prefix &&
-    suffix < afterLines.length - prefix &&
-    beforeLines[beforeLines.length - 1 - suffix] === afterLines[afterLines.length - 1 - suffix]
-  ) suffix += 1;
-
-  return {
-    additions: Math.max(0, afterLines.length - prefix - suffix),
-    deletions: Math.max(0, beforeLines.length - prefix - suffix),
-  };
+  if (!before && !after) return { additions: 0, deletions: 0 };
+  // Use the same LCS line diff as the source viewer. A prefix/suffix-only
+  // estimate turns one early-line edit into "the whole file changed".
+  const diff = calculateLineDiff(before || null, after);
+  return diff.reduce(
+    (counts, line) => ({
+      additions: counts.additions + (line.kind === 'insert' ? 1 : 0),
+      deletions: counts.deletions + (line.kind === 'delete' ? 1 : 0),
+    }),
+    { additions: 0, deletions: 0 },
+  );
 }
 
 function summarizeFileChanges(beforeCode: string, afterCode: string): CodeFileChange[] {
@@ -344,6 +337,66 @@ export default function useCodeAutoRepair() {
     }
   }, []);
 
+  const mergeCompletionFeedback = useCallback((event: Pick<RuntimeSummaryEvent, 'run_id' | 'completion_feedback'>) => {
+    const feedback = event.completion_feedback;
+    if (!feedback) return;
+    const eventRunId = String(event.run_id || '').trim();
+    const currentRunId = currentAgentRunIdRef.current;
+    const applyFeedback = (previous: CodeAgentTrace): CodeAgentTrace => ({
+      ...previous,
+      completionFeedback: feedback,
+      fileChanges: feedback.changes.map((change) => ({
+        path: change.path,
+        additions: change.additions,
+        deletions: change.deletions,
+      })),
+    });
+
+    // Main summaries update the active trace immediately. Runtime/test
+    // summaries may carry a backend-owned child identity, so the active SSE
+    // lane is always a valid projection target as well. The event buffer has
+    // already accepted this event for the current request; requiring an
+    // exact frontend run-id match here would silently drop the final ledger.
+    commitAgentTrace(applyFeedback);
+    setAgentRuns((previous) => {
+      const knownRunIds = new Set(previous.map((run) => run.id));
+      const relatedRunIds = new Set(
+        [eventRunId, currentRunId].filter((value): value is string => Boolean(value)),
+      );
+      let expanded = true;
+      while (expanded) {
+        expanded = false;
+        previous.forEach((run) => {
+          const related = relatedRunIds.has(run.id)
+            || Boolean(run.trace.runtimeVerification?.runId && relatedRunIds.has(run.trace.runtimeVerification.runId));
+          if (related && run.parentRunId && !relatedRunIds.has(run.parentRunId)) {
+            relatedRunIds.add(run.parentRunId);
+            expanded = true;
+          }
+          if (related && run.resumedFromRunId && !relatedRunIds.has(run.resumedFromRunId)) {
+            relatedRunIds.add(run.resumedFromRunId);
+            expanded = true;
+          }
+          if (run.parentRunId && relatedRunIds.has(run.parentRunId) && !relatedRunIds.has(run.id)) {
+            relatedRunIds.add(run.id);
+            expanded = true;
+          }
+          if (run.resumedFromRunId && relatedRunIds.has(run.resumedFromRunId) && !relatedRunIds.has(run.id)) {
+            relatedRunIds.add(run.id);
+            expanded = true;
+          }
+        });
+      }
+      // If the backend identity is not materialized as a frontend run (for
+      // example a Runtime/Test Agent lane), keep the ledger on the active
+      // prompt run instead of losing it between the two projections.
+      if (currentRunId && !knownRunIds.has(eventRunId)) relatedRunIds.add(currentRunId);
+      return previous.map((run) => (
+        relatedRunIds.has(run.id) ? { ...run, trace: applyFeedback(run.trace) } : run
+      ));
+    });
+  }, [commitAgentTrace]);
+
   const appendTimeline = useCallback((input: {
     eventId?: string;
     runId?: string;
@@ -419,6 +472,26 @@ export default function useCodeAutoRepair() {
     }
   }, [commitAgentTrace]);
 
+  const failCurrentAgentRun = useCallback((reason = '') => {
+    const finishedAt = Date.now();
+    const boundedReason = reason.trim().slice(0, 1_000);
+    commitAgentTrace((previous) => ({
+      ...previous,
+      phase: 'failed',
+      status: 'failed',
+      isRunning: false,
+      timeline: (previous.timeline ?? []).map((event) => event.done ? event : {
+        ...event,
+        done: true,
+        status: 'failed',
+        timestampMs: finishedAt,
+        metadata: boundedReason
+          ? { ...event.metadata, error: boundedReason }
+          : event.metadata,
+      }),
+    }));
+  }, [commitAgentTrace]);
+
   const beginAgentTrace = useCallback((
     message: string,
     request = '',
@@ -461,6 +534,10 @@ export default function useCodeAutoRepair() {
         ? rebindRuntimeEvidenceToRun(options.runtimeEvidence, id)
         : undefined,
       acceptanceGoal: options.acceptanceGoal ?? resumedRun?.trace.acceptanceGoal,
+      // Preserve the last durable report while a resumed turn is running;
+      // otherwise the prompt lane falls back to provisional file events and
+      // the final modification/verification list vanishes from the UI.
+      completionFeedback: resumedRun?.trace.completionFeedback,
       verificationSessionId: options.verificationSessionId
         ?? resumedRun?.trace.verificationSessionId
         ?? id,
@@ -741,6 +818,7 @@ export default function useCodeAutoRepair() {
         stripEnvelopeFromAnswerText(event.content, eventIntent);
       const isAnswerIntent = resolvedIntent === 'answer' || resolvedIntent === 'ask_clarification';
       appendActivity(resolvedContent || event.content, event.done, 'summary', resolvedIntent);
+      mergeCompletionFeedback(event);
       if (actorKind !== 'main') {
         // Runtime-fix streams use the ops actor for their child timeline, but
         // the candidate identity still belongs to that same AgentLoop run.
@@ -763,11 +841,7 @@ export default function useCodeAutoRepair() {
           summaryIntent: resolvedIntent,
           answer: isAnswerIntent ? finalSummary : previous.answer,
           isRunning: event.status === 'awaiting_runtime_verification' || !event.done,
-          status: event.status === 'needs_attention'
-            ? 'needs_attention'
-            : event.status === 'awaiting_runtime_verification'
-              ? 'awaiting_runtime_verification'
-            : event.done ? 'completed' : 'running',
+          status: projectRuntimeSummaryStatus(event),
           resumeEligible: event.resume_eligible ?? previous.resumeEligible,
           // Revision fields are also present on ordinary completed summaries
           // for audit/display purposes. Only an explicit awaiting status
@@ -785,8 +859,16 @@ export default function useCodeAutoRepair() {
           // it in the trace so the browser verifier receives the same
           // candidate-bound contract instead of the original empty one.
           acceptanceGoal: event.acceptance_goal ?? previous.acceptanceGoal,
+          completionFeedback: event.completion_feedback ?? previous.completionFeedback,
           verificationSessionId: event.verification_session_id
             ?? previous.verificationSessionId,
+          fileChanges: (event.completion_feedback?.changes ?? previous.completionFeedback?.changes)
+            ?.map((change) => ({
+              path: change.path,
+              additions: change.additions,
+              deletions: change.deletions,
+            }))
+            ?? previous.fileChanges,
         };
       });
       return true;
@@ -1071,7 +1153,7 @@ export default function useCodeAutoRepair() {
       };
     });
     return true;
-  }, [appendTimeline, commitAgentTrace, persistRunTelemetry]);
+  }, [appendTimeline, commitAgentTrace, mergeCompletionFeedback, persistRunTelemetry]);
 
   const recordFileChanges = useCallback((
     beforeCode: string,
@@ -1081,18 +1163,31 @@ export default function useCodeAutoRepair() {
     actorId = `${actorKind}:${currentAgentRunIdRef.current || 'unbound'}`,
   ) => {
     const changes = summarizeFileChanges(beforeCode, afterCode);
-    changes.forEach((change) => appendTimeline({
-      actorKind,
-      actorId,
-      stage: 'file_change',
-      content: `已生成文件变更：${change.path}`,
-      status: 'completed',
-      file: { ...change, operation: 'modify' },
-    }));
+    // Once Runtime has emitted its completion ledger, the browser-side JSON
+    // diff is only a projection and must not create a second file-change row.
+    if (!agentTraceRef.current.completionFeedback) {
+      changes.forEach((change) => appendTimeline({
+        actorKind,
+        actorId,
+        stage: 'file_change',
+        content: `已生成文件变更：${change.path}`,
+        status: 'completed',
+        file: { ...change, operation: 'modify' },
+        metadata: { source: 'frontend-diff' },
+      }));
+    }
     if (actorKind !== 'main') return;
     commitAgentTrace((previous) => ({
       ...previous,
-      fileChanges: append
+      // Runtime's before/after VFS delta is authoritative once available.
+      // Do not replace it with a whole-document JSON diff from the browser.
+      fileChanges: previous.completionFeedback?.changes
+        ? previous.completionFeedback.changes.map((change) => ({
+          path: change.path,
+          additions: change.additions,
+          deletions: change.deletions,
+        }))
+        : append
         ? changes.reduce<CodeFileChange[]>((nextChanges, current) => {
             const existing = nextChanges.find((change) => change.path === current.path);
             if (existing) {
@@ -1365,6 +1460,7 @@ export default function useCodeAutoRepair() {
     sessionId: string | null = null,
     mcp: McpRequestContext | null = null,
     acceptanceGoal?: AcceptanceGoalContract,
+    operationId?: string,
   ) => {
     sessionIdRef.current = sessionId;
     mcpRef.current = mcp;
@@ -1425,12 +1521,12 @@ export default function useCodeAutoRepair() {
       if (projectKind === 'fullstack') {
         await generateFullstackCode(
           prompt, handleEvent, controller.signal, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, acceptance_goal: acceptanceGoal, verification_session_id: agentTraceRef.current.verificationSessionId },
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, operation_id: operationId, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, acceptance_goal: acceptanceGoal, verification_session_id: agentTraceRef.current.verificationSessionId },
         );
       } else {
         await generateWebCode(
           prompt, handleEvent, controller.signal, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, acceptance_goal: acceptanceGoal, verification_session_id: agentTraceRef.current.verificationSessionId },
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, operation_id: operationId, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, acceptance_goal: acceptanceGoal, verification_session_id: agentTraceRef.current.verificationSessionId },
         );
       }
     } catch (error) {
@@ -1451,6 +1547,7 @@ export default function useCodeAutoRepair() {
     options: {
       resumeFromRun?: CodeAgentRun;
       intentRouteId?: string;
+      operationId?: string;
       recentTurns?: CodeIntentTurn[];
       assistantReferences?: CodeIntentTurn[];
       activeRun?: CodeIntentActiveRun;
@@ -1662,13 +1759,13 @@ export default function useCodeAutoRepair() {
       if (hasVfs) {
         await modifyFullstackCode(
           currentVfs, instruction, targetElement, handleEvent, controller.signal, effectiveDiagnostics, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, intent: mcp?.intent ?? (isResume ? 'resume' : 'action'), intent_route_id: options.intentRouteId, resume: isResume, recent_turns: options.recentTurns, assistant_references: options.assistantReferences, active_run: requestActiveRun, active_scope: options.activeScope, runtime_evidence: requestRuntimeEvidence, acceptance_goal: options.acceptanceGoal ?? agentTraceRef.current.acceptanceGoal, verification_session_id: agentTraceRef.current.verificationSessionId },
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, intent: mcp?.intent ?? (isResume ? 'resume' : 'action'), intent_route_id: options.intentRouteId, operation_id: options.operationId, resume: isResume, recent_turns: options.recentTurns, assistant_references: options.assistantReferences, active_run: requestActiveRun, active_scope: options.activeScope, runtime_evidence: requestRuntimeEvidence, acceptance_goal: options.acceptanceGoal ?? agentTraceRef.current.acceptanceGoal, verification_session_id: agentTraceRef.current.verificationSessionId },
           mentionedFiles,
         );
       } else {
         await modifyWebCode(
           currentCode, instruction, targetElement, handleEvent, controller.signal, effectiveDiagnostics, attachments,
-          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, intent: mcp?.intent ?? (isResume ? 'resume' : 'action'), intent_route_id: options.intentRouteId, resume: isResume, recent_turns: options.recentTurns, assistant_references: options.assistantReferences, active_run: requestActiveRun, active_scope: options.activeScope, runtime_evidence: requestRuntimeEvidence, acceptance_goal: options.acceptanceGoal ?? agentTraceRef.current.acceptanceGoal, verification_session_id: agentTraceRef.current.verificationSessionId },
+          { workspace_id: terminalWorkspaceId, run_id: runIdForRequest, session_id: sessionId ?? undefined, mcp_mode: mcp?.mode, mcp_server_ids: mcp?.serverIds, intent: mcp?.intent ?? (isResume ? 'resume' : 'action'), intent_route_id: options.intentRouteId, operation_id: options.operationId, resume: isResume, recent_turns: options.recentTurns, assistant_references: options.assistantReferences, active_run: requestActiveRun, active_scope: options.activeScope, runtime_evidence: requestRuntimeEvidence, acceptance_goal: options.acceptanceGoal ?? agentTraceRef.current.acceptanceGoal, verification_session_id: agentTraceRef.current.verificationSessionId },
         );
       }
     } catch (error) {
@@ -2150,6 +2247,7 @@ export default function useCodeAutoRepair() {
     discardAgentRuns,
     handleRuntimeError,
     stopAutoRepair,
+    failCurrentAgentRun,
     compactContext,
     addTrustedTerminalPrefix,
     verifyRuntimeCandidate,

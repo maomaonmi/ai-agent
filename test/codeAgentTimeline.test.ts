@@ -18,6 +18,7 @@ import {
   isAgentRunExecutionActive,
   mapAgentRunsToPrompts,
   getAgentRunLineage,
+  projectRuntimeSummaryStatus,
   resetAgentRuns,
   settleAgentRunAsSuperseded,
 } from '../src/Code/agentRunLifecycle.ts';
@@ -223,6 +224,37 @@ test('starts acceptance only after a live generation reaches done', () => {
   assert.equal(running.shouldStart, false);
   assert.equal(completed.shouldStart, true);
   assert.equal(completed.state.candidateRunId, 'live-code-run');
+});
+
+test('does not start a duplicate browser acceptance after Runtime marks the candidate unverified', () => {
+  const state: AcceptanceEligibilityState = {
+    candidateRunId: 'live-code-run',
+    testedRunId: '',
+  };
+
+  const result = getAcceptanceEligibility(state, {
+    runId: 'live-code-run',
+    status: 'done',
+    acceptanceUnavailable: true,
+  });
+
+  assert.equal(result.shouldStart, false);
+  assert.equal(result.state.testedRunId, '');
+});
+
+test('preserves the Runtime completed-unverified terminal status in the frontend projection', () => {
+  assert.equal(
+    projectRuntimeSummaryStatus({ status: 'completed_unverified', done: true }),
+    'completed_unverified',
+  );
+  assert.equal(
+    projectRuntimeSummaryStatus({ status: 'completed', done: true }),
+    'completed',
+  );
+  assert.equal(
+    projectRuntimeSummaryStatus({ status: 'completed_unverified', done: false }),
+    'running',
+  );
 });
 
 test('preserves prior AgentLoop runs for a new request but clears them on explicit reset', () => {

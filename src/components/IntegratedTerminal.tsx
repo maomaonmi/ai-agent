@@ -189,14 +189,15 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
       ?? [...liveBackendAgentRunIds].at(-1)
       ?? null;
   }, [agentRuns, closedAgentRunIds, liveBackendAgentRunIds]);
+  const selectedAgentRunId = activeRunId
+    && !isManualTerminal(activeRunId)
+    && !closedAgentRunIds.has(activeRunId)
+    ? activeRunId
+    : null;
   const allSessions = useMemo<TerminalSessionDescriptor[]>(() => {
-    const allowedAgentRunId = visibleAgentRunId
-      ?? (activeRunId
-        && !isManualTerminal(activeRunId)
-        && !closedAgentRunIds.has(activeRunId)
-        && agentRuns.some((run) => run.id === activeRunId && run.trace?.isRunning)
-        ? activeRunId
-        : null);
+    const allowedAgentRunIds = new Set(
+      [visibleAgentRunId, selectedAgentRunId].filter((runId): runId is string => Boolean(runId)),
+    );
     const byRunId = new Map<string, TerminalSessionDescriptor>();
     for (const s of sessions) {
       if (!closedAgentRunIds.has(s.run_id) && !closedManualRunIds.has(s.run_id)) {
@@ -204,11 +205,11 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
       }
     }
     for (const [runId, session] of byRunId) {
-      if (!session.is_manual && runId !== allowedAgentRunId) byRunId.delete(runId);
+      if (!session.is_manual && !allowedAgentRunIds.has(runId)) byRunId.delete(runId);
     }
     for (const run of agentRuns) {
       if (closedAgentRunIds.has(run.id)) continue;
-      if (run.id !== allowedAgentRunId) continue;
+      if (!allowedAgentRunIds.has(run.id)) continue;
       if (!byRunId.has(run.id)) {
         byRunId.set(run.id, {
           workspace_id: workspaceId,
@@ -226,7 +227,7 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
       activeRunId
       && !closedAgentRunIds.has(activeRunId)
       && !(isManualTerminal(activeRunId) && closedManualRunIds.has(activeRunId))
-      && (isManualTerminal(activeRunId) || activeRunId === allowedAgentRunId)
+      && (isManualTerminal(activeRunId) || allowedAgentRunIds.has(activeRunId))
       && !byRunId.has(activeRunId)
     ) {
       byRunId.set(activeRunId, {
@@ -238,15 +239,15 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
       });
     }
     return Array.from(byRunId.values());
-  }, [sessions, agentRuns, workspaceId, closedAgentRunIds, closedManualRunIds, activeRunId, isManualTerminal, visibleAgentRunId]);
+  }, [sessions, agentRuns, workspaceId, closedAgentRunIds, closedManualRunIds, activeRunId, isManualTerminal, selectedAgentRunId, visibleAgentRunId]);
   const sessionKey = useMemo(
     () => createTerminalSessionKey(allSessions.map((session) => session.run_id)),
     [allSessions],
   );
 
   const staleAgentRunIds = useMemo(
-    () => getStaleAgentTerminalRunIds(sessions, visibleAgentRunId, closedAgentRunIds),
-    [sessions, visibleAgentRunId, closedAgentRunIds],
+    () => getStaleAgentTerminalRunIds(sessions, visibleAgentRunId, closedAgentRunIds, selectedAgentRunId),
+    [sessions, visibleAgentRunId, closedAgentRunIds, selectedAgentRunId],
   );
   const cleanupRequestedRef = useRef<Set<string>>(new Set());
 

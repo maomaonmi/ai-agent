@@ -19,6 +19,15 @@ test('rewrite/delete persists an explicit memory branch before the next request'
   assert.match(chatInterfaceSource, /persistEditedConversation\(nextMessages, nextAgentRuns\)/);
 });
 
+test('code rewrites restore the selected prompt base instead of reusing the latest candidate', () => {
+  assert.match(apiSource, /codeBaseVersionId\?: string/);
+  assert.match(chatInterfaceSource, /ensureCodeBaseSnapshot\(/);
+  assert.match(chatInterfaceSource, /resolveCodeRewriteBase\(/);
+  assert.match(chatInterfaceSource, /restoreCode\(codeForTurn\)/);
+  assert.match(chatInterfaceSource, /generatedCode: codeForTurn/);
+  assert.match(chatInterfaceSource, /activeCodeVersionId: branchActiveCodeVersionId/);
+});
+
 test('streaming responses are anchored to their own assistant message', () => {
   assert.match(chatInterfaceSource, /findIndex\(\(message\) => message\.id === assistantMessageId\)/);
   assert.match(chatInterfaceSource, /key=\{msg\.id \?\? `\$\{msg\.role\}-\$\{index\}`\}/);

@@ -22,6 +22,7 @@ interface RuntimeSettingsDrawerProps {
   webSearch: CapabilityMode;
   deepThinking: CapabilityMode;
   discussionRounds: number;
+  reflexion: boolean;
   selectedAgentIds: string[];
   mcpMode: McpMode;
   selectedMcpServerIds: string[];
@@ -32,6 +33,7 @@ interface RuntimeSettingsDrawerProps {
   onWebSearchChange: (value: CapabilityMode) => void;
   onDeepThinkingChange: (value: CapabilityMode) => void;
   onDiscussionRoundsChange: (value: number) => void;
+  onReflexionChange: (value: boolean) => void;
   onSelectedAgentIdsChange: (value: string[]) => void;
   onMcpModeChange: (value: McpMode) => void;
   onSelectedMcpServerIdsChange: (value: string[]) => void;
@@ -98,6 +100,7 @@ export default function RuntimeSettingsDrawer({
   webSearch,
   deepThinking,
   discussionRounds,
+  reflexion,
   selectedAgentIds,
   mcpMode,
   selectedMcpServerIds,
@@ -108,6 +111,7 @@ export default function RuntimeSettingsDrawer({
   onWebSearchChange,
   onDeepThinkingChange,
   onDiscussionRoundsChange,
+  onReflexionChange,
   onSelectedAgentIdsChange,
   onMcpModeChange,
   onSelectedMcpServerIdsChange,
@@ -446,26 +450,57 @@ export default function RuntimeSettingsDrawer({
             )}
           </section>
 
-          {mode === 'agent' && (
+          {mode === 'agent' || mode === 'distributed_plan' ? (
             <section className="border-b border-slate-200 py-5">
-              <div className="flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-slate-800">讨论轮数</h3>
-                <span className="text-xs text-slate-500">
-                  约 {3 + discussionRounds * 2} 次调用
-                </span>
-              </div>
-              <SegmentedControl
-                label="讨论轮数"
-                value={String(discussionRounds)}
-                options={[1, 2, 3, 4, 5].map((round) => ({
-                  id: String(round),
-                  label: String(round),
-                }))}
-                onChange={(value) => onDiscussionRoundsChange(Number(value))}
-              />
+              {mode === 'agent' && (
+                <>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-slate-800">讨论轮数</h3>
+                    <span className="text-xs text-slate-500">
+                      约 {3 + discussionRounds * 2} 次调用
+                    </span>
+                  </div>
+                  <SegmentedControl
+                    label="讨论轮数"
+                    value={String(discussionRounds)}
+                    options={[1, 2, 3, 4, 5].map((round) => ({
+                      id: String(round),
+                      label: String(round),
+                    }))}
+                    onChange={(value) => onDiscussionRoundsChange(Number(value))}
+                  />
+                </>
+              )}
+
+              {mode === 'distributed_plan' && (
+                <>
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-slate-800">反思迭代（Reflexion）</h3>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={reflexion}
+                      onClick={() => onReflexionChange(!reflexion)}
+                      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+                        reflexion ? 'bg-teal-600' : 'bg-slate-300'
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                          reflexion ? 'translate-x-6' : 'translate-x-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+                    开启后主 Agent 采用「执行 - 反思 - 修正」双层闭环：每轮执行完成后由
+                    Critic 评估质量，未达标则携带修正意见进入下一轮，最多迭代 2 轮。
+                  </p>
+                </>
+              )}
 
               <h3 className="mt-5 text-sm font-semibold text-slate-800">
-                讨论成员
+                {mode === 'agent' ? '讨论成员' : '可委派智能体'}
               </h3>
               <div className="mt-3 flex flex-wrap gap-2">
                 {agents.length === 0 ? (
@@ -492,8 +527,13 @@ export default function RuntimeSettingsDrawer({
                   })
                 )}
               </div>
+              {mode === 'distributed_plan' && (
+                <p className="mt-2 text-[11px] text-slate-500">
+                  勾选的智能体将注册为主 Agent 的可委派工具；不勾选时放开全部可用智能体。
+                </p>
+              )}
             </section>
-          )}
+          ) : null}
         </div>
 
         <footer className="border-t border-slate-200 p-4">

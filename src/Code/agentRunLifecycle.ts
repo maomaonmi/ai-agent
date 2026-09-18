@@ -32,6 +32,17 @@ export function runtimeVerificationCandidateFromSummary(
   };
 }
 
+/** Preserve Runtime-owned terminal outcomes when projecting an SSE summary. */
+export function projectRuntimeSummaryStatus(
+  event: Pick<RuntimeSummaryEvent, 'status' | 'done'>,
+): CodeAgentTrace['status'] {
+  if (!event.done) return 'running';
+  if (event.status === 'needs_attention') return 'needs_attention';
+  if (event.status === 'awaiting_runtime_verification') return 'awaiting_runtime_verification';
+  if (event.status === 'completed_unverified') return 'completed_unverified';
+  return 'completed';
+}
+
 /** Project one summary event onto the trace's pending-candidate state. */
 export function projectRuntimeVerificationCandidate(
   previous: CodeAgentTrace['runtimeVerification'],

@@ -1,15 +1,28 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 
 import type {
   CodeAcceptanceReport,
   CodeAgentActorKind,
   CodeAgentRun,
+  CodeCompletionFeedback,
   CodeTaskPlanState,
   CodeAgentTimelineEvent,
 } from '../lib/api';
 import MarkdownMessage from './MarkdownMessage';
 import CodeTaskListCard from './CodeTaskListCard';
-import { ExternalLink, Terminal } from 'lucide-react';
+import {
+  AlertCircle,
+  Brain,
+  CheckCircle2,
+  CircleDot,
+  ExternalLink,
+  Eye,
+  FileText,
+  ListChecks,
+  MessageSquare,
+  Terminal,
+  Wrench,
+} from 'lucide-react';
 import { filterHookTimelineEvents, shouldShowActorLabel } from '../Code/agentTimeline';
 import { placeAcceptanceTimelineEvents } from '../Code/acceptanceTimeline';
 import { getGoldenTraceEligibility } from '../Code/goldenTraceEligibility';
@@ -56,6 +69,34 @@ const ACTOR_STYLE: Record<CodeAgentActorKind, string> = {
   system: 'text-slate-400',
   readonly: 'text-slate-500',
 };
+
+const timelineDetailIndent = 'ml-2 border-l border-slate-200 pl-3 sm:ml-3 sm:pl-4';
+const timelinePanelSurface = 'bg-white';
+
+function StageIcon({
+  stage,
+  status,
+}: {
+  stage: CodeAgentTimelineEvent['stage'];
+  status?: string;
+}) {
+  const iconClass = 'h-3.5 w-3.5';
+  const statusText = String(status ?? '').toLowerCase();
+  const iconTone = statusText === 'failed' || statusText === 'blocked'
+    ? 'text-rose-500'
+    : statusText === 'passed' || statusText === 'completed'
+      ? 'text-emerald-500'
+      : 'text-slate-500';
+  if (statusText === 'failed' || statusText === 'blocked') return <AlertCircle className={`${iconClass} ${iconTone}`} aria-hidden="true" />;
+  if (statusText === 'passed' || statusText === 'completed') return <CheckCircle2 className={`${iconClass} ${iconTone}`} aria-hidden="true" />;
+  if (stage === 'preflight' || stage === 'thinking') return <Brain className={`${iconClass} ${iconTone}`} aria-hidden="true" />;
+  if (stage === 'tool_call') return <Wrench className={`${iconClass} ${iconTone}`} aria-hidden="true" />;
+  if (stage === 'observation') return <Eye className={`${iconClass} ${iconTone}`} aria-hidden="true" />;
+  if (stage === 'file_change') return <FileText className={`${iconClass} ${iconTone}`} aria-hidden="true" />;
+  if (stage === 'validation' || stage === 'verification') return <ListChecks className={`${iconClass} ${iconTone}`} aria-hidden="true" />;
+  if (stage === 'output' || stage === 'summary') return <MessageSquare className={`${iconClass} ${iconTone}`} aria-hidden="true" />;
+  return <CircleDot className={`${iconClass} ${iconTone}`} aria-hidden="true" />;
+}
 
 const STAGE_LABEL: Record<CodeAgentTimelineEvent['stage'], string> = {
   status: '状态',
@@ -205,12 +246,10 @@ function makeTestEvents(
   }
   for (const artifact of report?.artifacts ?? []) {
     events.push(next(
-      'file_change',
-      `浏览器验证器读取产物：${artifact.path}`,
+      'verification',
+      `验证产物：${artifact.path}`,
       true,
       'observed',
-      undefined,
-      { ...artifact, operation: 'modify' },
     ));
   }
   for (const assertion of report?.assertions ?? []) {
@@ -254,7 +293,7 @@ function thoughtSummary(event: CodeAgentTimelineEvent, isRunning: boolean): stri
 
 function ActorBadge({ kind }: { kind: CodeAgentActorKind }) {
   return (
-    <span className={`inline-flex items-center text-[11px] font-medium ${ACTOR_STYLE[kind]}`}>
+    <span className={`inline-flex items-center text-xs font-medium ${ACTOR_STYLE[kind]}`}>
       {ACTOR_LABEL[kind]}
     </span>
   );
@@ -266,20 +305,20 @@ function FullToolResultCard({ event, toolName, report }: {
   report: string;
 }) {
   return (
-    <details className="rounded-md bg-slate-50" open>
-      <summary className="cursor-pointer list-none px-0 py-2 text-xs leading-5 text-slate-600 marker:hidden">
+    <details className={`rounded-md ${timelinePanelSurface} px-3 sm:px-4`} open>
+      <summary className="cursor-pointer list-none py-2 text-xs leading-5 text-slate-600 marker:hidden">
         <span className="mr-2 text-[10px] font-medium text-slate-400">
           状态
         </span>
         <span className="font-medium">{event.content}</span>
       </summary>
-      <div className="px-0 pb-2">
-        <div className="mb-1 text-[11px] font-medium text-slate-500">
+      <div className={`${timelineDetailIndent} pb-2`}>
+        <div className="mb-1 text-xs font-medium text-slate-500">
           {toolName} 完整返回
         </div>
         <pre
           tabIndex={0}
-          className="max-h-96 overflow-auto whitespace-pre-wrap break-words border border-slate-100 bg-white p-2 font-mono text-[11px] leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className={`max-h-96 overflow-auto whitespace-pre-wrap break-words ${timelinePanelSurface} p-2 font-mono text-[11px] leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500`}
         >
           {report}
         </pre>
@@ -303,6 +342,36 @@ function formatOutput(value: unknown): string {
   return value == null ? '' : formatEvidence(value);
 }
 
+function isCompiledContract(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Array.isArray(record.checks) && record.checks.length > 0;
+}
+
+function runtimeCompiledContract(report: Record<string, unknown>): unknown {
+  const direct = report.measurement_contract;
+  if (isCompiledContract(direct)) return direct;
+
+  const goal = report.acceptance_goal;
+  if (!goal || typeof goal !== 'object') return null;
+  const goalRecord = goal as Record<string, unknown>;
+  const goalContract = goalRecord.measurement_contract;
+  if (isCompiledContract(goalContract) && goalRecord.valid === true) {
+    return goalContract;
+  }
+  const metadata = goalRecord.metadata;
+  const runtimeProof = metadata && typeof metadata === 'object'
+    ? (metadata as Record<string, unknown>).runtime_proof
+    : null;
+  const executionPlan = runtimeProof && typeof runtimeProof === 'object'
+    ? (runtimeProof as Record<string, unknown>).execution_plan
+    : null;
+  return executionPlan && typeof executionPlan === 'object'
+    && isCompiledContract((executionPlan as Record<string, unknown>).contract)
+    ? (executionPlan as Record<string, unknown>).contract
+    : null;
+}
+
 function TestAgentEvidenceCard({ event, onOpenTerminal }: {
   event: CodeAgentTimelineEvent;
   onOpenTerminal?: (runId?: string) => void;
@@ -316,16 +385,22 @@ function TestAgentEvidenceCard({ event, onOpenTerminal }: {
   const stderr = formatOutput(report.stderr ?? report.runner_stderr);
   const artifact = formatOutput(report.artifact);
   const candidateRevision = formatOutput(report.candidate_revision);
-  const contract = report.measurement_contract ?? report.acceptance_goal;
+  const contract = runtimeCompiledContract(report);
+  const draft = report.generated_contract ?? report.generated_goal ?? (
+    contract == null ? report.acceptance_goal : null
+  );
   const contractText = contract == null ? '' : formatEvidence(contract);
+  const draftText = draft == null ? '' : formatEvidence(draft);
+  const validationErrors = formatOutput(report.validation_errors);
   const hasDetails = Boolean(
-    command || stdout || stderr || report.returncode != null || artifact || candidateRevision || contractText,
+    command || stdout || stderr || report.returncode != null || artifact
+      || candidateRevision || contractText || draftText || validationErrors,
   );
   const status = String(event.status || report.status || 'scheduled');
   const shouldOpen = status === 'failed' || status === 'blocked';
 
   return (
-    <div className="flex items-start gap-2 border-b border-slate-100 bg-white py-2">
+    <div className={`flex items-start gap-2 rounded-md ${timelinePanelSurface} px-3 py-2 sm:px-4`}>
       <details className="min-w-0 flex-1" open={shouldOpen}>
         <summary className="flex cursor-pointer list-none items-center gap-2 text-xs leading-5 text-slate-600 marker:hidden">
           <span aria-hidden="true" className="text-slate-400">⌄</span>
@@ -333,7 +408,7 @@ function TestAgentEvidenceCard({ event, onOpenTerminal }: {
           <span className="min-w-0 flex-1 break-words font-medium">{event.content}</span>
           {!hasDetails && <span className="shrink-0 text-[11px] text-slate-400">等待结果</span>}
         </summary>
-        <div className="mt-2 space-y-2 pl-5 text-[11px] leading-5 text-slate-600">
+        <div className={`${timelineDetailIndent} mt-2 space-y-2 text-xs leading-5 text-slate-600`}>
           {artifact && (
             <div className="text-slate-500">脚本：<code className="font-mono text-slate-700">{artifact}</code></div>
           )}
@@ -342,26 +417,38 @@ function TestAgentEvidenceCard({ event, onOpenTerminal }: {
           )}
           {contractText && (
             <div>
-              <div className="mb-1 font-medium text-slate-500">验收契约</div>
-              <pre tabIndex={0} aria-label="Runtime 验收契约" className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded border border-slate-200 bg-slate-50 px-2 py-1.5 font-mono text-[11px] leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500">{contractText}</pre>
+              <div className="mb-1 font-medium text-emerald-700">Runtime 已闭合的验收契约</div>
+              <pre tabIndex={0} aria-label="Runtime 已闭合的验收契约" className={`max-h-56 overflow-auto whitespace-pre-wrap break-words rounded ${timelinePanelSurface} px-2 py-1.5 font-mono text-[11px] leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500`}>{contractText}</pre>
+            </div>
+          )}
+          {!contractText && draftText && (
+            <div>
+              <div className="mb-1 font-medium text-amber-700">重规划候选（尚未形成验收契约）</div>
+              <pre tabIndex={0} aria-label="尚未闭合的重规划候选" className={`max-h-56 overflow-auto whitespace-pre-wrap break-words rounded ${timelinePanelSurface} px-2 py-1.5 font-mono text-[11px] leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500`}>{draftText}</pre>
+            </div>
+          )}
+          {validationErrors && (
+            <div>
+              <div className="mb-1 font-medium text-rose-700">Runtime 未闭合原因</div>
+              <pre tabIndex={0} aria-label="Runtime 未闭合原因" className={`max-h-40 overflow-auto whitespace-pre-wrap break-words rounded ${timelinePanelSurface} px-2 py-1.5 font-mono text-[11px] leading-5 text-rose-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500`}>{validationErrors}</pre>
             </div>
           )}
           {command && (
             <div>
               <div className="mb-1 font-medium text-slate-500">执行命令</div>
-              <pre tabIndex={0} aria-label="测试子 Agent 执行命令" className="max-h-24 overflow-auto whitespace-pre-wrap break-all rounded border border-slate-200 bg-slate-950 px-2 py-1.5 font-mono text-[11px] leading-5 text-slate-200 outline-none focus-visible:ring-2 focus-visible:ring-blue-500">{command}</pre>
+              <pre tabIndex={0} aria-label="测试子 Agent 执行命令" className={`max-h-24 overflow-auto whitespace-pre-wrap break-all rounded ${timelinePanelSurface} px-2 py-1.5 font-mono text-[11px] leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500`}>{command}</pre>
             </div>
           )}
           {stdout && (
             <div>
               <div className="mb-1 font-medium text-emerald-700">标准输出 stdout</div>
-              <pre tabIndex={0} aria-label="测试子 Agent 标准输出" className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded border border-emerald-100 bg-emerald-50 px-2 py-1.5 font-mono text-[11px] leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500">{stdout}</pre>
+              <pre tabIndex={0} aria-label="测试子 Agent 标准输出" className={`max-h-56 overflow-auto whitespace-pre-wrap break-words rounded ${timelinePanelSurface} px-2 py-1.5 font-mono text-[11px] leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500`}>{stdout}</pre>
             </div>
           )}
           {stderr && (
             <div>
               <div className="mb-1 font-medium text-rose-700">错误输出 stderr</div>
-              <pre tabIndex={0} aria-label="测试子 Agent 错误输出" className="max-h-56 overflow-auto whitespace-pre-wrap break-words rounded border border-rose-100 bg-rose-50 px-2 py-1.5 font-mono text-[11px] leading-5 text-rose-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500">{stderr}</pre>
+              <pre tabIndex={0} aria-label="测试子 Agent 错误输出" className={`max-h-56 overflow-auto whitespace-pre-wrap break-words rounded ${timelinePanelSurface} px-2 py-1.5 font-mono text-[11px] leading-5 text-rose-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500`}>{stderr}</pre>
             </div>
           )}
           {report.returncode != null && (
@@ -415,12 +502,12 @@ function TimelineEventCard({ event, onOpenDiff, onOpenTerminal, isRunning }: {
   }
   if (event.stage === 'preflight' || event.stage === 'thinking') {
     return (
-      <details className="rounded-md bg-slate-50" open={!event.done && isRunning}>
-        <summary className="cursor-pointer list-none px-0 py-2 text-xs font-medium text-slate-600 marker:hidden">
+      <details className={`rounded-md ${timelinePanelSurface} px-3 sm:px-4`} open={!event.done && isRunning}>
+        <summary className="cursor-pointer list-none py-2 text-xs font-medium text-slate-600 marker:hidden">
           <span className="mr-2 text-slate-400">⌄</span>{thoughtSummary(event, isRunning)}
           {!event.done && isRunning && <span className="ml-2 animate-pulse text-blue-500">生成中</span>}
         </summary>
-        <div className="px-0 pb-2 text-xs leading-5 text-slate-600">
+        <div className={`${timelineDetailIndent} pb-2 text-xs leading-5 text-slate-600`}>
           <div className="whitespace-pre-wrap break-words">{event.content}</div>
         </div>
       </details>
@@ -431,7 +518,7 @@ function TimelineEventCard({ event, onOpenDiff, onOpenTerminal, isRunning }: {
     const additions = event.file?.additions ?? 0;
     const deletions = event.file?.deletions ?? 0;
     return (
-      <div className="flex items-center justify-between gap-3 border-b border-slate-100 bg-white px-0 py-2">
+      <div className={`flex items-center justify-between gap-3 rounded-md ${timelinePanelSurface} px-3 py-2 sm:px-4`}>
         <div className="min-w-0">
           <div className="text-xs font-medium text-slate-700">{event.content}</div>
           <div className="mt-0.5 truncate font-mono text-[11px] text-slate-500" title={filePath}>{filePath}</div>
@@ -457,18 +544,195 @@ function TimelineEventCard({ event, onOpenDiff, onOpenTerminal, isRunning }: {
 
   if (event.stage === 'output' || event.stage === 'summary') {
     return (
-      <div className="border-b border-slate-100 bg-white px-0 py-2 text-sm leading-5 text-slate-700">
+      <div className={`rounded-md ${timelinePanelSurface} px-3 py-2 text-sm leading-5 text-slate-700 sm:px-4`}>
         <MarkdownMessage content={event.content} />
       </div>
     );
   }
 
   return (
-    <div className={`border-b border-slate-100 px-0 py-2 text-xs leading-5 ${event.stage === 'error' ? 'bg-rose-50 text-rose-700' : 'bg-white text-slate-600'}`}>
+    <div className={`rounded-md ${timelinePanelSurface} px-3 py-2 text-xs leading-5 sm:px-4 ${event.stage === 'error' ? 'text-rose-700' : 'text-slate-600'}`}>
       <span className="mr-2 text-[10px] font-medium text-slate-400">
         {STAGE_LABEL[event.stage]}
       </span>
       <span className="whitespace-pre-wrap break-words">{event.content}</span>
+    </div>
+  );
+}
+
+function formatVerificationValue(value: unknown): string {
+  if (value == null || value === '') return '未运行';
+  const labels: Record<string, string> = {
+    passed: '通过',
+    verified: '通过',
+    completed: '完成',
+    completed_unverified: '完成，未验收',
+    awaiting_runtime_verification: '等待验收',
+    unavailable: '不可用',
+    not_run: '未运行',
+    pending: '等待中',
+    failed: '失败',
+    blocked: '已阻塞',
+    inconclusive: '无法确定',
+  };
+  const text = String(value);
+  return labels[text] ?? text;
+}
+
+function CompletionFeedbackCard({
+  feedback,
+  onOpenDiff,
+}: {
+  feedback: CodeCompletionFeedback;
+  onOpenDiff?: (path: string) => void;
+}) {
+  const changes = feedback.changes ?? [];
+  const verification = feedback.verification ?? {
+    status: 'unknown',
+    static_validation: 'unknown',
+    acceptance_validation: 'not_run',
+  };
+  const validationErrors = verification.validation_errors ?? [];
+  return (
+    <div aria-label="代码完成反馈" className={`mb-2 rounded-md ${timelinePanelSurface} p-2.5 text-xs text-slate-700`}>
+      <div className="mb-1 font-semibold text-slate-800">完成反馈</div>
+      {feedback.summary && <MarkdownMessage content={feedback.summary} density="compact" />}
+      <div className="mt-2 font-medium text-slate-600">已完成修改 · {changes.length} 个文件</div>
+      {changes.length > 0 ? (
+        <div className="mt-1 space-y-1">
+          {changes.map((change) => (
+            <div key={`${change.operation ?? 'modify'}:${change.path}`} className={`flex items-center justify-between gap-2 rounded ${timelinePanelSurface} px-2 py-1`}>
+              <div className="min-w-0">
+                <span className="mr-1.5 text-slate-500">{change.operation === 'create' ? '新增' : change.operation === 'delete' ? '删除' : '修改'}</span>
+                <code className="break-all text-[11px]">{change.path}</code>
+              </div>
+              <span className="shrink-0 font-mono text-[11px]">
+                <span className="text-emerald-600">+{change.additions}</span>
+                <span className="ml-1.5 text-rose-600">-{change.deletions}</span>
+              </span>
+              {onOpenDiff && change.operation !== 'delete' && (
+                <button
+                  type="button"
+                  onClick={() => onOpenDiff(change.path)}
+                  className="shrink-0 rounded border border-slate-200 px-1.5 py-0.5 text-[11px] text-slate-600 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                >
+                  查看
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-1 text-slate-400">没有检测到文件差异。</div>
+      )}
+      <div className="mt-2 font-medium text-slate-600">验证结果</div>
+      <div className="mt-1 grid gap-1 text-[11px] sm:grid-cols-3">
+        <span>运行状态：{formatVerificationValue(verification.status)}</span>
+        <span>静态校验：{formatVerificationValue(verification.static_validation)}</span>
+        <span>自动验收：{formatVerificationValue(verification.acceptance_validation)}</span>
+      </div>
+      {validationErrors.length > 0 && (
+        <details className={`mt-2 rounded ${timelinePanelSurface} px-2 py-1.5 text-[11px] text-amber-800`}>
+          <summary className="cursor-pointer font-medium">查看验证诊断（{validationErrors.length}）</summary>
+          <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words">{validationErrors.map(formatEvidence).join('\n')}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function projectLegacyCompletionFeedback(sourceRun?: CodeAgentRun): CodeCompletionFeedback | undefined {
+  const trace = sourceRun?.trace;
+  const changes = trace?.fileChanges;
+  if (!trace || !changes?.length) return undefined;
+  const status = trace.status ?? 'unknown';
+  return {
+    summary: trace.summary ?? '',
+    changes: changes.map((change) => ({ ...change, operation: 'modify' })),
+    verification: {
+      status,
+      static_validation: 'unknown',
+      acceptance_validation: status === 'completed_unverified' ? 'unavailable' : 'not_run',
+    },
+  };
+}
+
+function TimelineEventList({
+  events,
+  onOpenDiff,
+  onOpenTerminal,
+  isRunning,
+}: {
+  events: CodeAgentTimelineEvent[];
+  onOpenDiff?: (path: string) => void;
+  onOpenTerminal?: (runId?: string) => void;
+  isRunning: boolean;
+}) {
+  return (
+    <ol className="relative space-y-0">
+      {events.map((event, index) => (
+        <li key={event.eventId} className="relative pl-7 sm:pl-8">
+          {index < events.length - 1 && (
+            <span aria-hidden="true" className="absolute bottom-0 left-2.5 top-6 w-px bg-slate-200" />
+          )}
+          <span
+            aria-hidden="true"
+            className={`absolute left-0 top-0.5 flex h-5 w-5 items-center justify-center rounded-full border bg-white shadow-sm ${
+              event.status === 'failed' || event.status === 'blocked'
+                ? 'border-rose-200'
+                : event.status === 'passed' || event.status === 'completed'
+                  ? 'border-emerald-200'
+                  : 'border-slate-200'
+            }`}
+          >
+            <StageIcon stage={event.stage} status={event.status} />
+          </span>
+            <div className="relative pb-3">
+              <div className="flex min-h-6 flex-wrap items-center gap-1.5">
+                {shouldShowActorLabel(events, index) && (
+                  <span className="inline-flex items-center rounded-full bg-slate-50 px-1.5 py-0.5">
+                    <ActorBadge kind={event.actorKind} />
+                  </span>
+                )}
+                <span className="text-xs font-medium text-slate-500">{STAGE_LABEL[event.stage]}</span>
+                {event.status && <span className="text-xs text-slate-400">· {event.status}</span>}
+            </div>
+            <TimelineEventCard event={event} onOpenDiff={onOpenDiff} onOpenTerminal={onOpenTerminal} isRunning={isRunning} />
+          </div>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+function TimelineActorControls({
+  actorKinds,
+  collapsedActorKinds,
+  onToggle,
+}: {
+  actorKinds: CodeAgentActorKind[];
+  collapsedActorKinds: Set<CodeAgentActorKind>;
+  onToggle: (kind: CodeAgentActorKind) => void;
+}) {
+  return (
+    <div className="mb-2 flex flex-wrap items-center gap-2" aria-label="Agent 链路控制">
+      {actorKinds.map((kind) => {
+        const expanded = !collapsedActorKinds.has(kind);
+        return (
+          <button
+            key={kind}
+            type="button"
+            aria-expanded={!collapsedActorKinds.has(kind)}
+            aria-label={`${ACTOR_LABEL[kind]}${expanded ? '，收起链路' : '，展开链路'}`}
+            onClick={() => onToggle(kind)}
+            className="inline-flex items-center gap-1.5 rounded-md bg-white px-1 py-1 text-xs transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          >
+            <ActorBadge kind={kind} />
+            <span className="text-slate-400">{expanded ? '收起' : '展开'}</span>
+            <span aria-hidden="true" className="text-slate-400">{expanded ? '⌃' : '⌄'}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -489,9 +753,20 @@ export default function CodeAgentTimeline({
   onSaveGoldenTrace,
   title = 'AgentLoop · 执行时间线',
 }: CodeAgentTimelineProps) {
+  // New runs use the Runtime-owned completion ledger. Keep a read-only
+  // projection for older/partial event streams that already recorded the
+  // authoritative file delta but did not carry completion_feedback; this
+  // prevents the final file list from disappearing during a protocol upgrade.
+  const completionFeedback = sourceRun?.trace.completionFeedback
+    ?? projectLegacyCompletionFeedback(sourceRun);
   const visibleEvents = useMemo(
-    () => filterHookTimelineEvents(events).filter((event) => event.metadata?.source !== 'context_usage'),
-    [events],
+    () => filterHookTimelineEvents(events).filter((event) => (
+      event.metadata?.source !== 'context_usage'
+      // The final VFS ledger below replaces every provisional file event.
+      // Keeping both would show duplicate or stale line counts.
+      && !(completionFeedback && event.stage === 'file_change')
+    )),
+    [completionFeedback, events],
   );
   const allEvents = useMemo(() => [
     ...visibleEvents,
@@ -519,20 +794,44 @@ export default function CodeAgentTimeline({
   const outputChars = allEvents
     .filter((event) => event.stage === 'output' || event.stage === 'summary')
     .reduce((total, event) => total + event.content.length, 0);
-  const fileCount = new Set(allEvents
-    .map((event) => event.file?.path || (typeof event.metadata?.path === 'string' ? event.metadata.path : ''))
-    .filter(Boolean)).size;
+  const fileCount = completionFeedback
+    ? completionFeedback.changes.length
+    : new Set(allEvents
+      .map((event) => event.file?.path || (typeof event.metadata?.path === 'string' ? event.metadata.path : ''))
+      .filter(Boolean)).size;
   const goldenTraceEligibility = getGoldenTraceEligibility(sourceRun);
-  if (allEvents.length === 0 && !taskPlan) return null;
+  const actorKinds = useMemo(
+    () => Array.from(new Set(allEvents.map((event) => event.actorKind))),
+    [allEvents],
+  );
+  const [collapsedActorKinds, setCollapsedActorKinds] = useState<Set<CodeAgentActorKind>>(new Set());
+  const renderEvents = useMemo(
+    () => allEvents.filter((event) => !collapsedActorKinds.has(event.actorKind)),
+    [allEvents, collapsedActorKinds],
+  );
+  const toggleActorLane = (kind: CodeAgentActorKind) => {
+    setCollapsedActorKinds((current) => {
+      const next = new Set(current);
+      if (next.has(kind)) next.delete(kind);
+      else next.add(kind);
+      return next;
+    });
+  };
+  if (allEvents.length === 0 && !taskPlan && !completionFeedback) return null;
 
   return (
-    <section aria-label="代码 AgentLoop 时间线" className="border-t border-slate-200 bg-slate-50 p-2">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <h4 className="text-xs font-semibold text-slate-800">{title}</h4>
-          <p className="mt-1 text-[11px] text-slate-500">
-            {isRunning ? '正在执行' : '已结束'} · 思考 {thinkingChars.toLocaleString()} 字 · 输出 {outputChars.toLocaleString()} 字 · 文件 {fileCount}
-          </p>
+    <section aria-label={title} className="border-t border-slate-200 bg-white px-4 py-3 sm:px-6">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-sky-50 text-sky-600" aria-hidden="true">
+            <MessageSquare className="h-3.5 w-3.5" />
+          </span>
+          <div className="min-w-0">
+            <h4 className="text-xs font-semibold text-slate-800">{title}</h4>
+            <p className="mt-1 text-[11px] text-slate-500">
+              {isRunning ? '正在执行' : '已结束'} · 思考 {thinkingChars.toLocaleString()} 字 · 输出 {outputChars.toLocaleString()} 字 · 文件 {fileCount}
+            </p>
+          </div>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           {acceptanceState !== 'idle' && (
@@ -554,18 +853,20 @@ export default function CodeAgentTimeline({
         </div>
       </div>
       {taskPlan && <CodeTaskListCard plan={taskPlan} onOpenFile={onOpenDiff} />}
-      <ol className="space-y-1">
-        {allEvents.map((event, index) => (
-          <li key={event.eventId} className="space-y-0.5">
-            <div className="flex min-h-4 items-center gap-1.5">
-              {shouldShowActorLabel(allEvents, index) && <ActorBadge kind={event.actorKind} />}
-              <span className="text-[10px] text-slate-400">{STAGE_LABEL[event.stage]}</span>
-              {event.status && <span className="text-[10px] text-slate-400">· {event.status}</span>}
-            </div>
-          <TimelineEventCard event={event} onOpenDiff={onOpenDiff} onOpenTerminal={onOpenTerminal} isRunning={isRunning} />
-          </li>
-        ))}
-      </ol>
+      <TimelineActorControls
+        actorKinds={actorKinds}
+        collapsedActorKinds={collapsedActorKinds}
+        onToggle={toggleActorLane}
+      />
+      <TimelineEventList
+        events={renderEvents}
+        onOpenDiff={onOpenDiff}
+        onOpenTerminal={onOpenTerminal}
+        isRunning={isRunning}
+      />
+      {completionFeedback && (
+        <CompletionFeedbackCard feedback={completionFeedback} onOpenDiff={onOpenDiff} />
+      )}
     </section>
   );
 }

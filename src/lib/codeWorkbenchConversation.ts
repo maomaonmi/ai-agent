@@ -1,6 +1,7 @@
 import type {
   CodeAgentRun,
   CodeIntentActiveRun,
+  CodeIntentCompletedResult,
   CodeIntentTurn,
 } from './api';
 import { mapAgentRunsToPrompts } from '../Code/agentRunLifecycle.ts';
@@ -55,6 +56,8 @@ export interface CodeIntentContext {
   assistantReferences: CodeIntentTurn[];
   /** The latest run actually bound to one of the visible user prompts. */
   latestRun?: CodeAgentRun;
+  /** Completed result projection used to bind a correction to its base. */
+  latestCompletedResult?: CodeIntentCompletedResult;
   /** Only unfinished runs bound to a visible prompt may be resumed. */
   resumeCandidates: CodeAgentRun[];
 }
@@ -69,6 +72,7 @@ export interface CodeIntentContext {
 export function buildCodeIntentContext(
   messages: Array<Pick<CodeIntentTurn, 'role' | 'content'> & { id?: string }>,
   agentRuns: CodeAgentRun[],
+  options: { activeRevisionId?: string } = {},
 ): CodeIntentContext {
   const userMessages = messages.filter((message) => message.role === 'user');
   const visibleRuns = mapAgentRunsToPrompts(
@@ -93,6 +97,14 @@ export function buildCodeIntentContext(
     })),
     assistantReferences,
     latestRun: uniqueRuns.at(-1),
+    latestCompletedResult: (() => {
+      const latest = uniqueRuns.at(-1);
+      if (!latest || isCodeAgentRunUnfinished(latest)) return undefined;
+      return {
+        run_id: latest.id,
+        ...(options.activeRevisionId ? { revision_id: options.activeRevisionId } : {}),
+      };
+    })(),
     resumeCandidates: uniqueRuns
       .filter((run) => isCodeAgentRunUnfinished(run))
       .slice(-4),

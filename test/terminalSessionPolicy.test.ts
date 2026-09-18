@@ -39,3 +39,13 @@ test('shows only the newest non-dismissed Agent run while preserving manual term
     ['agent-1-repair-1', 'agent-1'],
   );
 });
+
+test('keeps a clicked completed Agent terminal available while viewing another latest run', () => {
+  assert.deepEqual(
+    getStaleAgentTerminalRunIds([
+      { run_id: 'agent-old', is_manual: false },
+      { run_id: 'agent-latest', is_manual: false },
+    ], 'agent-latest', new Set(), 'agent-old'),
+    [],
+  );
+});

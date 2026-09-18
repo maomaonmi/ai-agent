@@ -2,13 +2,28 @@ import { Check, Circle, ChevronDown, ChevronRight, LoaderCircle, Search, Sparkle
 import { useState } from 'react';
 import type { PlanProgressEvent, PlanTaskStatus } from '../../lib/api';
 
+/**
+ * ReAct 主控模式的一轮思考（Q2 分节）。tokens 只包含该轮的思考正文，
+ * action 在 reasoning_round_end 到达后回填（该轮实际执行的工具名）。
+ */
+export interface ReasoningRoundView {
+  step: number;
+  action: string;
+  tokens: string;
+  done: boolean;
+}
+
 interface PlanChainTimelineProps {
   progress?: PlanProgressEvent | null;
   status?: string;
   /** Live reasoning text from planner/executor model deltas. */
   reasoningText?: string;
+  /** ReAct 主控模式按轮思考分节；非空时替代 reasoningText 的整块渲染。 */
+  reasoningRounds?: ReasoningRoundView[];
   /** Pacing length used by the parent typewriter hook while a request is live. */
   reasoningDisplayedLength?: number;
+  /** D3: 链路流程日志（🧭📐✅⚠️📋），与模型思考正文分开展示。 */
+  chainLogText?: string;
 }
 
 const statusText: Record<PlanTaskStatus, string> = {
@@ -18,8 +33,9 @@ const statusText: Record<PlanTaskStatus, string> = {
   failed: '需重试',
 };
 
-export default function PlanChainTimeline({ progress, status, reasoningText = '', reasoningDisplayedLength }: PlanChainTimelineProps) {
+export default function PlanChainTimeline({ progress, status, reasoningText = '', reasoningRounds, reasoningDisplayedLength, chainLogText = '' }: PlanChainTimelineProps) {
   const [reasoningOpen, setReasoningOpen] = useState(true);
+  const [chainLogOpen, setChainLogOpen] = useState(false);
   if (!progress && !status) return null;
   const phaseLabel = progress?.phase === 'planning'
     ? '正在拆解任务'
@@ -32,6 +48,12 @@ export default function PlanChainTimeline({ progress, status, reasoningText = ''
     ? reasoningText
     : reasoningText.slice(0, reasoningDisplayedLength);
   const reasoningCount = reasoningText.replace(/\s/g, '').length;
+  const rounds = reasoningRounds ?? [];
+  // Why 打字机预算按轮顺序分配：reasoningDisplayedLength 计的是原始 token
+  // 流的进度，已完成轮全量展示，流式中的轮按剩余预算截断——直接对拼接后
+  // 的字符串整体 slice 会把后续轮次标题/正文切错位。
+  const roundVisibleTokens = (round: ReasoningRoundView, budget: number): string =>
+    round.tokens.slice(0, Math.max(0, budget));
   return (
     <section data-plan-chain className="mt-4 rounded-2xl border border-indigo-100 bg-white/90 p-4 shadow-sm" aria-live="polite">
       <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
@@ -55,11 +77,62 @@ export default function PlanChainTimeline({ progress, status, reasoningText = ''
             <span>深度思考过程 · {reasoningCount} 字</span>
           </button>
           {reasoningOpen && (
-            <div className="mt-1 max-h-56 overflow-y-auto whitespace-pre-wrap text-[13px] leading-6 text-slate-600">
-              {visibleReasoning}
-              {reasoningDisplayedLength != null && reasoningDisplayedLength < reasoningText.length && (
-                <span className="ml-0.5 inline-block h-3.5 w-0.5 animate-pulse bg-indigo-500 align-middle" aria-hidden="true" />
-              )}
+            rounds.length > 0 ? (
+              <div className="mt-1 max-h-56 overflow-y-auto text-[13px] leading-6 text-slate-600">
+                {(() => {
+                  let budget = reasoningDisplayedLength ?? Number.POSITIVE_INFINITY;
+                  return rounds.map((round, index) => {
+                    const visibleTokens = roundVisibleTokens(round, budget);
+                    budget -= round.tokens.length;
+                    return (
+                      <div key={round.step} className={index > 0 ? 'mt-3' : ''}>
+                        <div className="text-[12px] font-semibold text-indigo-600">第 {round.step} 轮思考</div>
+                        <div className="mt-0.5 whitespace-pre-wrap">{visibleTokens}</div>
+                        {round.done && round.action ? (
+                          <div className="mt-1 flex items-center gap-1.5 text-[12px] text-slate-500">
+                            <span className="text-indigo-500">▶</span>
+                            <span>本轮行动：{round.action}</span>
+                            <Check size={12} className="text-emerald-600" />
+                          </div>
+                        ) : (
+                          <div className="mt-1 flex items-center gap-1.5 text-[12px] text-slate-400">
+                            <span className="text-indigo-400">▶</span>
+                            <span className="animate-pulse">正在决策行动…</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  });
+                })()}
+                {reasoningDisplayedLength != null && reasoningDisplayedLength < reasoningText.length && (
+                  <span className="ml-0.5 inline-block h-3.5 w-0.5 animate-pulse bg-indigo-500 align-middle" aria-hidden="true" />
+                )}
+              </div>
+            ) : (
+              <div className="mt-1 max-h-56 overflow-y-auto whitespace-pre-wrap text-[13px] leading-6 text-slate-600">
+                {visibleReasoning}
+                {reasoningDisplayedLength != null && reasoningDisplayedLength < reasoningText.length && (
+                  <span className="ml-0.5 inline-block h-3.5 w-0.5 animate-pulse bg-indigo-500 align-middle" aria-hidden="true" />
+                )}
+              </div>
+            )
+          )}
+        </div>
+      )}
+      {chainLogText.replace(/\s/g, '').length > 0 && (
+        <div className="mt-3 border-t border-indigo-100 pt-2">
+          <button
+            type="button"
+            className="flex items-center gap-1.5 text-xs font-semibold text-slate-600"
+            onClick={() => setChainLogOpen((open) => !open)}
+            aria-expanded={chainLogOpen}
+          >
+            {chainLogOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+            <span>🧵 链路日志</span>
+          </button>
+          {chainLogOpen && (
+            <div className="mt-1 max-h-48 overflow-y-auto whitespace-pre-wrap font-mono text-[11px] leading-5 text-slate-500">
+              {chainLogText}
             </div>
           )}
         </div>
