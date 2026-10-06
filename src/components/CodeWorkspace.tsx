@@ -50,6 +50,7 @@ import {
 } from '../Code/fullstackBundler';
 import { FileTreeExplorer, buildTreeFromVFS, type FileTreeAction } from '../Code/FileTreeExplorer';
 import CodeAgentTimeline from './CodeAgentTimeline';
+import RuntimeRecoveryHistoryPanel from './RuntimeRecoveryHistoryPanel';
 import CodeFileMenu from './CodeFileMenu';
 // Why: Phase3 记忆面板——Code 工作台左侧 aside 的「记忆」Tab 内容。
 import MemoryPanel from './MemoryPanel';
@@ -2059,6 +2060,13 @@ export default function CodeWorkspace({
                             setActiveView('source');
                           }}
                         />
+                        {run.trace.operationId && sessionId ? (
+                          <RuntimeRecoveryHistoryPanel
+                            operationId={run.trace.operationId}
+                            sessionId={sessionId}
+                            runId={run.id}
+                          />
+                        ) : null}
                       </div>
                     )}
                     {conversationAnswers.filter((answer) => answer.promptIndex === index)
