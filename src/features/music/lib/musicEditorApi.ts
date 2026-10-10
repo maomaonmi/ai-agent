@@ -10,12 +10,23 @@ export interface EditorClipInput {
   muted?: boolean;
   pitchSemitones?: number;
   playbackRate?: number;
+  autotune?: {
+    isEnabled: boolean;
+    sourceAssetId: string;
+    processedAssetId?: string;
+    parameters: {
+      keyRoot: string;
+      scale: 'major' | 'minor' | 'chromatic';
+      responseMs: number;
+      naturalness: number;
+    };
+  };
 }
 
 export interface EditorTrackInput {
   id: string;
   name: string;
-  type: 'vocal' | 'instrument' | 'drum' | 'bass';
+  type: 'vocal' | 'instrument' | 'drum' | 'bass' | 'audio';
   muted: boolean;
   solo: boolean;
   volume: number;
@@ -73,6 +84,7 @@ export function buildEditorDocument(input: {
   bpm: number;
   timeSignature: string;
   selectedKey: string;
+  autotuneSettings?: { responseMs: number; naturalness: number };
   volume: number;
   tracks: EditorTrackInput[];
 }) {
@@ -83,6 +95,10 @@ export function buildEditorDocument(input: {
     tempo: { bpm: input.bpm, timeSignature: [numerator, denominator] as [number, number] },
     key: parseKey(input.selectedKey),
     master: { gainDb: input.volume > 0 ? 20 * Math.log10(input.volume) : -60, targetLufs: -14 },
+    autotuneSettings: {
+      responseMs: input.autotuneSettings?.responseMs ?? 20,
+      naturalness: input.autotuneSettings?.naturalness ?? 0,
+    },
     tracks: input.tracks.map((track, order) => ({
       id: track.id,
       name: track.name,
@@ -111,6 +127,7 @@ export function buildEditorDocument(input: {
         fadeOutSeconds: 0,
         pitchSemitones: clip.pitchSemitones ?? 0,
         playbackRate: clip.playbackRate ?? 1,
+        autotune: clip.autotune,
       })),
     })),
     markers: [],
@@ -173,13 +190,17 @@ export function importEditorOperationResult(operationId: string, clipId: string)
 }
 
 export interface EditorAudioProcessingRequest {
-  type: 'denoise' | 'beautify' | 'pitch_shift' | 'stem_separation' | 'vocal_effect';
+  type: 'denoise' | 'beautify' | 'pitch_shift' | 'stem_separation' | 'vocal_effect' | 'autotune';
   inputAssetId: string;
   clientRequestId: string;
   pitchSemitones?: number;
   stemCount?: 2 | 3 | 4;
   effectId?: string;
   intensity?: number;
+  keyRoot?: string;
+  scale?: 'major' | 'minor' | 'chromatic';
+  responseMs?: number;
+  naturalness?: number;
 }
 
 export function createEditorAudioProcessing(projectId: string, body: EditorAudioProcessingRequest) {

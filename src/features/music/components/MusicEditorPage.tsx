@@ -55,6 +55,7 @@ import {
   selectGenerationAssetId,
   saveEditorProject,
   uploadEditorAsset,
+  type EditorClipInput,
   type EditorProject,
 } from '../lib/musicEditorApi';
 import { SINGER_PRESETS, type SingerPreset } from '../lib/singerPresets';
@@ -76,11 +77,17 @@ type EditorTab = 'vocal' | 'lyrics' | 'smart' | 'harmony' | 'material' | 'favori
 interface Track {
   id: string;
   name: string;
-  type: 'vocal' | 'instrument' | 'drum' | 'bass';
+  type: 'vocal' | 'instrument' | 'drum' | 'bass' | 'audio';
   muted: boolean;
   solo: boolean;
   volume: number;
   clips: AudioClip[];
+}
+
+type AutoTuneScale = 'major' | 'minor' | 'chromatic';
+
+function selectedKeyRoot(value: string): string {
+  return value.replace(/大调|小调/g, '') || 'C';
 }
 
 interface AudioClip {
@@ -96,6 +103,7 @@ interface AudioClip {
   pending?: boolean;
   pitchSemitones?: number;
   playbackRate?: number;
+  autotune?: EditorClipInput['autotune'];
 }
 
 interface EditorHistorySnapshot {
@@ -103,6 +111,9 @@ interface EditorHistorySnapshot {
   timeSignature: string;
   volume: number;
   selectedKey: string;
+  selectedScale: AutoTuneScale;
+  autotuneResponseMs: number;
+  autotuneNaturalness: number;
   tracks: Track[];
 }
 
@@ -213,6 +224,7 @@ function getVisibleWaveform(clip: AudioClip, secondsPerBar: number) {
 const TRACK_ACCENT: Record<Track['type'], { bar: string; wave: string; chip: string }> = {
   vocal: { bar: 'bg-violet-500', wave: 'bg-violet-500/80', chip: 'from-violet-500 to-fuchsia-500' },
   instrument: { bar: 'bg-sky-500', wave: 'bg-sky-500/80', chip: 'from-sky-500 to-cyan-500' },
+  audio: { bar: 'bg-sky-500', wave: 'bg-sky-500/80', chip: 'from-sky-500 to-cyan-500' },
   drum: { bar: 'bg-amber-500', wave: 'bg-amber-500/80', chip: 'from-amber-500 to-orange-500' },
   bass: { bar: 'bg-emerald-500', wave: 'bg-emerald-500/80', chip: 'from-emerald-500 to-teal-500' },
 };
@@ -272,6 +284,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
   const [generationState, setGenerationState] = useState<'idle' | 'submitting' | 'processing' | 'error'>('idle');
   const [pendingClipId, setPendingClipId] = useState<string | null>(null);
   const [clipProcessing, setClipProcessing] = useState<{ clipId: string; operationId: string; label: string } | null>(null);
+  const clipProcessingRequestRef = useRef(false);
   const [lyricsGenerationState, setLyricsGenerationState] = useState<'idle' | 'generating' | 'error'>('idle');
   const [beatLoadingId, setBeatLoadingId] = useState<string | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -328,7 +341,9 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
   // Autotune 调式选择弹窗
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [selectedKey, setSelectedKey] = useState('D小调');
-  const [selectedScale, setSelectedScale] = useState<'major' | 'minor' | 'chromatic'>('minor');
+  const [selectedScale, setSelectedScale] = useState<AutoTuneScale>('minor');
+  const [autotuneResponseMs, setAutotuneResponseMs] = useState(20);
+  const [autotuneNaturalness, setAutotuneNaturalness] = useState(0);
   // 混响选项
   const [selectedReverb, setSelectedReverb] = useState('大厅');
   // 上滑面板状态：vocalEffect | key | reverb
@@ -349,6 +364,11 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       setProject(loaded);
       setBpm(loaded.document.tempo.bpm);
       setTimeSignature(loaded.document.tempo.timeSignature.join('/'));
+      const loadedKey = loaded.document.key;
+      setSelectedScale(loadedKey.scale);
+      setSelectedKey(`${loadedKey.root}${loadedKey.scale === 'major' ? '大调' : loadedKey.scale === 'minor' ? '小调' : ''}`);
+      setAutotuneResponseMs(loaded.document.autotuneSettings?.responseMs ?? 20);
+      setAutotuneNaturalness(loaded.document.autotuneSettings?.naturalness ?? 0);
       const secondsPerBar = (60 / loaded.document.tempo.bpm) * loaded.document.tempo.timeSignature[0];
       const loadedTracks = await Promise.all(loaded.document.tracks.map(async (track) => ({
         id: track.id,
@@ -377,6 +397,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
             muted: Boolean(clip.isMuted),
             pitchSemitones: clip.pitchSemitones,
             playbackRate: clip.playbackRate,
+            autotune: clip.autotune,
             waveform: buildWaveformValues(clip.id.length),
           };
         })),
@@ -410,6 +431,9 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       timeSignature,
       volume,
       selectedKey,
+      selectedScale,
+      autotuneResponseMs,
+      autotuneNaturalness,
       tracks: tracks.map((track) => ({ ...track, clips: track.clips.map((clip) => ({ ...clip, waveform: clip.waveform ? [...clip.waveform] : undefined })) })),
     };
     const serialized = JSON.stringify(snapshot);
@@ -432,9 +456,16 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       history.current = serialized;
       history.future = [];
     }
-  }, [bpm, timeSignature, volume, selectedKey, tracks]);
+  }, [bpm, timeSignature, volume, selectedKey, selectedScale, autotuneResponseMs, autotuneNaturalness, tracks]);
 
-  const currentDocument = () => buildEditorDocument({ bpm, timeSignature, selectedKey, volume, tracks });
+  const currentDocument = () => buildEditorDocument({
+    bpm,
+    timeSignature,
+    selectedKey,
+    autotuneSettings: { responseMs: autotuneResponseMs, naturalness: autotuneNaturalness },
+    volume,
+    tracks,
+  });
 
   const restoreHistorySnapshot = (serialized: string) => {
     const snapshot = JSON.parse(serialized) as EditorHistorySnapshot;
@@ -444,6 +475,9 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
     setTimeSignature(snapshot.timeSignature);
     setVolume(snapshot.volume);
     setSelectedKey(snapshot.selectedKey);
+    setSelectedScale(snapshot.selectedScale);
+    setAutotuneResponseMs(snapshot.autotuneResponseMs);
+    setAutotuneNaturalness(snapshot.autotuneNaturalness);
     setTracks(snapshot.tracks.map((track) => ({ ...track, clips: track.clips.map((clip) => ({ ...clip, waveform: clip.waveform ? [...clip.waveform] : undefined })) })));
   };
 
@@ -1445,16 +1479,26 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
   const startClipProcessing = async (
     trackId: string,
     clipId: string,
-    operationType: 'denoise' | 'beautify' | 'pitch_shift' | 'stem_separation' | 'vocal_effect',
+    operationType: 'denoise' | 'beautify' | 'pitch_shift' | 'stem_separation' | 'vocal_effect' | 'autotune',
     label: string,
-    options: { pitchSemitones?: number; stemCount?: 2 | 3 | 4; effectId?: VocalEffectId; intensity?: number } = {},
+    options: {
+      pitchSemitones?: number;
+      stemCount?: 2 | 3 | 4;
+      effectId?: VocalEffectId;
+      intensity?: number;
+      keyRoot?: string;
+      scale?: AutoTuneScale;
+      responseMs?: number;
+      naturalness?: number;
+    } = {},
   ) => {
-    if (clipProcessing || generationState === 'submitting' || generationState === 'processing') return;
+    if (clipProcessingRequestRef.current || clipProcessing || generationState === 'submitting' || generationState === 'processing') return;
     const current = tracks.find((track) => track.id === trackId)?.clips.find((clip) => clip.id === clipId);
     if (!current?.assetId || current.pending) {
       setClipNotice('当前片段没有可处理的音频');
       return;
     }
+    clipProcessingRequestRef.current = true;
     closeClipContextMenu();
     setClipProcessing({ clipId, operationId: '', label });
     setClipNotice(`${label}处理中…`);
@@ -1465,12 +1509,18 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
         : `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
       let operation = await createEditorAudioProcessing(saved.id, {
         type: operationType,
-        inputAssetId: current.assetId,
+        inputAssetId: operationType === 'autotune'
+          ? current.autotune?.sourceAssetId ?? current.assetId
+          : current.assetId,
         clientRequestId: requestId,
         pitchSemitones: options.pitchSemitones,
         stemCount: options.stemCount,
         effectId: options.effectId,
         intensity: options.intensity,
+        keyRoot: options.keyRoot,
+        scale: options.scale,
+        responseMs: options.responseMs,
+        naturalness: options.naturalness,
       });
       setClipProcessing({ clipId, operationId: operation.id, label });
       for (let attempt = 0; attempt < 300 && !['SUCCESS', 'FAILED', 'TIMED_OUT'].includes(operation.status); attempt += 1) {
@@ -1533,6 +1583,19 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
         });
       } else {
         const asset = imported[0];
+        const autotune = operationType === 'autotune'
+          ? {
+              isEnabled: true,
+              sourceAssetId: current.autotune?.sourceAssetId ?? current.assetId,
+              processedAssetId: asset.id,
+              parameters: {
+                keyRoot: options.keyRoot ?? 'C',
+                scale: options.scale ?? 'major',
+                responseMs: options.responseMs ?? 20,
+                naturalness: options.naturalness ?? 0,
+              },
+            }
+          : undefined;
         audioPlayersRef.current.get(clipId)?.pause();
         const player = audioPlayersRef.current.get(clipId);
         if (player) {
@@ -1545,7 +1608,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
               clips: track.clips.map((clip) => clip.id === clipId
                 ? {
                     ...clip,
-                    name: asset.displayName,
+                    name: operationType === 'autotune' ? clip.name : asset.displayName,
                     assetId: asset.id,
                     sourceDuration: asset.duration,
                     // Processing renders a new source file; keep the user's
@@ -1556,6 +1619,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                       Math.max(0.05, (asset.duration - Math.min(clip.sourceOffset ?? 0, Math.max(0, asset.duration - 0.001))) / secondsPerBar),
                     ),
                     pitchSemitones: 0,
+                    autotune,
                     waveform: buildWaveformValues(asset.id.length + Math.round(asset.duration)),
                   }
                 : clip),
@@ -1568,6 +1632,8 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       console.error(`${label}失败`, error);
       setClipProcessing(null);
       setClipNotice(error instanceof Error ? error.message : `${label}失败`);
+    } finally {
+      clipProcessingRequestRef.current = false;
     }
   };
 
@@ -1614,6 +1680,77 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
       `${effect.name} ${parameters.intensity}%`,
       parameters,
     );
+  };
+
+  const handleApplyAutotune = () => {
+    const location = findClipLocation();
+    if (!location || !['vocal', 'instrument', 'audio'].includes(location.track.type) || !location.clip.assetId) {
+      setClipNotice('请选择人声轨或音频轨中的片段后再应用音准校正');
+      return;
+    }
+    const keyRoot = selectedKeyRoot(selectedKey);
+    void startClipProcessing(
+      location.track.id,
+      location.clip.id,
+      'autotune',
+      `Autotune ${selectedKey}`,
+      { keyRoot, scale: selectedScale, responseMs: autotuneResponseMs, naturalness: autotuneNaturalness },
+    );
+  };
+
+  const handleToggleAutotune = () => {
+    const location = findClipLocation();
+    if (!location || !['vocal', 'instrument', 'audio'].includes(location.track.type) || !location.clip.assetId) {
+      setClipNotice('请选择人声轨或音频轨中的片段后再使用 Autotune');
+      return;
+    }
+    const { track, clip } = location;
+    const active = clip.autotune;
+    if (active?.isEnabled) {
+      const sourceAssetId = active.sourceAssetId;
+      const player = audioPlayersRef.current.get(clip.id);
+      player?.pause();
+      if (player) {
+        player.src = '';
+        audioPlayersRef.current.delete(clip.id);
+      }
+      setTracks((previous) => previous.map((item) => item.id === track.id
+        ? { ...item, clips: item.clips.map((part) => part.id === clip.id
+            ? { ...part, assetId: sourceAssetId, autotune: { ...active, isEnabled: false }, waveform: buildWaveformValues(sourceAssetId.length) }
+            : part) }
+        : item));
+      setClipNotice('已关闭当前片段的 Autotune');
+      return;
+    }
+
+    const parameters = {
+      keyRoot: selectedKeyRoot(selectedKey),
+      scale: selectedScale,
+      responseMs: autotuneResponseMs,
+      naturalness: autotuneNaturalness,
+    };
+    const cached = active?.processedAssetId && active.parameters.keyRoot === parameters.keyRoot
+      && active.parameters.scale === parameters.scale
+      && active.parameters.responseMs === parameters.responseMs
+      && active.parameters.naturalness === parameters.naturalness
+      ? active.processedAssetId
+      : null;
+    if (cached && active) {
+      const player = audioPlayersRef.current.get(clip.id);
+      player?.pause();
+      if (player) {
+        player.src = '';
+        audioPlayersRef.current.delete(clip.id);
+      }
+      setTracks((previous) => previous.map((item) => item.id === track.id
+        ? { ...item, clips: item.clips.map((part) => part.id === clip.id
+            ? { ...part, assetId: cached, autotune: { ...active, isEnabled: true }, waveform: buildWaveformValues(cached.length) }
+            : part) }
+        : item));
+      setClipNotice('已启用已保存的 Autotune 结果');
+      return;
+    }
+    handleApplyAutotune();
   };
 
   const handleClipPitch = (trackId: string, clipId: string, delta: number) => {
@@ -1939,6 +2076,21 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
   const selectedVocalEffect = getVocalEffect(selectedVocalEffectId);
   const selectedVocalClip = findClipLocation();
   const canApplyVocalEffect = Boolean(selectedVocalClip?.track.type === 'vocal' && selectedVocalClip.clip.assetId && !selectedVocalClip.clip.pending);
+  const selectedAutotuneClip = findClipLocation();
+  const canUseAutotune = Boolean(
+    selectedAutotuneClip
+    && ['vocal', 'instrument', 'audio'].includes(selectedAutotuneClip.track.type)
+    && selectedAutotuneClip.clip.assetId
+    && !selectedAutotuneClip.clip.pending,
+  );
+  const autotuneState = selectedAutotuneClip?.clip.autotune;
+  const autotuneEnabled = Boolean(autotuneState?.isEnabled);
+  const autotuneSettingsChanged = Boolean(autotuneState && (
+    autotuneState.parameters.keyRoot !== selectedKeyRoot(selectedKey)
+    || autotuneState.parameters.scale !== selectedScale
+    || autotuneState.parameters.responseMs !== autotuneResponseMs
+    || autotuneState.parameters.naturalness !== autotuneNaturalness
+  ));
   const viewportWidth = typeof window === 'undefined' ? 1280 : window.innerWidth;
   const vocalEffectPanelWidth = Math.min(760, Math.max(280, viewportWidth - 24));
   const vocalEffectPanelLeft = Math.max(12, Math.min(slideUpPosition.left, viewportWidth - vocalEffectPanelWidth - 12));
@@ -3221,25 +3373,32 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                       {!canApplyVocalEffect && <div className="mt-2 text-center text-[10px] text-slate-400">先选择人声音轨片段</div>}
                     </div>
                     {/* Autotune */}
-                    <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                    <div className="rounded-xl border border-slate-200 bg-[var(--background)] p-5 text-[var(--foreground)] shadow-sm dark:border-slate-700">
                       <div className="mb-2 flex items-center justify-between">
-                        <span className="text-sm font-semibold text-slate-900">Autotune</span>
-                        <button type="button" className="relative h-5 w-10 rounded-full bg-sky-500">
-                          <div className="absolute top-0.5 right-0.5 h-4 w-4 rounded-full bg-white shadow" />
+                        <span className="text-sm font-semibold">Autotune</span>
+                        <button
+                          type="button"
+                          onClick={handleToggleAutotune}
+                          disabled={!canUseAutotune || Boolean(clipProcessing)}
+                          aria-pressed={autotuneEnabled}
+                          aria-label={autotuneEnabled ? '关闭当前片段 Autotune' : '启用当前片段 Autotune'}
+                          className={`relative h-5 w-10 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${autotuneEnabled ? 'bg-sky-500' : 'bg-slate-200 dark:bg-slate-700'}`}
+                        >
+                          <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform ${autotuneEnabled ? 'translate-x-5' : 'translate-x-0.5'}`} />
                         </button>
                       </div>
-                      <div className="mb-4 text-xs text-slate-500">修正音高和添加自动音效果</div>
+                      <div className="mb-4 text-xs text-slate-500 dark:text-slate-400">人声轨和音频轨均可使用；适合单音人声或旋律</div>
                       <div className="space-y-4">
                         <div>
-                          <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
-                            <span>大调</span>
-                            <span>20ms</span>
+                          <div className="mb-1 flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
+                            <span>目标调式</span>
+                            <span>{autotuneEnabled ? (autotuneSettingsChanged ? '设置已更改' : '已应用') : '待应用'}</span>
                           </div>
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
                               onClick={(e) => slideUpPanel === 'key' ? setSlideUpPanel(null) : openSlideUpPanel('key', e)}
-                              className="flex w-full items-center justify-between rounded-md border border-slate-300 bg-slate-50 px-3 py-1.5 text-left text-xs text-slate-700 outline-none focus:border-sky-500"
+                              className="flex w-full items-center justify-between rounded-md border border-slate-300 bg-slate-50 px-3 py-1.5 text-left text-xs text-slate-700 outline-none focus:border-sky-500 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-100"
                             >
                               <span>{selectedKey}</span>
                               <ChevronDown size={14} className="text-slate-400" />
@@ -3247,32 +3406,56 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                           </div>
                         </div>
                         <div>
-                          <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
+                          <div className="mb-1 flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
                             <span>响应速度</span>
-                            <span>20ms</span>
+                            <span>{autotuneResponseMs}ms</span>
                           </div>
-                          <div className="h-1.5 rounded-full bg-slate-200">
-                            <div className="h-full w-[30%] rounded-full bg-pink-500" />
-                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            step={1}
+                            value={autotuneResponseMs}
+                            aria-label="Autotune 响应速度，毫秒"
+                            onChange={(event) => setAutotuneResponseMs(Number(event.target.value))}
+                            className="h-1.5 w-full cursor-pointer accent-sky-500"
+                          />
                           <div className="mt-1 flex justify-between text-[10px] text-slate-500">
                             <span>电音</span>
                             <span>柔和</span>
                           </div>
                         </div>
                         <div>
-                          <div className="mb-1 flex items-center justify-between text-xs text-slate-600">
+                          <div className="mb-1 flex items-center justify-between text-xs text-slate-600 dark:text-slate-300">
                             <span>发音自然度</span>
-                            <span>0%</span>
+                            <span>{autotuneNaturalness}%</span>
                           </div>
-                          <div className="h-1.5 rounded-full bg-slate-200">
-                            <div className="h-full w-0 rounded-full bg-pink-500" />
-                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            step={1}
+                            value={autotuneNaturalness}
+                            aria-label="Autotune 发音自然度"
+                            onChange={(event) => setAutotuneNaturalness(Number(event.target.value))}
+                            className="h-1.5 w-full cursor-pointer accent-sky-500"
+                          />
                           <div className="mt-1 flex justify-between text-[10px] text-slate-500">
                             <span>机械</span>
                             <span>自然</span>
                           </div>
                         </div>
                       </div>
+                      <button
+                        type="button"
+                        onClick={handleApplyAutotune}
+                        disabled={!canUseAutotune || Boolean(clipProcessing) || (autotuneEnabled && !autotuneSettingsChanged)}
+                        className="mt-4 w-full rounded-md bg-sky-500 px-3 py-2 text-xs font-medium text-white transition hover:bg-sky-600 disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 dark:disabled:bg-slate-700 dark:disabled:text-slate-400"
+                      >
+                        {clipProcessing?.label.startsWith('Autotune') ? '音准校正处理中…' : autotuneEnabled && !autotuneSettingsChanged ? '已应用到当前片段' : '应用到当前片段'}
+                      </button>
+                      {!canUseAutotune && <div className="mt-2 text-center text-[10px] text-slate-400">先选择人声轨或音频轨片段</div>}
+                      <div className="mt-2 text-[10px] leading-relaxed text-slate-400 dark:text-slate-500">和弦或完整混音会按主旋律整体校正，不会分别修正多个同时发声的音符。</div>
                     </div>
                     {/* 混响 */}
                     <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -3561,7 +3744,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
         <div
           role="dialog"
           aria-label="人声效果器"
-          className="fixed z-50 rounded-xl border border-slate-200 bg-white p-4 shadow-xl"
+          className="fixed z-50 rounded-xl border border-slate-200 bg-[var(--background)] p-4 text-[var(--foreground)] shadow-xl dark:border-slate-700"
           style={{
             bottom: `${window.innerHeight - slideUpPosition.top + 8}px`,
             left: `${vocalEffectPanelLeft}px`,
@@ -3569,7 +3752,7 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
           }}
         >
           <div className="mb-3 text-sm font-semibold text-slate-900">人声效果器</div>
-          <div className="mb-3 flex rounded-lg bg-slate-100 p-1">
+          <div className="mb-3 flex rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
             {VOCAL_EFFECT_TABS.map((tab) => (
               <button
                 key={tab.key}
@@ -3633,9 +3816,14 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
               <button
                 key={scale.key}
                 type="button"
-                onClick={() => setSelectedScale(scale.key as any)}
+                onClick={() => {
+                  const nextScale = scale.key as AutoTuneScale;
+                  setSelectedScale(nextScale);
+                  const root = selectedKeyRoot(selectedKey);
+                  setSelectedKey(`${root}${nextScale === 'major' ? '大调' : nextScale === 'minor' ? '小调' : ''}`);
+                }}
                 className={`flex-1 rounded-md py-1 text-xs font-medium transition ${
-                  selectedScale === scale.key ? 'bg-white shadow text-slate-900' : 'text-slate-500 hover:text-slate-700'
+                  selectedScale === scale.key ? 'bg-white shadow text-slate-900 dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200'
                 }`}
               >
                 {scale.label}
@@ -3652,9 +3840,9 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
                   setSlideUpPanel(null);
                 }}
                 className={`rounded-md border py-1.5 text-xs font-medium transition ${
-                  selectedKey.startsWith(note)
-                    ? 'border-sky-500 bg-sky-50 text-sky-700'
-                    : 'border-slate-300 text-slate-700 hover:border-slate-400'
+                  selectedKeyRoot(selectedKey) === note
+                    ? 'border-sky-500 bg-sky-50 text-sky-700 dark:border-sky-400 dark:bg-sky-500/15 dark:text-sky-200'
+                    : 'border-slate-300 text-slate-700 hover:border-slate-400 dark:border-slate-600 dark:text-slate-200 dark:hover:border-slate-500'
                 }`}
               >
                 {note}
@@ -3663,11 +3851,11 @@ export default function MusicEditorPage({ activeTab, onTabChange, onBack }: Musi
           </div>
           <button
             type="button"
-            className="mb-3 w-full rounded-md bg-slate-100 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-200"
+            className="mb-3 w-full rounded-md bg-slate-100 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
           >
             使用工程调式
           </button>
-          <div className="rounded-md border border-slate-300 bg-slate-50 px-3 py-1.5 text-xs text-slate-700">
+          <div className="rounded-md border border-slate-300 bg-slate-50 px-3 py-1.5 text-xs text-slate-700 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200">
             {selectedKey || 'D小调'}
           </div>
         </div>
