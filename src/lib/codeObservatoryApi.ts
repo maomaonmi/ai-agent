@@ -98,6 +98,53 @@ export interface CodeObservatoryDecisionView {
   source_gaps: string[];
 }
 
+export interface CodeObservatoryEvidenceView {
+  evidence_ref: string;
+  evidence_kind: string;
+  status: 'available' | 'missing' | 'stale' | 'retention_missing' | 'untrusted' | 'unavailable' | 'unknown' | 'reference_only';
+  storage_kind: 'runtime_action_journal' | 'artifact_store' | 'memory_observation' | 'reference_only';
+  source_ref?: CodeObservatorySourceRef | null;
+  source_role: string;
+  artifact_id?: string | null;
+  artifact_version?: string | null;
+  producer?: string | null;
+  relative_path?: string | null;
+  media_type?: 'text/plain' | 'application/json' | null;
+  content_hash?: string | null;
+  hash_scope?: string | null;
+  catalog_digest?: string | null;
+  obligation_refs: string[];
+  preview_kind?: 'runtime_read_result' | 'patch_metadata' | null;
+  preview_available: boolean;
+  source_gaps: string[];
+  versions: {
+    candidate_revision?: string | null;
+    verification_epoch?: number | null;
+    operation_version?: number | null;
+    rule_version?: string | null;
+    policy_digest?: string | null;
+  };
+  recorded_at_ms?: number | null;
+  retention_status: 'retained' | 'missing' | 'unknown' | 'not_applicable';
+}
+
+export interface CodeObservatoryEvidencePreview {
+  schema_version: 'code-observatory/v1';
+  run_id: string;
+  evidence_ref: string;
+  evidence_kind: string;
+  status: 'available';
+  storage_kind: string;
+  media_type: 'text/plain';
+  relative_path?: string | null;
+  content: string;
+  content_hash?: string | null;
+  hash_scope?: string | null;
+  artifact_version?: string | null;
+  versions: Record<string, unknown>;
+  truncated: boolean;
+}
+
 export type CodeObservatoryErrorCode =
   | 'NOT_FOUND'
   | 'FORBIDDEN'
@@ -106,6 +153,10 @@ export type CodeObservatoryErrorCode =
   | 'SOURCE_UNAVAILABLE'
   | 'PROJECTION_INCOMPLETE'
   | 'SCHEMA_UNSUPPORTED'
+  | 'EVIDENCE_NOT_FOUND'
+  | 'EVIDENCE_RETENTION_MISSING'
+  | 'EVIDENCE_PREVIEW_UNAVAILABLE'
+  | 'EVIDENCE_STALE'
   | 'REQUEST_FAILED';
 
 export class CodeObservatoryApiError extends Error {
@@ -127,6 +178,8 @@ export interface CodeObservatoryWireEvent {
   run_id?: string | null;
   event_category: string;
   event_type: string;
+  action_id?: string | null;
+  tool_name?: string | null;
   source_role: string;
   observation_offset: number;
   occurred_at_ms?: number | null;
@@ -166,6 +219,7 @@ export interface CodeObservatorySnapshot {
     };
     events: CodeObservatoryWireEvent[];
     decisions?: CodeObservatoryDecisionView[];
+    evidence?: CodeObservatoryEvidenceView[];
     spans?: CodeObservatorySpanView[];
     source_watermarks: CodeObservatorySourceWatermark[];
     has_more: boolean;
@@ -198,6 +252,10 @@ async function throwCodeObservatoryApiError(response: Response): Promise<never> 
       'SOURCE_UNAVAILABLE',
       'PROJECTION_INCOMPLETE',
       'SCHEMA_UNSUPPORTED',
+      'EVIDENCE_NOT_FOUND',
+      'EVIDENCE_RETENTION_MISSING',
+      'EVIDENCE_PREVIEW_UNAVAILABLE',
+      'EVIDENCE_STALE',
     ].includes(candidate)) {
       code = candidate as CodeObservatoryErrorCode;
     }
@@ -233,6 +291,20 @@ export async function getCodeObservatoryEvents(
   );
   if (!response.ok) await throwCodeObservatoryApiError(response);
   return response.json() as Promise<CodeObservatoryEventPage>;
+}
+
+/** Read a Run-scoped evidence preview from its exact persisted source receipt. */
+export async function getCodeObservatoryEvidencePreview(
+  runId: string,
+  evidenceRef: string,
+  signal?: AbortSignal,
+): Promise<CodeObservatoryEvidencePreview> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/code/observatory/runs/${encodeURIComponent(runId)}/evidence/${encodeURIComponent(evidenceRef)}`,
+    { headers: { Accept: 'application/json' }, cache: 'no-store', signal },
+  );
+  if (!response.ok) await throwCodeObservatoryApiError(response);
+  return response.json() as Promise<CodeObservatoryEvidencePreview>;
 }
 
 /** Open the read-only SSE endpoint from an opaque committed observation cursor. */

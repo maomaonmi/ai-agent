@@ -19,6 +19,7 @@ import { createCodeObservatoryState, reduceCodeObservatoryState } from '../Code/
 import { runCodeObservatoryStream } from '../Code/codeObservatoryStream';
 import type { CodeObservatoryConnection } from '../Code/codeObservatoryTypes';
 import { DecisionInspector } from './DecisionInspector';
+import { EvidenceInspector } from './EvidenceInspector';
 import type { CodeAgentRun } from '../lib/api';
 import { CodeObservatoryApiError, getCodeObservatorySnapshot, type CodeObservatoryErrorCode } from '../lib/codeObservatoryApi';
 
@@ -29,6 +30,18 @@ const DECISION_SOURCE_EVENT_TYPES = new Set([
   'stop_decision_recorded',
   'runtime_verification_result_committed',
 ]);
+const EVIDENCE_SOURCE_TOOL_NAMES = new Set([
+  'read_file',
+  'targeted_read',
+  'write_file',
+  'patch_file',
+  'patch_files',
+]);
+
+function requiresSnapshotRefresh(event: { event_type: string; tool_name?: string | null }): boolean {
+  return DECISION_SOURCE_EVENT_TYPES.has(event.event_type)
+    || (event.event_type === 'runtime_action_completed' && EVIDENCE_SOURCE_TOOL_NAMES.has(event.tool_name ?? ''));
+}
 
 type EventNode = Node<{ event: CodeObservatoryEvent }, 'observedEvent'>;
 
@@ -127,6 +140,10 @@ const API_ERROR_LABELS: Record<CodeObservatoryErrorCode, string> = {
   SOURCE_UNAVAILABLE: '源数据暂不可用。',
   PROJECTION_INCOMPLETE: '来源关联不完整，当前投影无法完整读取。',
   SCHEMA_UNSUPPORTED: '服务端观测版本暂不兼容。',
+  EVIDENCE_NOT_FOUND: '当前 Run 中没有这条证据引用。',
+  EVIDENCE_RETENTION_MISSING: '原始证据来源已清理，无法恢复预览。',
+  EVIDENCE_PREVIEW_UNAVAILABLE: '该引用没有可安全预览的持久正文。',
+  EVIDENCE_STALE: '证据属于旧候选版本，不能证明当前候选。',
   REQUEST_FAILED: '观测 API 请求失败。',
 };
 
@@ -261,7 +278,7 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
   );
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [inspectorTab, setInspectorTab] = useState<'events' | 'decisions'>('events');
+  const [inspectorTab, setInspectorTab] = useState<'events' | 'decisions' | 'evidence'>('events');
   const events = useMemo(
     () => projectCodeObservatoryFeedEvents(run.id, state.events, EVENT_LIMIT),
     [run.id, state.events],
@@ -289,13 +306,13 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
             onGap: (targetOffset) => dispatch({ type: 'gap_detected', targetOffset }),
             onCatchupPage: (page, requestedAfterOffset) => {
               dispatch({ type: 'catchup_page_received', page, requestedAfterOffset });
-              if (page.events.some((event) => DECISION_SOURCE_EVENT_TYPES.has(event.event_type))) {
+              if (page.events.some(requiresSnapshotRefresh)) {
                 setRefreshVersion((version) => version + 1);
               }
             },
             onObservation: (event, cursor) => {
               dispatch({ type: 'observation_received', event, cursor });
-              if (DECISION_SOURCE_EVENT_TYPES.has(event.event_type)) {
+              if (requiresSnapshotRefresh(event)) {
                 setRefreshVersion((version) => version + 1);
               }
             },
@@ -474,6 +491,13 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
                   onClick={() => setInspectorTab('decisions')}
                   className={`rounded-md px-2 py-1 text-[10px] font-medium ${inspectorTab === 'decisions' ? 'bg-white text-slate-800 shadow-sm dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 dark:text-slate-400'}`}
                 >决策检查 · {state.decisions.length}</button>
+                <button
+                  type="button"
+                  aria-pressed={inspectorTab === 'evidence'}
+                  aria-controls="code-observatory-inspector-panel"
+                  onClick={() => setInspectorTab('evidence')}
+                  className={`rounded-md px-2 py-1 text-[10px] font-medium ${inspectorTab === 'evidence' ? 'bg-white text-slate-800 shadow-sm dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 dark:text-slate-400'}`}
+                >证据检查 · {state.evidence.length}</button>
               </div>
               <span className="text-[10px] text-slate-400">{inspectorTab === 'events' ? `最近 ${EVENT_LIMIT} 条` : '只读 · 来源事实'}</span>
             </div>
@@ -484,6 +508,8 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
             >
               {inspectorTab === 'decisions' ? (
                 <DecisionInspector decisions={state.decisions} />
+              ) : inspectorTab === 'evidence' ? (
+                <EvidenceInspector key={run.id} runId={run.id} evidence={state.evidence} />
               ) : eventPanelContent}
             </div>
           </section>

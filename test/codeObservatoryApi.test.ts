@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   CodeObservatoryApiError,
+  getCodeObservatoryEvidencePreview,
   getCodeObservatoryEvents,
   getCodeObservatorySnapshot,
   openCodeObservatoryStream,
@@ -54,6 +55,31 @@ test('event page API carries the stable cursor and bounded page size', async () 
     assert.equal(url.pathname, '/api/code/observatory/runs/run-observe/events');
     assert.equal(url.searchParams.get('cursor'), 'opaque cursor');
     assert.equal(url.searchParams.get('limit'), '24');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('evidence preview API is scoped to an encoded Run and evidence reference', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = '';
+  let requestedInit: RequestInit | undefined;
+  globalThis.fetch = async (input, init) => {
+    requestedUrl = String(input);
+    requestedInit = init;
+    return new Response(JSON.stringify({ content: 'plain text' }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const preview = await getCodeObservatoryEvidencePreview('run/evidence', 'ev:read-1');
+    assert.equal(preview.content, 'plain text');
+    const url = new URL(requestedUrl);
+    assert.equal(url.pathname, '/api/code/observatory/runs/run%2Fevidence/evidence/ev%3Aread-1');
+    assert.equal(requestedInit?.cache, 'no-store');
+    assert.equal(new Headers(requestedInit?.headers).get('accept'), 'application/json');
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -125,6 +151,30 @@ test('observatory API errors preserve only the structured safe error code', asyn
         assert.ok(error instanceof CodeObservatoryApiError);
         assert.equal(error.code, 'SOURCE_UNAVAILABLE');
         assert.doesNotMatch(error.message, /private_path/);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('evidence preview API preserves retention status without exposing upstream details', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    detail: { code: 'EVIDENCE_RETENTION_MISSING', local_path: 'C:/private/file.py' },
+  }), {
+    status: 410,
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  try {
+    await assert.rejects(
+      getCodeObservatoryEvidencePreview('run-observe', 'ev-gone'),
+      (error: unknown) => {
+        assert.ok(error instanceof CodeObservatoryApiError);
+        assert.equal(error.code, 'EVIDENCE_RETENTION_MISSING');
+        assert.doesNotMatch(error.message, /local_path/);
         return true;
       },
     );

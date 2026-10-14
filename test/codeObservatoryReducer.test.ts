@@ -7,6 +7,7 @@ import {
 } from '../src/Code/codeObservatoryReducer.ts';
 import type {
   CodeObservatoryDecisionView,
+  CodeObservatoryEvidenceView,
   CodeObservatoryEventPage,
   CodeObservatorySnapshot,
   CodeObservatoryWireEvent,
@@ -139,6 +140,38 @@ test('snapshot preserves backend decision views and accepts older snapshots with
       snapshot: withDecision,
     }).decisions,
     [decision],
+  );
+});
+
+test('snapshot preserves evidence views and old snapshots default to no evidence', () => {
+  const evidence: CodeObservatoryEvidenceView = {
+    evidence_ref: 'ev-read-1',
+    evidence_kind: 'source_read',
+    status: 'available',
+    storage_kind: 'runtime_action_journal',
+    source_ref: { stream_key: 'code_operation_action:op-1', event_key: 'action-read-1' },
+    source_role: 'runtime_committed',
+    artifact_version: 'sha256:file-revision',
+    producer: 'read_file',
+    relative_path: 'src/example.py',
+    media_type: 'text/plain',
+    obligation_refs: [],
+    preview_kind: 'runtime_read_result',
+    preview_available: true,
+    source_gaps: [],
+    versions: { candidate_revision: 'sha256:candidate-1' },
+    retention_status: 'retained',
+  };
+  const withEvidence = snapshot(1);
+  withEvidence.feed.evidence = [evidence];
+
+  assert.deepEqual(loadedState(1).evidence, []);
+  assert.deepEqual(
+    reduceCodeObservatoryState(createCodeObservatoryState(RUN_ID), {
+      type: 'snapshot_received',
+      snapshot: withEvidence,
+    }).evidence,
+    [evidence],
   );
 });
 

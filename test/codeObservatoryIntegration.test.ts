@@ -9,6 +9,8 @@ const workspaceSource = readFileSync(resolve(testDirectory, '../src/components/C
 const panelSource = readFileSync(resolve(testDirectory, '../src/components/CodeObservatoryPanel.tsx'), 'utf8');
 const decisionInspectorSource = readFileSync(resolve(testDirectory, '../src/components/DecisionInspector.tsx'), 'utf8');
 const decisionViewSource = readFileSync(resolve(testDirectory, '../src/Code/decisionView.ts'), 'utf8');
+const evidenceInspectorSource = readFileSync(resolve(testDirectory, '../src/components/EvidenceInspector.tsx'), 'utf8');
+const evidenceViewSource = readFileSync(resolve(testDirectory, '../src/Code/evidenceView.ts'), 'utf8');
 const apiSource = readFileSync(resolve(testDirectory, '../src/lib/codeObservatoryApi.ts'), 'utf8');
 const reducerSource = readFileSync(resolve(testDirectory, '../src/Code/codeObservatoryReducer.ts'), 'utf8');
 const streamSource = readFileSync(resolve(testDirectory, '../src/Code/codeObservatoryStream.ts'), 'utf8');
@@ -59,4 +61,15 @@ test('shows source-backed decisions and makes missing history explicit', () => {
   assert.match(decisionViewSource, /inconclusive: '验证不确定'/);
   assert.match(decisionViewSource, /invalid_test: '测试无效'/);
   assert.match(decisionViewSource, /infra_failure: '基础设施失败'/);
+});
+
+test('shows evidence retention and candidate gaps with an escaped text-only preview', () => {
+  assert.match(panelSource, /证据检查 · \{state\.evidence\.length\}/);
+  assert.match(panelSource, /<EvidenceInspector key=\{run\.id\} runId=\{run\.id\} evidence=\{state\.evidence\} \/>/);
+  assert.match(evidenceInspectorSource, /getCodeObservatoryEvidencePreview\(/);
+  assert.match(evidenceInspectorSource, /<pre[\s\S]*?>\s*\{preview\.preview\.content\}\s*<\/pre>/);
+  assert.doesNotMatch(evidenceInspectorSource, /dangerouslySetInnerHTML|window\.open|location\.href/);
+  assert.match(evidenceInspectorSource, /evidencePreviewErrorLabel\(code\)/);
+  assert.match(evidenceViewSource, /candidate_revision_mismatch: '证据绑定到了其他候选版本'/);
+  assert.match(evidenceViewSource, /persistent_artifact_binding_not_recorded/);
 });

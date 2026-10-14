@@ -1,5 +1,6 @@
 import type {
   CodeObservatoryDecisionView,
+  CodeObservatoryEvidenceView,
   CodeObservatoryErrorCode,
   CodeObservatoryEventPage,
   CodeObservatorySnapshot,
@@ -28,6 +29,7 @@ export interface CodeObservatoryState {
   cursor: string | null;
   events: CodeObservatoryWireEvent[];
   decisions: CodeObservatoryDecisionView[];
+  evidence: CodeObservatoryEvidenceView[];
   status: CodeObservatoryStatusAxes | null;
   sourceWatermarks: CodeObservatorySourceWatermark[];
   connection: CodeObservatoryConnection;

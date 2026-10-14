@@ -21,6 +21,7 @@ export function createCodeObservatoryState(aggregateId: string): CodeObservatory
     cursor: null,
     events: [],
     decisions: [],
+    evidence: [],
     status: null,
     sourceWatermarks: [],
     connection: 'idle',
@@ -93,6 +94,7 @@ function validateSnapshot(
     || !isStatusAxes(snapshot.feed.status)
     || !Array.isArray(snapshot.feed.events)
     || (snapshot.feed.decisions !== undefined && !Array.isArray(snapshot.feed.decisions))
+    || (snapshot.feed.evidence !== undefined && !Array.isArray(snapshot.feed.evidence))
     || !Array.isArray(snapshot.feed.source_watermarks)
   ) return 'PROJECTION_INCOMPLETE';
 
@@ -144,6 +146,7 @@ function receiveSnapshot(
     cursor: snapshot.cursor,
     events: events.slice(-MAX_CODE_OBSERVATORY_EVENTS),
     decisions: snapshot.feed.decisions ?? [],
+    evidence: snapshot.feed.evidence ?? [],
     status: snapshot.feed.status,
     sourceWatermarks: snapshot.feed.source_watermarks,
     connection: 'connecting',
