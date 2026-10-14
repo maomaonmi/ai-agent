@@ -57,6 +57,8 @@ export interface CodeObservatorySourceWatermark {
 export interface CodeObservatorySnapshot {
   schema_version: 'code-observatory/v1';
   projection_version: number;
+  head_offset: number;
+  retention_floor_offset: number;
   cursor: string;
   feed: {
     schema_version: 'code-observatory/v1';
@@ -66,7 +68,9 @@ export interface CodeObservatorySnapshot {
     cursor: {
       aggregate_kind: 'run';
       aggregate_id: string;
+      projection_version: number;
       observation_offset: number;
+      retention_floor_offset: number;
     };
     events: CodeObservatoryWireEvent[];
     source_watermarks: CodeObservatorySourceWatermark[];
@@ -79,6 +83,8 @@ export interface CodeObservatoryEventPage {
   projection_version: number;
   aggregate_kind: 'run';
   aggregate_id: string;
+  head_offset: number;
+  retention_floor_offset: number;
   events: CodeObservatoryWireEvent[];
   source_watermarks: CodeObservatorySourceWatermark[];
   next_cursor: string;
