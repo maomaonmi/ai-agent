@@ -418,6 +418,68 @@ export interface CodeObservatoryOperationSnapshot {
   };
 }
 
+export interface CodeRequirementGraphNode {
+  node_id: string;
+  kind: 'obligation' | 'clause' | 'proof_requirement' | 'check' | 'evidence' | 'verdict' | 'delivery';
+  entity_id: string;
+  status?: string | null;
+  current?: boolean | null;
+  evidence_status?: CodeObservatoryEvidenceView['status'] | null;
+  artifact_version?: string | null;
+  reason_code?: string | null;
+  source_ref?: CodeObservatorySourceRef | null;
+}
+
+export interface CodeRequirementGraphEdge {
+  edge_id: string;
+  from_node: string;
+  to_node: string;
+  kind:
+    | 'obligation_clause'
+    | 'clause_proof_requirement'
+    | 'proof_requirement_check'
+    | 'clause_evidence'
+    | 'check_evidence'
+    | 'clause_verdict'
+    | 'obligation_delivery';
+  source_kind: 'goal_event' | 'acceptance_projection' | 'runtime_plan' | 'clause_result' | 'observation_feed';
+  current?: boolean | null;
+  source_ref?: CodeObservatorySourceRef | null;
+}
+
+export interface CodeRequirementGraphCoverage {
+  metric:
+    | 'implementation'
+    | 'acceptance'
+    | 'evidence_association'
+    | 'materialized_evidence'
+    | 'proof_check_binding'
+    | 'delivery';
+  numerator: number;
+  denominator: number;
+  status: 'available' | 'not_applicable' | 'incomplete';
+}
+
+export interface CodeRequirementEvidenceGraph {
+  schema_version: 'code-observatory/v1';
+  graph_version: 1;
+  operation_id: string;
+  operation_version: number;
+  source_status: 'current' | 'incomplete' | 'unavailable';
+  goal_id?: string | null;
+  goal_set_revision?: number | null;
+  ledger_revision?: number | null;
+  verification_epoch?: number | null;
+  candidate_revision?: string | null;
+  goal_stream_sequence?: number | null;
+  acceptance_projection_revision?: number | null;
+  runtime_plan_status: 'current' | 'missing' | 'stale';
+  source_gaps: string[];
+  nodes: CodeRequirementGraphNode[];
+  edges: CodeRequirementGraphEdge[];
+  coverage: CodeRequirementGraphCoverage[];
+}
+
 export interface CodeObservatoryEventPage {
   schema_version: 'code-observatory/v1';
   projection_version: number;
@@ -493,6 +555,19 @@ export async function getCodeObservatoryOperationSnapshot(
   );
   if (!response.ok) await throwCodeObservatoryApiError(response);
   return response.json() as Promise<CodeObservatoryOperationSnapshot>;
+}
+
+/** Read the revision-bound obligation-to-evidence graph for one Operation. */
+export async function getCodeRequirementEvidenceGraph(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<CodeRequirementEvidenceGraph> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/code/observatory/operations/${encodeURIComponent(operationId)}/requirements`,
+    { headers: { Accept: 'application/json' }, cache: 'no-store', signal },
+  );
+  if (!response.ok) await throwCodeObservatoryApiError(response);
+  return response.json() as Promise<CodeRequirementEvidenceGraph>;
 }
 
 /** Read one bounded page from the same immutable observation-offset stream. */

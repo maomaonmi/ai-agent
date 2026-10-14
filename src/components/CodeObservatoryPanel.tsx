@@ -29,6 +29,7 @@ import type { CodeObservatoryConnection } from '../Code/codeObservatoryTypes';
 import { DecisionInspector } from './DecisionInspector';
 import { ControlTopology } from './ControlTopology';
 import { ExecutionGraph } from './ExecutionGraph';
+import { RequirementEvidenceGraph } from './RequirementEvidenceGraph';
 import { EvidenceInspector } from './EvidenceInspector';
 import { OperationRelationsInspector } from './OperationRelationsInspector';
 import type { CodeAgentRun } from '../lib/api';
@@ -413,7 +414,7 @@ function CodeObservatoryPanel({
   );
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [graphView, setGraphView] = useState<'timeline' | 'execution' | 'control'>('timeline');
+  const [graphView, setGraphView] = useState<'timeline' | 'execution' | 'control' | 'requirements'>('timeline');
   const [inspectorTab, setInspectorTab] = useState<'events' | 'decisions' | 'evidence' | 'operation'>('events');
   const events = useMemo(
     () => projectCodeObservatoryFeedEvents(run.id, state.events, EVENT_LIMIT),
@@ -638,6 +639,12 @@ function CodeObservatoryPanel({
                   aria-pressed
                   className="rounded-md bg-white px-2.5 py-1.5 text-[10px] font-medium text-slate-800 shadow-sm dark:bg-slate-700 dark:text-slate-100"
                 >控制规则图</button>
+                <button
+                  type="button"
+                  aria-pressed="false"
+                  onClick={() => setGraphView('requirements')}
+                  className="rounded-md px-2.5 py-1.5 text-[10px] font-medium text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:text-slate-400 dark:hover:text-slate-100"
+                >需求关系图</button>
               </div>
               <span className="text-right text-[10px] text-slate-400">静态规则参考 · 不代表 Run 实际执行路径</span>
             </div>
@@ -666,6 +673,12 @@ function CodeObservatoryPanel({
                   onClick={() => setGraphView('control')}
                   className="rounded-md px-2.5 py-1.5 text-[10px] font-medium text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:text-slate-400 dark:hover:text-slate-100"
                 >控制规则图</button>
+                <button
+                  type="button"
+                  aria-pressed="false"
+                  onClick={() => setGraphView('requirements')}
+                  className="rounded-md px-2.5 py-1.5 text-[10px] font-medium text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:text-slate-400 dark:hover:text-slate-100"
+                >需求关系图</button>
               </div>
               <span className="text-right text-[10px] text-slate-400">只显示持久节点与明确因果；不按时间顺序推断关系</span>
             </div>
@@ -680,6 +693,40 @@ function CodeObservatoryPanel({
                 evidence={state.evidence}
                 observationStatus={observationStatus}
               />
+            </div>
+          </div>
+        ) : graphView === 'requirements' ? (
+          <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
+            <div className="flex shrink-0 items-center justify-between gap-3">
+              <div role="group" aria-label="链路图类型" className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+                <button
+                  type="button"
+                  aria-pressed="false"
+                  onClick={() => setGraphView('timeline')}
+                  className="rounded-md px-2.5 py-1.5 text-[10px] font-medium text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:text-slate-400 dark:hover:text-slate-100"
+                >事件时序</button>
+                <button
+                  type="button"
+                  aria-pressed="false"
+                  onClick={() => setGraphView('execution')}
+                  className="rounded-md px-2.5 py-1.5 text-[10px] font-medium text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:text-slate-400 dark:hover:text-slate-100"
+                >实际执行图</button>
+                <button
+                  type="button"
+                  aria-pressed="false"
+                  onClick={() => setGraphView('control')}
+                  className="rounded-md px-2.5 py-1.5 text-[10px] font-medium text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:text-slate-400 dark:hover:text-slate-100"
+                >控制规则图</button>
+                <button
+                  type="button"
+                  aria-pressed
+                  className="rounded-md bg-white px-2.5 py-1.5 text-[10px] font-medium text-slate-800 shadow-sm dark:bg-slate-700 dark:text-slate-100"
+                >需求关系图</button>
+              </div>
+              <span className="text-right text-[10px] text-slate-400">只连接持久 ID 与当前版本证据；缺失关系明确显示</span>
+            </div>
+            <div className="min-h-0 flex-1">
+              <RequirementEvidenceGraph operationId={operationId} refreshKey={refreshVersion} />
             </div>
           </div>
         ) : (
@@ -705,6 +752,12 @@ function CodeObservatoryPanel({
                   onClick={() => setGraphView('control')}
                   className="rounded-md px-2.5 py-1.5 text-[10px] font-medium text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:text-slate-400 dark:hover:text-slate-100"
                 >控制规则图</button>
+                <button
+                  type="button"
+                  aria-pressed="false"
+                  onClick={() => setGraphView('requirements')}
+                  className="rounded-md px-2.5 py-1.5 text-[10px] font-medium text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:text-slate-400 dark:hover:text-slate-100"
+                >需求关系图</button>
               </div>
               <span className="text-right text-[10px] text-slate-400">按后端序号排列；箭头只表示先后</span>
             </div>
