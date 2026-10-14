@@ -11,12 +11,15 @@ import {
   type NodeProps,
 } from '@xyflow/react';
 import { Activity, AlertCircle, Clock3, Maximize2, Minimize2, RefreshCw, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useState } from 'react';
 import '@xyflow/react/dist/style.css';
 
 import { projectCodeObservatoryFeedEvents, type CodeObservatoryEvent, type CodeObservatoryStatus } from '../Code/codeObservatoryProjection';
+import { createCodeObservatoryState, reduceCodeObservatoryState } from '../Code/codeObservatoryReducer';
+import { runCodeObservatoryStream } from '../Code/codeObservatoryStream';
+import type { CodeObservatoryConnection } from '../Code/codeObservatoryTypes';
 import type { CodeAgentRun } from '../lib/api';
-import { CodeObservatoryApiError, getCodeObservatorySnapshot, type CodeObservatoryErrorCode, type CodeObservatorySnapshot } from '../lib/codeObservatoryApi';
+import { CodeObservatoryApiError, getCodeObservatorySnapshot, type CodeObservatoryErrorCode } from '../lib/codeObservatoryApi';
 
 const EVENT_LIMIT = 24;
 const GRAPH_EVENT_LIMIT = 6;
@@ -87,6 +90,17 @@ const OBSERVATION_STATUS_LABELS: Record<string, string> = {
   lagging: '滞后',
   incomplete: '不完整',
   unavailable: '不可用',
+};
+
+const CONNECTION_LABELS: Record<CodeObservatoryConnection, string> = {
+  idle: '未连接',
+  loading: '读取快照',
+  connecting: '连接中',
+  live: '实时同步',
+  reconnecting: '正在重连',
+  catching_up: '补齐事件',
+  closed: '已关闭',
+  error: '连接异常',
 };
 
 const SOURCE_ROLE_LABELS: Record<string, string> = {
@@ -234,57 +248,74 @@ export function CodeObservatoryLauncher({ run }: { run?: CodeAgentRun }) {
 }
 
 function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: () => void }) {
-  const [snapshot, setSnapshot] = useState<CodeObservatorySnapshot | null>(null);
-  const [readState, setReadState] = useState<'loading' | 'ready' | 'error'>('loading');
-  const [readErrorCode, setReadErrorCode] = useState<CodeObservatoryErrorCode | null>(null);
+  const [state, dispatch] = useReducer(
+    reduceCodeObservatoryState,
+    run.id,
+    createCodeObservatoryState,
+  );
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const events = useMemo(
-    () => snapshot
-      ? projectCodeObservatoryFeedEvents(run.id, snapshot.feed.events, EVENT_LIMIT)
-      : [],
-    [run.id, snapshot],
+    () => projectCodeObservatoryFeedEvents(run.id, state.events, EVENT_LIMIT),
+    [run.id, state.events],
   );
-  const lastSequence = snapshot?.feed.cursor.observation_offset ?? 0;
-  const isRunActive = run.trace.isRunning;
-  const executionStatus = snapshot?.feed.status.execution ?? 'unknown';
-  const verificationStatus = snapshot?.feed.status.verification ?? 'unknown';
-  const observationStatus = snapshot?.feed.status.observation ?? 'incomplete';
+  const lastSequence = state.observationOffset;
+  const executionStatus = state.status?.execution ?? 'unknown';
+  const verificationStatus = state.status?.verification ?? 'unknown';
+  const observationStatus = state.status?.observation ?? 'incomplete';
 
   useEffect(() => {
     const controller = new AbortController();
-    let active = true;
-    let requestInFlight = false;
-    setReadState('loading');
-    const poll = async () => {
-      if (requestInFlight || controller.signal.aborted) return;
-      requestInFlight = true;
+    dispatch({ type: 'snapshot_loading' });
+    const connect = async () => {
       try {
-        const nextSnapshot = await getCodeObservatorySnapshot(run.id, controller.signal);
-        if (!active) return;
-        setSnapshot(nextSnapshot);
-        setReadErrorCode(null);
-        setReadState('ready');
+        const snapshot = await getCodeObservatorySnapshot(run.id, controller.signal);
+        if (controller.signal.aborted) return;
+        dispatch({ type: 'snapshot_received', snapshot });
+        await runCodeObservatoryStream(
+          run.id,
+          snapshot.projection_version,
+          snapshot.cursor,
+          snapshot.head_offset,
+          {
+            onConnection: (connection) => dispatch({ type: 'connection_changed', connection }),
+            onGap: (targetOffset) => dispatch({ type: 'gap_detected', targetOffset }),
+            onCatchupPage: (page, requestedAfterOffset) => {
+              dispatch({ type: 'catchup_page_received', page, requestedAfterOffset });
+            },
+            onObservation: (event, cursor) => dispatch({ type: 'observation_received', event, cursor }),
+            onHeartbeat: (heartbeat) => dispatch({ type: 'heartbeat_received', heartbeat }),
+            onError: (code) => dispatch({ type: 'stream_error', code }),
+            onResyncRequired: (code) => {
+              if (code === 'CURSOR_EXPIRED' || code === 'CURSOR_INVALID') {
+                setRefreshVersion((version) => version + 1);
+              }
+            },
+          },
+          controller.signal,
+        );
       } catch (error) {
-        if (active && !controller.signal.aborted) {
-          setReadErrorCode(error instanceof CodeObservatoryApiError ? error.code : 'REQUEST_FAILED');
-          setReadState('error');
+        if (!controller.signal.aborted) {
+          dispatch({
+            type: 'snapshot_error',
+            code: error instanceof CodeObservatoryApiError ? error.code : 'REQUEST_FAILED',
+          });
         }
-      } finally {
-        requestInFlight = false;
       }
     };
 
-    void poll();
-    const timer = isRunActive ? window.setInterval(() => void poll(), 1800) : undefined;
+    void connect();
     return () => {
-      active = false;
       controller.abort();
-      if (timer !== undefined) window.clearInterval(timer);
     };
-  }, [isRunActive, refreshVersion, run.id]);
+  }, [refreshVersion, run.id]);
 
   const latestEvents = useMemo(() => [...events].reverse(), [events]);
+  const connectionMessage = state.connectionError
+    ? API_ERROR_LABELS[state.connectionError]
+    : state.gapTargetOffset !== null
+      ? `正在补齐观测序号 ${state.observationOffset + 1}–${state.gapTargetOffset}`
+      : CONNECTION_LABELS[state.connection];
 
   return (
     <div className={isFullscreen
@@ -352,19 +383,19 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
         <div className="grid shrink-0 grid-cols-2 gap-3 border-b border-slate-200 p-4 sm:grid-cols-3 dark:border-slate-700">
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-800/70">
             <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-400">
-              <Clock3 size={12} aria-hidden="true" /> 持久事件
+              <Clock3 size={12} aria-hidden="true" /> 显示事件
             </div>
             <div className="mt-1 text-lg font-semibold tabular-nums text-slate-800 dark:text-slate-100">{events.length}</div>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-800/70">
-            <div className="text-[10px] font-medium uppercase tracking-wide text-slate-400">最新观测游标</div>
+            <div className="text-[10px] font-medium uppercase tracking-wide text-slate-400">最新观测序号</div>
             <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-800 dark:text-slate-100">{lastSequence || '—'}</div>
           </div>
           <div className="col-span-2 grid grid-cols-2 gap-x-3 gap-y-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-[10px] text-slate-600 sm:col-span-1 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-300">
             <span>验证 · {VERIFICATION_STATUS_LABELS[verificationStatus] ?? '未知'}</span>
             <span>观测 · {OBSERVATION_STATUS_LABELS[observationStatus] ?? '未知'}</span>
-            <span className="col-span-2 text-slate-400">
-              {isRunActive ? '每 1.8 秒读取后端投影' : '历史 Run · 只读快照'}
+            <span className="col-span-2 text-slate-400" aria-live="polite">
+              连接 · {CONNECTION_LABELS[state.connection]}
             </span>
           </div>
         </div>
@@ -386,17 +417,17 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
               <span className="text-[10px] text-slate-400">显示最近 {EVENT_LIMIT} 条</span>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-700">
-              {readState === 'loading' && events.length === 0 ? (
+              {(state.connection === 'loading' || state.connection === 'idle') && events.length === 0 ? (
                 <div className="flex h-full items-center justify-center text-xs text-slate-400">正在读取持久事件…</div>
-              ) : readState === 'error' && events.length === 0 ? (
+              ) : state.connection === 'error' && events.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-xs text-slate-500">
                   <AlertCircle size={18} className="text-amber-500" aria-hidden="true" />
-                  {API_ERROR_LABELS[readErrorCode ?? 'REQUEST_FAILED']} 服务恢复后可点击刷新重试。
+                  {API_ERROR_LABELS[state.connectionError ?? 'REQUEST_FAILED']} 可点击重新同步。
                 </div>
               ) : latestEvents.length === 0 ? (
                 <div className="flex h-full items-center justify-center px-4 text-center text-xs text-slate-400">
-                  {readState === 'error'
-                    ? `${API_ERROR_LABELS[readErrorCode ?? 'REQUEST_FAILED']} 请刷新重试。`
+                  {state.connection === 'error'
+                    ? `${API_ERROR_LABELS[state.connectionError ?? 'REQUEST_FAILED']} 请重新同步。`
                     : '后端尚无可用持久事件；面板不会用前端状态推测结果。'}
                 </div>
               ) : (
@@ -421,9 +452,14 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
           </section>
         </div>
         <footer aria-live="polite" className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-200 px-5 py-2.5 text-[10px] text-slate-400 dark:border-slate-700">
-          <span>{readState === 'error'
-            ? (snapshot ? '读取失败，保留上一份可信快照' : '读取失败')
-            : readState === 'loading' ? '正在读取后端投影' : '已与后端观测投影同步'}</span>
+          <span>{state.connection === 'error'
+            ? `${API_ERROR_LABELS[state.connectionError ?? 'REQUEST_FAILED']}${state.events.length > 0 ? '，保留当前可信数据' : '，请重新同步'}`
+            : state.connection === 'loading' ? '正在读取后端投影'
+              : state.connection === 'catching_up' ? connectionMessage
+                : state.connection === 'reconnecting' ? '连接中断，正在自动重连；已保留当前数据'
+                  : state.connection === 'connecting' ? '正在连接后端事件流'
+                    : state.connection === 'live' ? '已连接，正在接收后端观测事件'
+                      : '等待后端观测投影'}</span>
           <span>run_id · projection_version · observation_offset</span>
         </footer>
       </aside>

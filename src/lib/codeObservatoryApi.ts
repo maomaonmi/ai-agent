@@ -140,3 +140,25 @@ export async function getCodeObservatoryEvents(
   if (!response.ok) await throwCodeObservatoryApiError(response);
   return response.json() as Promise<CodeObservatoryEventPage>;
 }
+
+/** Open the read-only SSE endpoint from an opaque committed observation cursor. */
+export async function openCodeObservatoryStream(
+  runId: string,
+  cursor: string,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const query = new URLSearchParams({ cursor });
+  const response = await fetch(
+    `${API_BASE_URL}/api/code/observatory/runs/${encodeURIComponent(runId)}/stream?${query.toString()}`,
+    {
+      headers: { Accept: 'text/event-stream' },
+      cache: 'no-store',
+      signal,
+    },
+  );
+  if (!response.ok) await throwCodeObservatoryApiError(response);
+  if (!response.body || !response.headers.get('content-type')?.includes('text/event-stream')) {
+    throw new CodeObservatoryApiError('PROJECTION_INCOMPLETE');
+  }
+  return response;
+}

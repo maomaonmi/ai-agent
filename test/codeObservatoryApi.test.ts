@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { CodeObservatoryApiError, getCodeObservatoryEvents, getCodeObservatorySnapshot } from '../src/lib/codeObservatoryApi.ts';
+import {
+  CodeObservatoryApiError,
+  getCodeObservatoryEvents,
+  getCodeObservatorySnapshot,
+  openCodeObservatoryStream,
+} from '../src/lib/codeObservatoryApi.ts';
 
 test('snapshot API is a cache-free GET scoped to the encoded Run identity', async () => {
   const originalFetch = globalThis.fetch;
@@ -49,6 +54,56 @@ test('event page API carries the stable cursor and bounded page size', async () 
     assert.equal(url.pathname, '/api/code/observatory/runs/run-observe/events');
     assert.equal(url.searchParams.get('cursor'), 'opaque cursor');
     assert.equal(url.searchParams.get('limit'), '24');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('stream API resumes through the opaque query cursor with a read-only SSE request', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = '';
+  let requestedInit: RequestInit | undefined;
+  globalThis.fetch = async (input, init) => {
+    requestedUrl = String(input);
+    requestedInit = init;
+    return new Response(new ReadableStream<Uint8Array>({ start() {} }), {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    });
+  };
+
+  try {
+    const response = await openCodeObservatoryStream('run/observe', 'opaque cursor');
+    const url = new URL(requestedUrl);
+    assert.equal(response.status, 200);
+    assert.equal(url.pathname, '/api/code/observatory/runs/run%2Fobserve/stream');
+    assert.equal(url.searchParams.get('cursor'), 'opaque cursor');
+    assert.equal(new Headers(requestedInit?.headers).get('accept'), 'text/event-stream');
+    assert.equal(requestedInit?.cache, 'no-store');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('stream API preserves the safe expired-cursor code from preflight responses', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    detail: { code: 'CURSOR_EXPIRED', private_path: 'must not be surfaced' },
+  }), {
+    status: 410,
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  try {
+    await assert.rejects(
+      openCodeObservatoryStream('run-observe', 'expired-cursor'),
+      (error: unknown) => {
+        assert.ok(error instanceof CodeObservatoryApiError);
+        assert.equal(error.code, 'CURSOR_EXPIRED');
+        assert.doesNotMatch(error.message, /private_path/);
+        return true;
+      },
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
