@@ -20,6 +20,7 @@ export function createCodeObservatoryState(aggregateId: string): CodeObservatory
     retentionFloorOffset: 0,
     cursor: null,
     events: [],
+    decisions: [],
     status: null,
     sourceWatermarks: [],
     connection: 'idle',
@@ -91,6 +92,7 @@ function validateSnapshot(
     || !isCursor(snapshot.cursor)
     || !isStatusAxes(snapshot.feed.status)
     || !Array.isArray(snapshot.feed.events)
+    || (snapshot.feed.decisions !== undefined && !Array.isArray(snapshot.feed.decisions))
     || !Array.isArray(snapshot.feed.source_watermarks)
   ) return 'PROJECTION_INCOMPLETE';
 
@@ -141,6 +143,7 @@ function receiveSnapshot(
     retentionFloorOffset: snapshot.retention_floor_offset,
     cursor: snapshot.cursor,
     events: events.slice(-MAX_CODE_OBSERVATORY_EVENTS),
+    decisions: snapshot.feed.decisions ?? [],
     status: snapshot.feed.status,
     sourceWatermarks: snapshot.feed.source_watermarks,
     connection: 'connecting',

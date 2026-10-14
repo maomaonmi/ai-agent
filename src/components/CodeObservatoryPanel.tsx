@@ -18,11 +18,17 @@ import { projectCodeObservatoryFeedEvents, type CodeObservatoryEvent, type CodeO
 import { createCodeObservatoryState, reduceCodeObservatoryState } from '../Code/codeObservatoryReducer';
 import { runCodeObservatoryStream } from '../Code/codeObservatoryStream';
 import type { CodeObservatoryConnection } from '../Code/codeObservatoryTypes';
+import { DecisionInspector } from './DecisionInspector';
 import type { CodeAgentRun } from '../lib/api';
 import { CodeObservatoryApiError, getCodeObservatorySnapshot, type CodeObservatoryErrorCode } from '../lib/codeObservatoryApi';
 
 const EVENT_LIMIT = 24;
 const GRAPH_EVENT_LIMIT = 6;
+const DECISION_SOURCE_EVENT_TYPES = new Set([
+  'control_plane_transition_batch',
+  'stop_decision_recorded',
+  'runtime_verification_result_committed',
+]);
 
 type EventNode = Node<{ event: CodeObservatoryEvent }, 'observedEvent'>;
 
@@ -255,6 +261,7 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
   );
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [inspectorTab, setInspectorTab] = useState<'events' | 'decisions'>('events');
   const events = useMemo(
     () => projectCodeObservatoryFeedEvents(run.id, state.events, EVENT_LIMIT),
     [run.id, state.events],
@@ -282,8 +289,16 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
             onGap: (targetOffset) => dispatch({ type: 'gap_detected', targetOffset }),
             onCatchupPage: (page, requestedAfterOffset) => {
               dispatch({ type: 'catchup_page_received', page, requestedAfterOffset });
+              if (page.events.some((event) => DECISION_SOURCE_EVENT_TYPES.has(event.event_type))) {
+                setRefreshVersion((version) => version + 1);
+              }
             },
-            onObservation: (event, cursor) => dispatch({ type: 'observation_received', event, cursor }),
+            onObservation: (event, cursor) => {
+              dispatch({ type: 'observation_received', event, cursor });
+              if (DECISION_SOURCE_EVENT_TYPES.has(event.event_type)) {
+                setRefreshVersion((version) => version + 1);
+              }
+            },
             onHeartbeat: (heartbeat) => dispatch({ type: 'heartbeat_received', heartbeat }),
             onError: (code) => dispatch({ type: 'stream_error', code }),
             onResyncRequired: (code) => {
@@ -316,6 +331,37 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
     : state.gapTargetOffset !== null
       ? `正在补齐观测序号 ${state.observationOffset + 1}–${state.gapTargetOffset}`
       : CONNECTION_LABELS[state.connection];
+  const eventPanelContent = (state.connection === 'loading' || state.connection === 'idle') && events.length === 0 ? (
+    <div className="flex h-full items-center justify-center text-xs text-slate-400">正在读取持久事件…</div>
+  ) : state.connection === 'error' && events.length === 0 ? (
+    <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-xs text-slate-500">
+      <AlertCircle size={18} className="text-amber-500" aria-hidden="true" />
+      {API_ERROR_LABELS[state.connectionError ?? 'REQUEST_FAILED']} 可点击重新同步。
+    </div>
+  ) : latestEvents.length === 0 ? (
+    <div className="flex h-full items-center justify-center px-4 text-center text-xs text-slate-400">
+      {state.connection === 'error'
+        ? `${API_ERROR_LABELS[state.connectionError ?? 'REQUEST_FAILED']} 请重新同步。`
+        : '后端尚无可用持久事件；面板不会用前端状态推测结果。'}
+    </div>
+  ) : (
+    <ol className="divide-y divide-slate-100 dark:divide-slate-800">
+      {latestEvents.map((event) => (
+        <li key={event.id} className="flex items-center gap-3 px-3 py-2.5">
+          <span className="w-11 shrink-0 font-mono text-[10px] tabular-nums text-slate-400">#{event.sequence}</span>
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-xs font-medium text-slate-700 dark:text-slate-200">{event.label}</div>
+            <time className="mt-0.5 block font-mono text-[9px] text-slate-400" dateTime={new Date(event.timestampMs).toISOString()}>
+              {formatEventTime(event.timestampMs)} · {sourceRoleLabel(event.sourceRole)}
+            </time>
+          </div>
+          <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[9px] ${STATUS_TONES[event.status]}`}>
+            {STATUS_LABELS[event.status]}
+          </span>
+        </li>
+      ))}
+    </ol>
+  );
 
   return (
     <div className={isFullscreen
@@ -411,43 +457,34 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
             </div>
           </section>
 
-          <section aria-labelledby="code-observatory-events-title" className="flex min-h-0 flex-col">
+          <section aria-label="事件记录与决策检查" className="flex min-h-0 flex-col">
             <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
-              <h2 id="code-observatory-events-title" className="text-xs font-semibold text-slate-700 dark:text-slate-200">事件记录</h2>
-              <span className="text-[10px] text-slate-400">显示最近 {EVENT_LIMIT} 条</span>
+              <div role="group" aria-label="观测详情" className="flex items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+                <button
+                  type="button"
+                  aria-pressed={inspectorTab === 'events'}
+                  aria-controls="code-observatory-inspector-panel"
+                  onClick={() => setInspectorTab('events')}
+                  className={`rounded-md px-2 py-1 text-[10px] font-medium ${inspectorTab === 'events' ? 'bg-white text-slate-800 shadow-sm dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 dark:text-slate-400'}`}
+                >事件记录 · {events.length}</button>
+                <button
+                  type="button"
+                  aria-pressed={inspectorTab === 'decisions'}
+                  aria-controls="code-observatory-inspector-panel"
+                  onClick={() => setInspectorTab('decisions')}
+                  className={`rounded-md px-2 py-1 text-[10px] font-medium ${inspectorTab === 'decisions' ? 'bg-white text-slate-800 shadow-sm dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 dark:text-slate-400'}`}
+                >决策检查 · {state.decisions.length}</button>
+              </div>
+              <span className="text-[10px] text-slate-400">{inspectorTab === 'events' ? `最近 ${EVENT_LIMIT} 条` : '只读 · 来源事实'}</span>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-700">
-              {(state.connection === 'loading' || state.connection === 'idle') && events.length === 0 ? (
-                <div className="flex h-full items-center justify-center text-xs text-slate-400">正在读取持久事件…</div>
-              ) : state.connection === 'error' && events.length === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-xs text-slate-500">
-                  <AlertCircle size={18} className="text-amber-500" aria-hidden="true" />
-                  {API_ERROR_LABELS[state.connectionError ?? 'REQUEST_FAILED']} 可点击重新同步。
-                </div>
-              ) : latestEvents.length === 0 ? (
-                <div className="flex h-full items-center justify-center px-4 text-center text-xs text-slate-400">
-                  {state.connection === 'error'
-                    ? `${API_ERROR_LABELS[state.connectionError ?? 'REQUEST_FAILED']} 请重新同步。`
-                    : '后端尚无可用持久事件；面板不会用前端状态推测结果。'}
-                </div>
-              ) : (
-                <ol className="divide-y divide-slate-100 dark:divide-slate-800">
-                  {latestEvents.map((event) => (
-                    <li key={event.id} className="flex items-center gap-3 px-3 py-2.5">
-                      <span className="w-11 shrink-0 font-mono text-[10px] tabular-nums text-slate-400">#{event.sequence}</span>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-xs font-medium text-slate-700 dark:text-slate-200">{event.label}</div>
-                        <time className="mt-0.5 block font-mono text-[9px] text-slate-400" dateTime={new Date(event.timestampMs).toISOString()}>
-                          {formatEventTime(event.timestampMs)} · {sourceRoleLabel(event.sourceRole)}
-                        </time>
-                      </div>
-                      <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[9px] ${STATUS_TONES[event.status]}`}>
-                        {STATUS_LABELS[event.status]}
-                      </span>
-                    </li>
-                  ))}
-                </ol>
-              )}
+            <div
+              id="code-observatory-inspector-panel"
+              aria-live="polite"
+              className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-700"
+            >
+              {inspectorTab === 'decisions' ? (
+                <DecisionInspector decisions={state.decisions} />
+              ) : eventPanelContent}
             </div>
           </section>
         </div>

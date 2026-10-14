@@ -1,4 +1,5 @@
 import type {
+  CodeObservatoryDecisionView,
   CodeObservatoryErrorCode,
   CodeObservatoryEventPage,
   CodeObservatorySnapshot,
@@ -26,6 +27,7 @@ export interface CodeObservatoryState {
   retentionFloorOffset: number;
   cursor: string | null;
   events: CodeObservatoryWireEvent[];
+  decisions: CodeObservatoryDecisionView[];
   status: CodeObservatoryStatusAxes | null;
   sourceWatermarks: CodeObservatorySourceWatermark[];
   connection: CodeObservatoryConnection;

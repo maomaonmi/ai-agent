@@ -45,6 +45,59 @@ export interface CodeObservatorySpanView {
   association_status: 'complete' | 'orphan' | 'incomplete' | 'ambiguous';
 }
 
+export interface CodeObservatoryDecisionCandidateSource {
+  source_id: string;
+  status: 'complete' | 'partial' | 'unavailable' | 'not_applicable';
+  reason_codes: string[];
+  candidate_action_ids: string[];
+}
+
+export interface CodeObservatoryDecisionAction {
+  action_id: string;
+  executor_id: string;
+  lane_id: string;
+  status: 'eligible' | 'inapplicable' | 'blocked' | 'undetermined' | 'already_attempted' | 'reconciliation_required';
+  reason_codes: string[];
+  based_on_revision?: string | null;
+  current_revision?: string | null;
+  operation_version?: number | null;
+  related_attempt_id?: string | null;
+  applicable_obligation_ids: string[];
+}
+
+export interface CodeObservatoryDecisionView {
+  decision_ref: string;
+  owner: 'runtime' | 'control_plane' | 'verification_runtime' | 'unknown';
+  source_ref: CodeObservatorySourceRef;
+  source_role: string;
+  rule_id?: string | null;
+  outcome: string;
+  reason_code?: string | null;
+  based_on_operation_version?: number | null;
+  versions: {
+    candidate_revision?: string | null;
+    verification_epoch?: number | null;
+    operation_version?: number | null;
+    rule_version?: string | null;
+    policy_digest?: string | null;
+  };
+  evidence_refs: string[];
+  selected_route?: string | null;
+  allowed_actions: string[];
+  authorization_refs: string[];
+  scope?: string | null;
+  from_state?: string | null;
+  to_state?: string | null;
+  executor_evaluation_status?: 'not_enumerated' | 'enumerated' | 'unavailable' | null;
+  candidate_inventory_status?: 'not_enumerated' | 'complete' | 'partial' | 'unavailable' | null;
+  expected_candidate_source_ids: string[];
+  candidate_sources: CodeObservatoryDecisionCandidateSource[];
+  candidate_actions: CodeObservatoryDecisionAction[];
+  remaining_executor_ids: string[];
+  remaining_agent_action_ids: string[];
+  source_gaps: string[];
+}
+
 export type CodeObservatoryErrorCode =
   | 'NOT_FOUND'
   | 'FORBIDDEN'
@@ -112,6 +165,7 @@ export interface CodeObservatorySnapshot {
       retention_floor_offset: number;
     };
     events: CodeObservatoryWireEvent[];
+    decisions?: CodeObservatoryDecisionView[];
     spans?: CodeObservatorySpanView[];
     source_watermarks: CodeObservatorySourceWatermark[];
     has_more: boolean;

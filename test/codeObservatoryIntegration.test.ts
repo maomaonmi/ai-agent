@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const workspaceSource = readFileSync(resolve(testDirectory, '../src/components/CodeWorkspace.tsx'), 'utf8');
 const panelSource = readFileSync(resolve(testDirectory, '../src/components/CodeObservatoryPanel.tsx'), 'utf8');
+const decisionInspectorSource = readFileSync(resolve(testDirectory, '../src/components/DecisionInspector.tsx'), 'utf8');
+const decisionViewSource = readFileSync(resolve(testDirectory, '../src/Code/decisionView.ts'), 'utf8');
 const apiSource = readFileSync(resolve(testDirectory, '../src/lib/codeObservatoryApi.ts'), 'utf8');
 const reducerSource = readFileSync(resolve(testDirectory, '../src/Code/codeObservatoryReducer.ts'), 'utf8');
 const streamSource = readFileSync(resolve(testDirectory, '../src/Code/codeObservatoryStream.ts'), 'utf8');
@@ -44,4 +46,17 @@ test('offers an accessible full-screen toggle that expands the panel to the view
   assert.match(panelSource, /aria-label=\{isFullscreen \? '退出链路面板全屏' : '全屏显示链路面板'\}/);
   assert.match(panelSource, /aria-pressed=\{isFullscreen\}/);
   assert.match(panelSource, /'fixed inset-0 z-\[100\] flex'/);
+});
+
+test('shows source-backed decisions and makes missing history explicit', () => {
+  assert.match(panelSource, /aria-label="观测详情"/);
+  assert.match(panelSource, /决策检查 · \{state\.decisions\.length\}/);
+  assert.match(panelSource, /<DecisionInspector decisions=\{state\.decisions\} \/>/);
+  assert.match(decisionInspectorSource, /decision\.source_gaps/);
+  assert.match(decisionInspectorSource, /decision\.reason_code \?\? '未记录'/);
+  assert.match(decisionViewSource, /decision\.versions\.candidate_revision \?\? '未记录'/);
+  assert.match(decisionViewSource, /contradicted: '结论矛盾'/);
+  assert.match(decisionViewSource, /inconclusive: '验证不确定'/);
+  assert.match(decisionViewSource, /invalid_test: '测试无效'/);
+  assert.match(decisionViewSource, /infra_failure: '基础设施失败'/);
 });

@@ -6,6 +6,7 @@ import {
   reduceCodeObservatoryState,
 } from '../src/Code/codeObservatoryReducer.ts';
 import type {
+  CodeObservatoryDecisionView,
   CodeObservatoryEventPage,
   CodeObservatorySnapshot,
   CodeObservatoryWireEvent,
@@ -105,6 +106,40 @@ test('observation reducer applies contiguous events once and ignores replayed of
   assert.equal(next.events.length, 3);
   assert.strictEqual(replayed, next);
   assert.equal(next.events[2].event_type, 'future_event_kind');
+});
+
+test('snapshot preserves backend decision views and accepts older snapshots without them', () => {
+  const decision: CodeObservatoryDecisionView = {
+    decision_ref: 'decision-1',
+    owner: 'control_plane',
+    source_ref: { stream_key: 'control-plane:run-reducer', event_key: 'transition-1' },
+    source_role: 'runtime_committed',
+    outcome: 'accepted',
+    reason_code: null,
+    versions: { verification_epoch: 2 },
+    evidence_refs: [],
+    selected_route: 'SUBMIT_PATCH_COMPLETE',
+    allowed_actions: [],
+    authorization_refs: [],
+    expected_candidate_source_ids: [],
+    candidate_sources: [],
+    candidate_actions: [],
+    remaining_executor_ids: [],
+    remaining_agent_action_ids: [],
+    source_gaps: ['rule_version_not_recorded'],
+  };
+  const withDecision = snapshot(1);
+  withDecision.feed.decisions = [decision];
+
+  assert.deepEqual(loadedState(1).decisions, []);
+  assert.deepEqual(loadedState(1).decisions, []);
+  assert.deepEqual(
+    reduceCodeObservatoryState(createCodeObservatoryState(RUN_ID), {
+      type: 'snapshot_received',
+      snapshot: withDecision,
+    }).decisions,
+    [decision],
+  );
 });
 
 test('out-of-order events mark a gap and later contiguous arrivals close it', () => {
