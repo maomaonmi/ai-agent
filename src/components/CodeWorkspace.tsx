@@ -50,6 +50,7 @@ import {
 } from '../Code/fullstackBundler';
 import { FileTreeExplorer, buildTreeFromVFS, type FileTreeAction } from '../Code/FileTreeExplorer';
 import CodeAgentTimeline from './CodeAgentTimeline';
+import { CodeObservatoryLauncher } from './CodeObservatoryPanel';
 import RuntimeRecoveryHistoryPanel from './RuntimeRecoveryHistoryPanel';
 import CodeFileMenu from './CodeFileMenu';
 // Why: Phase3 记忆面板——Code 工作台左侧 aside 的「记忆」Tab 内容。
@@ -1894,6 +1895,7 @@ export default function CodeWorkspace({
           >
             {isInspectMode ? '退出检查' : '检查元素'}
           </button>
+          <CodeObservatoryLauncher run={latestAgentRun} />
           {topbarActions}
         </div>
       </div>
