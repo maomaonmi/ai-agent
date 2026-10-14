@@ -6,7 +6,7 @@
 import type { OmniTurnContext } from '../features/omni/types';
 import { CodeAgentEventBuffer } from '../Code/codeEventStream.ts';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const ACCEPTANCE_REQUEST_TIMEOUT_MS = 50_000;
 
 // Visual workflow contracts are intentionally kept close to the API layer so

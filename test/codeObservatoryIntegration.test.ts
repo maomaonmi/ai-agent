@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const workspaceSource = readFileSync(resolve(testDirectory, '../src/components/CodeWorkspace.tsx'), 'utf8');
 const panelSource = readFileSync(resolve(testDirectory, '../src/components/CodeObservatoryPanel.tsx'), 'utf8');
+const apiSource = readFileSync(resolve(testDirectory, '../src/lib/codeObservatoryApi.ts'), 'utf8');
 
 test('mounts the observatory launcher in the Code workbench top toolbar', () => {
   const toolbarStart = workspaceSource.indexOf('const topbar = (');
@@ -18,10 +19,13 @@ test('mounts the observatory launcher in the Code workbench top toolbar', () => 
   assert.ok(launcher > toolbarStart && launcher < toolbarEnd);
 });
 
-test('loads persisted events through replay and renders them in React Flow without event text', () => {
-  assert.match(panelSource, /replayCodeEvents\(/);
+test('loads the persisted observation snapshot and renders safe events in React Flow', () => {
+  assert.match(panelSource, /getCodeObservatorySnapshot\(/);
+  assert.match(panelSource, /projectCodeObservatoryFeedEvents\(/);
+  assert.match(apiSource, /\/api\/code\/observatory\/runs\/\$\{encodeURIComponent\(runId\)\}\/snapshot/);
   assert.match(panelSource, /<ReactFlow[\s\S]*?nodes=\{nodes\}[\s\S]*?edges=\{edges\}/);
   assert.doesNotMatch(panelSource, /event\.content|event\.metadata|event\.command/);
+  assert.doesNotMatch(panelSource, /run\.trace\.status/);
 });
 
 test('offers an accessible full-screen toggle that expands the panel to the viewport', () => {

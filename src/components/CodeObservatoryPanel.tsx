@@ -11,11 +11,12 @@ import {
   type NodeProps,
 } from '@xyflow/react';
 import { Activity, AlertCircle, Clock3, Maximize2, Minimize2, RefreshCw, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import '@xyflow/react/dist/style.css';
 
-import { projectCodeObservatoryEvents, type CodeObservatoryEvent, type CodeObservatoryStatus } from '../Code/codeObservatoryProjection';
-import { replayCodeEvents, type CodeAgentRun, type CodeGenerationEvent } from '../lib/api';
+import { projectCodeObservatoryFeedEvents, type CodeObservatoryEvent, type CodeObservatoryStatus } from '../Code/codeObservatoryProjection';
+import type { CodeAgentRun } from '../lib/api';
+import { CodeObservatoryApiError, getCodeObservatorySnapshot, type CodeObservatoryErrorCode, type CodeObservatorySnapshot } from '../lib/codeObservatoryApi';
 
 const EVENT_LIMIT = 24;
 const GRAPH_EVENT_LIMIT = 6;
@@ -29,6 +30,15 @@ const STATUS_LABELS: Record<CodeObservatoryStatus, string> = {
   failed: '失败',
   blocked: '阻塞',
   completed: '已完成',
+  verified: '验证通过',
+  partially_verified: '部分验证',
+  contradicted: '结论矛盾',
+  assertion_failed: '断言失败',
+  inconclusive: '验证不确定',
+  unverifiable: '无法验证',
+  invalid_test: '测试无效',
+  infra_failure: '基础设施失败',
+  cancelled: '已取消',
   unknown: '已记录',
 };
 
@@ -39,18 +49,72 @@ const STATUS_TONES: Record<CodeObservatoryStatus, string> = {
   failed: 'border-red-200 bg-red-50 text-red-700 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200',
   blocked: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200',
   completed: 'border-slate-200 bg-slate-100 text-slate-700 dark:border-slate-600 dark:bg-slate-700/60 dark:text-slate-200',
+  verified: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-400/30 dark:bg-emerald-400/10 dark:text-emerald-200',
+  partially_verified: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200',
+  contradicted: 'border-red-200 bg-red-50 text-red-700 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200',
+  assertion_failed: 'border-red-200 bg-red-50 text-red-700 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200',
+  inconclusive: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-200',
+  unverifiable: 'border-slate-200 bg-slate-100 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300',
+  invalid_test: 'border-orange-200 bg-orange-50 text-orange-700 dark:border-orange-400/30 dark:bg-orange-400/10 dark:text-orange-200',
+  infra_failure: 'border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-400/30 dark:bg-violet-400/10 dark:text-violet-200',
+  cancelled: 'border-slate-200 bg-slate-100 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300',
   unknown: 'border-slate-200 bg-white text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300',
 };
 
-const RUN_STATUS_LABELS: Record<string, string> = {
+const EXECUTION_STATUS_LABELS: Record<string, string> = {
+  queued: '已排队',
   running: '运行中',
-  awaiting_runtime_verification: '等待验收',
-  completed: '已完成',
-  completed_unverified: '待验收',
-  needs_attention: '需要处理',
+  succeeded: '成功',
   failed: '失败',
-  superseded: '已被新运行替代',
+  cancelled: '已取消',
+  unknown: '未知',
 };
+
+const VERIFICATION_STATUS_LABELS: Record<string, string> = {
+  verified: '通过',
+  partially_verified: '部分通过',
+  contradicted: '结论矛盾',
+  assertion_failed: '断言失败',
+  inconclusive: '不确定',
+  unverifiable: '无法验证',
+  invalid_test: '测试无效',
+  infra_failure: '环境失败',
+  unknown: '未知',
+};
+
+const OBSERVATION_STATUS_LABELS: Record<string, string> = {
+  current: '当前',
+  lagging: '滞后',
+  incomplete: '不完整',
+  unavailable: '不可用',
+};
+
+const SOURCE_ROLE_LABELS: Record<string, string> = {
+  runtime_committed: '持久来源',
+  transport_observed: '传输副本',
+  provider_output: '模型输出',
+  tool_receipt: '工具回执',
+  report_projection: '报告投影',
+  legacy_summary: '旧摘要',
+  unknown: '来源未知',
+};
+
+const API_ERROR_LABELS: Record<CodeObservatoryErrorCode, string> = {
+  NOT_FOUND: '该 Run 暂无后端持久事件。',
+  FORBIDDEN: '当前会话没有读取该 Run 的权限。',
+  CURSOR_INVALID: '观测游标无效，请重新获取快照。',
+  CURSOR_EXPIRED: '观测历史已过期，请重新获取快照。',
+  SOURCE_UNAVAILABLE: '源数据暂不可用。',
+  PROJECTION_INCOMPLETE: '来源关联不完整，当前投影无法完整读取。',
+  SCHEMA_UNSUPPORTED: '服务端观测版本暂不兼容。',
+  REQUEST_FAILED: '观测 API 请求失败。',
+};
+
+function sourceRoleLabel(value?: string): string {
+  return value && Object.prototype.hasOwnProperty.call(SOURCE_ROLE_LABELS, value)
+    ? SOURCE_ROLE_LABELS[value]
+    : '来源未知';
+}
 
 function formatEventTime(timestampMs: number): string {
   return new Intl.DateTimeFormat('zh-CN', {
@@ -74,7 +138,8 @@ function ObservedEventNode({ data }: NodeProps<EventNode>) {
         </span>
       </div>
       <div className="mt-1 truncate text-xs font-semibold text-slate-800 dark:text-slate-100">{event.label}</div>
-      <div className="mt-1 font-mono text-[9px] text-slate-400">{formatEventTime(event.timestampMs)}</div>
+      <div className="mt-1 truncate text-[9px] text-slate-400">{sourceRoleLabel(event.sourceRole)}</div>
+      <div className="font-mono text-[9px] text-slate-400">{formatEventTime(event.timestampMs)}</div>
       <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-2 !border-white !bg-cyan-500 dark:!border-slate-900" />
     </div>
   );
@@ -169,46 +234,42 @@ export function CodeObservatoryLauncher({ run }: { run?: CodeAgentRun }) {
 }
 
 function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: () => void }) {
-  const [events, setEvents] = useState<CodeObservatoryEvent[]>([]);
+  const [snapshot, setSnapshot] = useState<CodeObservatorySnapshot | null>(null);
   const [readState, setReadState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [readErrorCode, setReadErrorCode] = useState<CodeObservatoryErrorCode | null>(null);
   const [refreshVersion, setRefreshVersion] = useState(0);
-  const [lastSequence, setLastSequence] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const cursorRef = useRef(0);
-  const runStatus = run.trace.status ?? (run.trace.isRunning ? 'running' : 'completed');
+  const events = useMemo(
+    () => snapshot
+      ? projectCodeObservatoryFeedEvents(run.id, snapshot.feed.events, EVENT_LIMIT)
+      : [],
+    [run.id, snapshot],
+  );
+  const lastSequence = snapshot?.feed.cursor.observation_offset ?? 0;
   const isRunActive = run.trace.isRunning;
+  const executionStatus = snapshot?.feed.status.execution ?? 'unknown';
+  const verificationStatus = snapshot?.feed.status.verification ?? 'unknown';
+  const observationStatus = snapshot?.feed.status.observation ?? 'incomplete';
 
   useEffect(() => {
     const controller = new AbortController();
     let active = true;
     let requestInFlight = false;
+    setReadState('loading');
     const poll = async () => {
       if (requestInFlight || controller.signal.aborted) return;
       requestInFlight = true;
       try {
-        const delivered = await replayCodeEvents(
-          run.id,
-          cursorRef.current,
-          (event: CodeGenerationEvent) => {
-            if (event.run_id !== run.id || typeof event.sequence !== 'number') return;
-            const sequence = Math.trunc(event.sequence);
-            if (!Number.isSafeInteger(sequence) || sequence <= 0) return;
-            cursorRef.current = Math.max(cursorRef.current, sequence);
-            setLastSequence((previous) => Math.max(previous, sequence));
-            const safeEvent = projectCodeObservatoryEvents(run.id, [event], EVENT_LIMIT)[0];
-            if (!safeEvent) return;
-            setEvents((previous) => {
-              if (previous.some((item) => item.sequence === safeEvent.sequence)) return previous;
-              return [...previous, safeEvent]
-                .sort((left, right) => left.sequence - right.sequence)
-                .slice(-EVENT_LIMIT);
-            });
-          },
-          controller.signal,
-        );
-        if (active && delivered >= 0) setReadState('ready');
-      } catch {
-        if (active && !controller.signal.aborted) setReadState('error');
+        const nextSnapshot = await getCodeObservatorySnapshot(run.id, controller.signal);
+        if (!active) return;
+        setSnapshot(nextSnapshot);
+        setReadErrorCode(null);
+        setReadState('ready');
+      } catch (error) {
+        if (active && !controller.signal.aborted) {
+          setReadErrorCode(error instanceof CodeObservatoryApiError ? error.code : 'REQUEST_FAILED');
+          setReadState('error');
+        }
       } finally {
         requestInFlight = false;
       }
@@ -223,7 +284,6 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
     };
   }, [isRunActive, refreshVersion, run.id]);
 
-  const runStatusLabel = RUN_STATUS_LABELS[runStatus] ?? '状态未知';
   const latestEvents = useMemo(() => [...events].reverse(), [events]);
 
   return (
@@ -249,11 +309,13 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <span className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${
-              isRunActive
+              executionStatus === 'running'
                 ? 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-400/30 dark:bg-sky-400/10 dark:text-sky-200'
+                : executionStatus === 'failed'
+                  ? 'border-red-200 bg-red-50 text-red-700 dark:border-red-400/30 dark:bg-red-400/10 dark:text-red-200'
                 : 'border-slate-200 bg-slate-100 text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300'
             }`}>
-              Run {runStatusLabel}
+              执行 · {EXECUTION_STATUS_LABELS[executionStatus] ?? '未知'}
             </span>
             <button
               type="button"
@@ -295,11 +357,15 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
             <div className="mt-1 text-lg font-semibold tabular-nums text-slate-800 dark:text-slate-100">{events.length}</div>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-800/70">
-            <div className="text-[10px] font-medium uppercase tracking-wide text-slate-400">最新序号</div>
+            <div className="text-[10px] font-medium uppercase tracking-wide text-slate-400">最新观测游标</div>
             <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-800 dark:text-slate-100">{lastSequence || '—'}</div>
           </div>
-          <div className="col-span-2 flex items-center rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-xs text-slate-500 sm:col-span-1 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-400">
-            {isRunActive ? '每 1.8 秒从持久事件流续拉' : '历史 Run · 只读回放'}
+          <div className="col-span-2 grid grid-cols-2 gap-x-3 gap-y-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-[10px] text-slate-600 sm:col-span-1 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-300">
+            <span>验证 · {VERIFICATION_STATUS_LABELS[verificationStatus] ?? '未知'}</span>
+            <span>观测 · {OBSERVATION_STATUS_LABELS[observationStatus] ?? '未知'}</span>
+            <span className="col-span-2 text-slate-400">
+              {isRunActive ? '每 1.8 秒读取后端投影' : '历史 Run · 只读快照'}
+            </span>
           </div>
         </div>
 
@@ -325,11 +391,13 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
               ) : readState === 'error' && events.length === 0 ? (
                 <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-xs text-slate-500">
                   <AlertCircle size={18} className="text-amber-500" aria-hidden="true" />
-                  无法读取事件。服务恢复后可点击刷新重试。
+                  {API_ERROR_LABELS[readErrorCode ?? 'REQUEST_FAILED']} 服务恢复后可点击刷新重试。
                 </div>
               ) : latestEvents.length === 0 ? (
                 <div className="flex h-full items-center justify-center px-4 text-center text-xs text-slate-400">
-                  {readState === 'error' ? '事件读取暂时失败，请刷新重试。' : '该 Run 暂无持久事件。'}
+                  {readState === 'error'
+                    ? `${API_ERROR_LABELS[readErrorCode ?? 'REQUEST_FAILED']} 请刷新重试。`
+                    : '后端尚无可用持久事件；面板不会用前端状态推测结果。'}
                 </div>
               ) : (
                 <ol className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -339,7 +407,7 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-xs font-medium text-slate-700 dark:text-slate-200">{event.label}</div>
                         <time className="mt-0.5 block font-mono text-[9px] text-slate-400" dateTime={new Date(event.timestampMs).toISOString()}>
-                          {formatEventTime(event.timestampMs)}
+                          {formatEventTime(event.timestampMs)} · {sourceRoleLabel(event.sourceRole)}
                         </time>
                       </div>
                       <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[9px] ${STATUS_TONES[event.status]}`}>
@@ -353,8 +421,10 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
           </section>
         </div>
         <footer aria-live="polite" className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-200 px-5 py-2.5 text-[10px] text-slate-400 dark:border-slate-700">
-          <span>{readState === 'error' ? '读取失败' : readState === 'loading' ? '正在同步' : '已与持久事件流同步'}</span>
-          <span>run_id · sequence · timestamp_ms</span>
+          <span>{readState === 'error'
+            ? (snapshot ? '读取失败，保留上一份可信快照' : '读取失败')
+            : readState === 'loading' ? '正在读取后端投影' : '已与后端观测投影同步'}</span>
+          <span>run_id · projection_version · observation_offset</span>
         </footer>
       </aside>
     </div>
