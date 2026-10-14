@@ -18,7 +18,9 @@ const streamSource = readFileSync(resolve(testDirectory, '../src/Code/codeObserv
 test('mounts the observatory launcher in the Code workbench top toolbar', () => {
   const toolbarStart = workspaceSource.indexOf('const topbar = (');
   const toolbarEnd = workspaceSource.indexOf('\n  return (', toolbarStart);
-  const launcher = workspaceSource.indexOf('<CodeObservatoryLauncher run={latestAgentRun} />');
+  const launcher = workspaceSource.indexOf(
+    '<CodeObservatoryLauncher run={latestAgentRun} sidebarCollapsed={sidebarCollapsed} />',
+  );
 
   assert.ok(toolbarStart >= 0);
   assert.ok(toolbarEnd > toolbarStart);
@@ -47,7 +49,17 @@ test('loads the persisted observation snapshot and renders safe events in React 
 test('offers an accessible full-screen toggle that expands the panel to the viewport', () => {
   assert.match(panelSource, /aria-label=\{isFullscreen \? '退出链路面板全屏' : '全屏显示链路面板'\}/);
   assert.match(panelSource, /aria-pressed=\{isFullscreen\}/);
-  assert.match(panelSource, /'fixed inset-0 z-\[100\] flex'/);
+  assert.match(panelSource, /fixed inset-y-0 right-0 left-0 z-\[100\] flex/);
+  assert.match(panelSource, /lg:left-14/);
+  assert.match(panelSource, /lg:left-72/);
+});
+
+test('offers the versioned control-rule graph without replacing the event timeline', () => {
+  assert.match(panelSource, /setGraphView\('control'\)/);
+  assert.match(panelSource, /setGraphView\('timeline'\)/);
+  assert.match(panelSource, /<ControlTopology reloadKey=\{refreshVersion\} \/>/);
+  assert.match(panelSource, /静态规则参考 · 不代表 Run 实际执行路径/);
+  assert.match(apiSource, /\/api\/code\/observatory\/topology/);
 });
 
 test('shows source-backed decisions and makes missing history explicit', () => {

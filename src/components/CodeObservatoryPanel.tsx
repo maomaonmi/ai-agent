@@ -27,6 +27,7 @@ import { createCodeObservatoryState, reduceCodeObservatoryState } from '../Code/
 import { runCodeObservatoryStream } from '../Code/codeObservatoryStream';
 import type { CodeObservatoryConnection } from '../Code/codeObservatoryTypes';
 import { DecisionInspector } from './DecisionInspector';
+import { ControlTopology } from './ControlTopology';
 import { EvidenceInspector } from './EvidenceInspector';
 import { OperationRelationsInspector } from './OperationRelationsInspector';
 import type { CodeAgentRun } from '../lib/api';
@@ -400,6 +401,7 @@ function CodeObservatoryPanel({
   );
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [graphView, setGraphView] = useState<'timeline' | 'control'>('timeline');
   const [inspectorTab, setInspectorTab] = useState<'events' | 'decisions' | 'evidence' | 'operation'>('events');
   const events = useMemo(
     () => projectCodeObservatoryFeedEvents(run.id, state.events, EVENT_LIMIT),
@@ -603,11 +605,47 @@ function CodeObservatoryPanel({
           </div>
         </div>
 
+        {graphView === 'control' ? (
+          <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
+            <div className="flex shrink-0 items-center justify-between gap-3">
+              <div role="group" aria-label="链路图类型" className="flex items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+                <button
+                  type="button"
+                  aria-pressed="false"
+                  onClick={() => setGraphView('timeline')}
+                  className="rounded-md px-2.5 py-1.5 text-[10px] font-medium text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:text-slate-400 dark:hover:text-slate-100"
+                >事件时序</button>
+                <button
+                  type="button"
+                  aria-pressed
+                  className="rounded-md bg-white px-2.5 py-1.5 text-[10px] font-medium text-slate-800 shadow-sm dark:bg-slate-700 dark:text-slate-100"
+                >控制规则图</button>
+              </div>
+              <span className="text-right text-[10px] text-slate-400">静态规则参考 · 不代表 Run 实际执行路径</span>
+            </div>
+            <div className="min-h-0 flex-1">
+              <ControlTopology reloadKey={refreshVersion} />
+            </div>
+          </div>
+        ) : (
         <div className="grid min-h-0 flex-1 grid-rows-[minmax(190px,0.9fr)_minmax(190px,1.1fr)] gap-4 p-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(260px,0.8fr)] lg:grid-rows-1">
           <section aria-labelledby="code-observatory-flow-title" className="flex min-h-0 flex-col">
+            <h2 id="code-observatory-flow-title" className="sr-only">事件时序</h2>
             <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
-              <h2 id="code-observatory-flow-title" className="text-xs font-semibold text-slate-700 dark:text-slate-200">事件时序</h2>
-              <span className="text-[10px] text-slate-400">按事件类别分色，序号蛇形排列</span>
+              <div role="group" aria-label="链路图类型" className="flex items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+                <button
+                  type="button"
+                  aria-pressed
+                  className="rounded-md bg-white px-2.5 py-1.5 text-[10px] font-medium text-slate-800 shadow-sm dark:bg-slate-700 dark:text-slate-100"
+                >事件时序</button>
+                <button
+                  type="button"
+                  aria-pressed="false"
+                  onClick={() => setGraphView('control')}
+                  className="rounded-md px-2.5 py-1.5 text-[10px] font-medium text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:text-slate-400 dark:hover:text-slate-100"
+                >控制规则图</button>
+              </div>
+              <span className="text-right text-[10px] text-slate-400">按后端序号排列；箭头只表示先后</span>
             </div>
             <div className="min-h-0 flex-1">
               <ObservedEventGraph events={events} />
@@ -675,6 +713,7 @@ function CodeObservatoryPanel({
             </div>
           </section>
         </div>
+        )}
         <footer aria-live="polite" className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-200 px-5 py-2.5 text-[10px] text-slate-400 dark:border-slate-700">
           <span>{state.connection === 'error'
             ? `${API_ERROR_LABELS[state.connectionError ?? 'REQUEST_FAILED']}${state.events.length > 0 ? '，保留当前可信数据' : '，请重新同步'}`

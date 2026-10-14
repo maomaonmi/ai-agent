@@ -3,11 +3,41 @@ import test from 'node:test';
 
 import {
   CodeObservatoryApiError,
+  getCodeControlTopology,
   getCodeObservatoryEvidencePreview,
   getCodeObservatoryEvents,
   getCodeObservatorySnapshot,
   openCodeObservatoryStream,
 } from '../src/lib/codeObservatoryApi.ts';
+
+test('control topology API is a cache-free read of the versioned topology endpoint', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = '';
+  let requestedInit: RequestInit | undefined;
+  globalThis.fetch = async (input, init) => {
+    requestedUrl = String(input);
+    requestedInit = init;
+    return new Response(JSON.stringify({
+      schema_version: 'code-observatory/v1',
+      topology_schema_version: 1,
+      topology_version: 'sha256:abc',
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const topology = await getCodeControlTopology();
+    assert.equal(topology.topology_schema_version, 1);
+    assert.match(requestedUrl, /\/api\/code\/observatory\/topology$/);
+    assert.equal(requestedInit?.method, undefined);
+    assert.equal(requestedInit?.cache, 'no-store');
+    assert.equal(new Headers(requestedInit?.headers).get('accept'), 'application/json');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 test('snapshot API is a cache-free GET scoped to the encoded Run identity', async () => {
   const originalFetch = globalThis.fetch;

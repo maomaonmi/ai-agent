@@ -6,6 +6,48 @@ export interface CodeObservatoryStatusAxes {
   observation: string;
 }
 
+export interface CodeControlTopologyState {
+  state_id: string;
+  terminal: boolean;
+}
+
+export interface CodeControlTopologyTransition {
+  transition_id: string;
+  from_state: string;
+  event: string;
+  to_state: string;
+  guard_id?: string | null;
+  action: string;
+  owner: string;
+  rule_id?: string | null;
+}
+
+export interface CodeControlTopologyDynamicRegion {
+  region_id: 'agent_model_tool_routing' | 'runtime_recovery_selection';
+  enumeration_status: 'dynamic' | 'registered_metadata_only';
+}
+
+export interface CodeControlTopologyRuntimeRoute {
+  route_id: string;
+  executor_id: string;
+  lane_id: string;
+  arbitration_order: number;
+  side_effect_class: 'none' | 'idempotent' | 'compensatable' | 'non_idempotent';
+}
+
+export interface CodeControlTopology {
+  schema_version: 'code-observatory/v1';
+  topology_schema_version: 1;
+  topology_version: string;
+  rule_version: string | null;
+  rule_version_status: 'not_recorded';
+  reference_status: 'current_reference';
+  states: CodeControlTopologyState[];
+  transitions: CodeControlTopologyTransition[];
+  dynamic_regions: CodeControlTopologyDynamicRegion[];
+  runtime_routes: CodeControlTopologyRuntimeRoute[];
+}
+
 export interface CodeObservatorySourceRef {
   stream_key?: string | null;
   event_key?: string | null;
@@ -384,6 +426,18 @@ async function throwCodeObservatoryApiError(response: Response): Promise<never> 
     // Keep only a bounded error class; upstream bodies may contain unsafe details.
   }
   throw new CodeObservatoryApiError(code);
+}
+
+/** Read the current, immutable control-rule reference; it never starts a Run. */
+export async function getCodeControlTopology(
+  signal?: AbortSignal,
+): Promise<CodeControlTopology> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/code/observatory/topology`,
+    { headers: { Accept: 'application/json' }, cache: 'no-store', signal },
+  );
+  if (!response.ok) await throwCodeObservatoryApiError(response);
+  return response.json() as Promise<CodeControlTopology>;
 }
 
 /** Read the persisted Run projection; this endpoint never starts or resumes work. */
