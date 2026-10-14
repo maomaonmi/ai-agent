@@ -58,6 +58,20 @@ export interface CodeObservatorySourceRef {
   transport_sequence?: number | null;
 }
 
+export interface CodeObservatoryNodeView {
+  node_instance_id: string;
+  node_definition_id?: string | null;
+  aggregate_kind: 'run' | 'operation';
+  aggregate_id: string;
+  operation_id?: string | null;
+  run_id: string;
+  node_kind: string;
+  source_refs: CodeObservatorySourceRef[];
+  status: CodeObservatoryStatusAxes;
+  versions: Record<string, unknown>;
+  association_status: 'complete' | 'incomplete' | 'unknown';
+}
+
 export interface CodeObservatorySpanView {
   span_id: string;
   span_kind: 'model_turn' | 'tool_action' | 'verification';
@@ -218,10 +232,24 @@ export interface CodeObservatoryWireEvent {
   aggregate_id: string;
   operation_id?: string | null;
   run_id?: string | null;
+  run_kind?: string | null;
+  actor_kind?: string | null;
+  task_id?: string | null;
+  turn_id?: string | null;
+  iteration?: number | null;
+  phase?: string | null;
+  boundary?: string | null;
   event_category: string;
   event_type: string;
   action_id?: string | null;
   tool_name?: string | null;
+  verification_run_id?: string | null;
+  node_definition_id?: string | null;
+  node_instance_id?: string | null;
+  source_ref?: CodeObservatorySourceRef | null;
+  causation_refs?: CodeObservatorySourceRef[];
+  decision_ref?: string | null;
+  evidence_refs?: string[];
   source_role: string;
   observation_offset: number;
   occurred_at_ms?: number | null;
@@ -260,6 +288,7 @@ export interface CodeObservatorySnapshot {
       retention_floor_offset: number;
     };
     events: CodeObservatoryWireEvent[];
+    nodes?: CodeObservatoryNodeView[];
     decisions?: CodeObservatoryDecisionView[];
     evidence?: CodeObservatoryEvidenceView[];
     spans?: CodeObservatorySpanView[];

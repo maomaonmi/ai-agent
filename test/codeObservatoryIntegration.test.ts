@@ -7,6 +7,8 @@ import { fileURLToPath } from 'node:url';
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const workspaceSource = readFileSync(resolve(testDirectory, '../src/components/CodeWorkspace.tsx'), 'utf8');
 const panelSource = readFileSync(resolve(testDirectory, '../src/components/CodeObservatoryPanel.tsx'), 'utf8');
+const executionGraphSource = readFileSync(resolve(testDirectory, '../src/components/ExecutionGraph.tsx'), 'utf8');
+const executionProjectionSource = readFileSync(resolve(testDirectory, '../src/Code/executionGraphProjection.ts'), 'utf8');
 const decisionInspectorSource = readFileSync(resolve(testDirectory, '../src/components/DecisionInspector.tsx'), 'utf8');
 const decisionViewSource = readFileSync(resolve(testDirectory, '../src/Code/decisionView.ts'), 'utf8');
 const evidenceInspectorSource = readFileSync(resolve(testDirectory, '../src/components/EvidenceInspector.tsx'), 'utf8');
@@ -60,6 +62,22 @@ test('offers the versioned control-rule graph without replacing the event timeli
   assert.match(panelSource, /<ControlTopology reloadKey=\{refreshVersion\} \/>/);
   assert.match(panelSource, /静态规则参考 · 不代表 Run 实际执行路径/);
   assert.match(apiSource, /\/api\/code\/observatory\/topology/);
+});
+
+test('offers the actual execution graph from persisted nodes, spans, causation and operation relations', () => {
+  assert.match(panelSource, /setGraphView\('execution'\)/);
+  assert.match(panelSource, /<ExecutionGraph/);
+  assert.match(panelSource, /nodes=\{state\.nodes\}/);
+  assert.match(panelSource, /spans=\{state\.spans\}/);
+  assert.match(executionGraphSource, /getCodeObservatoryOperationSnapshot\(/);
+  assert.match(executionProjectionSource, /causation_refs/);
+  assert.match(executionProjectionSource, /artifact_dependency/);
+  assert.match(executionProjectionSource, /decision_route/);
+  assert.match(executionProjectionSource, /resume_from/);
+  assert.match(executionProjectionSource, /retry_of/);
+  assert.match(executionGraphSource, /aria-label="折叠执行图分组"/);
+  assert.match(executionGraphSource, /点击分组可展开/);
+  assert.match(panelSource, /不按时间顺序推断关系/);
 });
 
 test('shows source-backed decisions and makes missing history explicit', () => {

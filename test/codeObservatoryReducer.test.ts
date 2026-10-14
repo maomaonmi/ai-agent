@@ -9,7 +9,9 @@ import type {
   CodeObservatoryDecisionView,
   CodeObservatoryEvidenceView,
   CodeObservatoryEventPage,
+  CodeObservatoryNodeView,
   CodeObservatorySnapshot,
+  CodeObservatorySpanView,
   CodeObservatoryWireEvent,
 } from '../src/lib/codeObservatoryApi.ts';
 
@@ -141,6 +143,46 @@ test('snapshot preserves backend decision views and accepts older snapshots with
     }).decisions,
     [decision],
   );
+});
+
+test('snapshot preserves backend node-instance and span views for graph projection', () => {
+  const nodeView: CodeObservatoryNodeView = {
+    node_instance_id: 'node-1',
+    node_definition_id: 'tool-action',
+    aggregate_kind: 'run',
+    aggregate_id: RUN_ID,
+    run_id: RUN_ID,
+    node_kind: 'runtime_action_completed',
+    source_refs: [{ stream_key: 'run-stream', event_key: 'event-1' }],
+    status: { execution: 'succeeded', verification: 'unknown', observation: 'current' },
+    versions: {},
+    association_status: 'unknown',
+  };
+  const spanView: CodeObservatorySpanView = {
+    span_id: 'span-1',
+    span_kind: 'tool_action',
+    aggregate_kind: 'run',
+    aggregate_id: RUN_ID,
+    run_id: RUN_ID,
+    action_id: 'action-1',
+    source_refs: [{ stream_key: 'run-stream', event_key: 'event-1' }],
+    receipt_refs: [],
+    lifecycle_status: 'closed',
+    execution_status: 'succeeded',
+    verification_status: 'unknown',
+    association_status: 'orphan',
+  };
+  const value = snapshot(1);
+  value.feed.nodes = [nodeView];
+  value.feed.spans = [spanView];
+
+  const state = reduceCodeObservatoryState(createCodeObservatoryState(RUN_ID), {
+    type: 'snapshot_received',
+    snapshot: value,
+  });
+
+  assert.deepEqual(state.nodes, [nodeView]);
+  assert.deepEqual(state.spans, [spanView]);
 });
 
 test('snapshot preserves evidence views and old snapshots default to no evidence', () => {

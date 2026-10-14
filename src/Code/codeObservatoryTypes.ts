@@ -3,7 +3,9 @@ import type {
   CodeObservatoryEvidenceView,
   CodeObservatoryErrorCode,
   CodeObservatoryEventPage,
+  CodeObservatoryNodeView,
   CodeObservatorySnapshot,
+  CodeObservatorySpanView,
   CodeObservatorySourceWatermark,
   CodeObservatoryStatusAxes,
   CodeObservatoryWireEvent,
@@ -28,6 +30,8 @@ export interface CodeObservatoryState {
   retentionFloorOffset: number;
   cursor: string | null;
   events: CodeObservatoryWireEvent[];
+  nodes: CodeObservatoryNodeView[];
+  spans: CodeObservatorySpanView[];
   decisions: CodeObservatoryDecisionView[];
   evidence: CodeObservatoryEvidenceView[];
   status: CodeObservatoryStatusAxes | null;
