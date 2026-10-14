@@ -6,6 +6,45 @@ export interface CodeObservatoryStatusAxes {
   observation: string;
 }
 
+export interface CodeObservatorySourceRef {
+  stream_key?: string | null;
+  event_key?: string | null;
+  source_event_id?: string | null;
+  source_sequence?: number | null;
+  stream_sequence?: number | null;
+  transport_event_id?: string | null;
+  transport_sequence?: number | null;
+}
+
+export interface CodeObservatorySpanView {
+  span_id: string;
+  span_kind: 'model_turn' | 'tool_action' | 'verification';
+  aggregate_kind: 'run' | 'operation';
+  aggregate_id: string;
+  operation_id?: string | null;
+  run_id: string;
+  attempt_ref?: string | null;
+  turn_id?: string | null;
+  action_id?: string | null;
+  tool_name?: string | null;
+  candidate_revision?: string | null;
+  execution_generation?: number | null;
+  parent_span_id?: string | null;
+  source_refs: CodeObservatorySourceRef[];
+  receipt_refs: CodeObservatorySourceRef[];
+  start_ref?: CodeObservatorySourceRef | null;
+  end_ref?: CodeObservatorySourceRef | null;
+  started_at_ms?: number | null;
+  ended_at_ms?: number | null;
+  start_committed_at_ms?: number | null;
+  end_committed_at_ms?: number | null;
+  duration_ms?: number | null;
+  lifecycle_status: 'open' | 'closed' | 'incomplete';
+  execution_status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
+  verification_status: string;
+  association_status: 'complete' | 'orphan' | 'incomplete' | 'ambiguous';
+}
+
 export type CodeObservatoryErrorCode =
   | 'NOT_FOUND'
   | 'FORBIDDEN'
@@ -73,6 +112,7 @@ export interface CodeObservatorySnapshot {
       retention_floor_offset: number;
     };
     events: CodeObservatoryWireEvent[];
+    spans?: CodeObservatorySpanView[];
     source_watermarks: CodeObservatorySourceWatermark[];
     has_more: boolean;
   };
