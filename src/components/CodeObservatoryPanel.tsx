@@ -4,6 +4,7 @@ import {
   Background,
   Controls,
   Handle,
+  MarkerType,
   Position,
   ReactFlow,
   type Edge,
@@ -11,10 +12,17 @@ import {
   type NodeProps,
 } from '@xyflow/react';
 import { Activity, AlertCircle, Clock3, Maximize2, Minimize2, RefreshCw, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useReducer, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import '@xyflow/react/dist/style.css';
 
-import { projectCodeObservatoryFeedEvents, type CodeObservatoryEvent, type CodeObservatoryStatus } from '../Code/codeObservatoryProjection';
+import {
+  EVENT_CATEGORY_LABELS,
+  projectCodeObservatoryFeedEvents,
+  type CodeObservatoryCategory,
+  type CodeObservatoryEvent,
+  type CodeObservatoryStatus,
+} from '../Code/codeObservatoryProjection';
 import { createCodeObservatoryState, reduceCodeObservatoryState } from '../Code/codeObservatoryReducer';
 import { runCodeObservatoryStream } from '../Code/codeObservatoryStream';
 import type { CodeObservatoryConnection } from '../Code/codeObservatoryTypes';
@@ -25,7 +33,11 @@ import type { CodeAgentRun } from '../lib/api';
 import { CodeObservatoryApiError, getCodeObservatorySnapshot, type CodeObservatoryErrorCode } from '../lib/codeObservatoryApi';
 
 const EVENT_LIMIT = 24;
-const GRAPH_EVENT_LIMIT = 6;
+const GRAPH_EVENT_LIMIT = 24;
+const GRAPH_NODE_WIDTH = 204;
+const GRAPH_NODE_HEIGHT = 104;
+const GRAPH_COLUMN_GAP = 36;
+const GRAPH_ROW_GAP = 38;
 const DECISION_SOURCE_EVENT_TYPES = new Set([
   'control_plane_transition_batch',
   'stop_decision_recorded',
@@ -44,7 +56,12 @@ function requiresSnapshotRefresh(event: { event_type: string; tool_name?: string
     || (event.event_type === 'runtime_action_completed' && EVIDENCE_SOURCE_TOOL_NAMES.has(event.tool_name ?? ''));
 }
 
-type EventNode = Node<{ event: CodeObservatoryEvent }, 'observedEvent'>;
+type EventNodeData = {
+  event: CodeObservatoryEvent;
+  incomingPosition?: Position;
+  outgoingPosition?: Position;
+};
+type EventNode = Node<EventNodeData, 'observedEvent'>;
 
 const STATUS_LABELS: Record<CodeObservatoryStatus, string> = {
   running: '进行中',
@@ -164,44 +181,127 @@ function formatEventTime(timestampMs: number): string {
   }).format(timestampMs);
 }
 
+const CATEGORY_STYLES: Record<CodeObservatoryCategory, { accent: string; badge: string }> = {
+  intake: { accent: 'border-l-cyan-500', badge: 'bg-cyan-50 text-cyan-700 dark:bg-cyan-400/10 dark:text-cyan-200' },
+  control: { accent: 'border-l-violet-500', badge: 'bg-violet-50 text-violet-700 dark:bg-violet-400/10 dark:text-violet-200' },
+  execution: { accent: 'border-l-sky-500', badge: 'bg-sky-50 text-sky-700 dark:bg-sky-400/10 dark:text-sky-200' },
+  implementation: { accent: 'border-l-blue-500', badge: 'bg-blue-50 text-blue-700 dark:bg-blue-400/10 dark:text-blue-200' },
+  proof: { accent: 'border-l-indigo-500', badge: 'bg-indigo-50 text-indigo-700 dark:bg-indigo-400/10 dark:text-indigo-200' },
+  verification: { accent: 'border-l-emerald-500', badge: 'bg-emerald-50 text-emerald-700 dark:bg-emerald-400/10 dark:text-emerald-200' },
+  recovery: { accent: 'border-l-amber-500', badge: 'bg-amber-50 text-amber-700 dark:bg-amber-400/10 dark:text-amber-200' },
+  terminal: { accent: 'border-l-rose-500', badge: 'bg-rose-50 text-rose-700 dark:bg-rose-400/10 dark:text-rose-200' },
+  observation: { accent: 'border-l-slate-400', badge: 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-200' },
+  other: { accent: 'border-l-slate-300', badge: 'bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-200' },
+};
+
+function eventTypeLabel(event: CodeObservatoryEvent): string {
+  if (!event.category) return event.label;
+  const prefix = `${EVENT_CATEGORY_LABELS[event.category]} · `;
+  return event.label.startsWith(prefix) ? event.label.slice(prefix.length) : event.label;
+}
+
 function ObservedEventNode({ data }: NodeProps<EventNode>) {
   const { event } = data;
+  const category = event.category ?? 'other';
+  const categoryStyle = CATEGORY_STYLES[category];
   return (
-    <div className="w-[142px] rounded-xl border border-slate-200 bg-white px-3 py-2 shadow-sm dark:border-slate-700 dark:bg-slate-900">
-      <Handle type="target" position={Position.Left} className="!h-2 !w-2 !border-2 !border-white !bg-cyan-500 dark:!border-slate-900" />
+    <article className={`relative flex h-[104px] w-[204px] flex-col justify-between rounded-lg border border-slate-200 border-l-4 bg-white px-3 py-2.5 shadow-sm dark:border-slate-700 dark:bg-slate-900 ${categoryStyle.accent}`}>
+      {data.incomingPosition && (
+        <Handle id="sequence-in" type="target" position={data.incomingPosition} className="!h-2 !w-2 !border-2 !border-white !bg-slate-400 dark:!border-slate-900" />
+      )}
+      {data.outgoingPosition && (
+        <Handle id="sequence-out" type="source" position={data.outgoingPosition} className="!h-2 !w-2 !border-2 !border-white !bg-slate-400 dark:!border-slate-900" />
+      )}
       <div className="flex items-center justify-between gap-2">
-        <span className="font-mono text-[10px] text-slate-400">#{event.sequence}</span>
-        <span className={`rounded-full px-1.5 py-0.5 text-[9px] ${STATUS_TONES[event.status]}`}>
+        <span className="font-mono text-[10px] font-semibold tabular-nums text-slate-500 dark:text-slate-400">#{event.sequence}</span>
+        <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-medium ${STATUS_TONES[event.status]}`}>
           {STATUS_LABELS[event.status]}
         </span>
       </div>
-      <div className="mt-1 truncate text-xs font-semibold text-slate-800 dark:text-slate-100">{event.label}</div>
-      <div className="mt-1 truncate text-[9px] text-slate-400">{sourceRoleLabel(event.sourceRole)}</div>
-      <div className="font-mono text-[9px] text-slate-400">{formatEventTime(event.timestampMs)}</div>
-      <Handle type="source" position={Position.Right} className="!h-2 !w-2 !border-2 !border-white !bg-cyan-500 dark:!border-slate-900" />
-    </div>
+      <div className="truncate text-xs font-semibold text-slate-800 dark:text-slate-100" title={eventTypeLabel(event)}>
+        {eventTypeLabel(event)}
+      </div>
+      <div className="flex items-center justify-between gap-2">
+        <span className={`max-w-[92px] truncate rounded px-1.5 py-0.5 text-[9px] font-medium ${categoryStyle.badge}`}>
+          {EVENT_CATEGORY_LABELS[category]}
+        </span>
+        <time className="font-mono text-[9px] tabular-nums text-slate-400">{formatEventTime(event.timestampMs)}</time>
+      </div>
+      <div className="truncate text-[9px] text-slate-400">{sourceRoleLabel(event.sourceRole)}</div>
+    </article>
   );
 }
 
 const NODE_TYPES = { observedEvent: ObservedEventNode };
 
 function ObservedEventGraph({ events }: { events: CodeObservatoryEvent[] }) {
-  const graphEvents = events.slice(-GRAPH_EVENT_LIMIT);
-  const nodes = useMemo<EventNode[]>(() => graphEvents.map((event, index) => ({
-    id: event.id,
-    type: 'observedEvent',
-    position: { x: index * 174, y: 42 },
-    data: { event },
-    draggable: false,
-  })), [graphEvents]);
-  const edges = useMemo<Edge[]>(() => graphEvents.slice(1).map((event, index) => ({
-    id: `sequence:${graphEvents[index]?.sequence}:${event.sequence}`,
-    source: graphEvents[index]?.id ?? '',
-    target: event.id,
-    type: 'smoothstep',
-    animated: false,
-    style: { stroke: '#94a3b8', strokeWidth: 1.5 },
-  })), [graphEvents]);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const [layout, setLayout] = useState({ columns: 4, rows: 4 });
+  const hasEvents = events.length > 0;
+
+  useEffect(() => {
+    if (!hasEvents) return;
+    const canvas = canvasRef.current;
+    if (!canvas || typeof ResizeObserver === 'undefined') return;
+    const updateLayout = () => {
+      const availableColumns = Math.floor((canvas.clientWidth + GRAPH_COLUMN_GAP) / (GRAPH_NODE_WIDTH + GRAPH_COLUMN_GAP));
+      const availableRows = Math.floor((canvas.clientHeight + GRAPH_ROW_GAP) / (GRAPH_NODE_HEIGHT + GRAPH_ROW_GAP));
+      const nextLayout = {
+        columns: Math.max(2, Math.min(6, availableColumns)),
+        rows: Math.max(1, Math.min(6, availableRows)),
+      };
+      setLayout((current) => current.columns === nextLayout.columns && current.rows === nextLayout.rows
+        ? current
+        : nextLayout);
+    };
+    const observer = new ResizeObserver(updateLayout);
+    observer.observe(canvas);
+    updateLayout();
+    return () => observer.disconnect();
+  }, [hasEvents]);
+
+  const graphCapacity = Math.min(GRAPH_EVENT_LIMIT, layout.columns * layout.rows);
+  const graphEvents = useMemo(() => events.slice(-graphCapacity), [events, graphCapacity]);
+  const { nodes, edges } = useMemo(() => {
+    const nodes = graphEvents.map((event, index): EventNode => {
+      const row = Math.floor(index / layout.columns);
+      const offsetInRow = index % layout.columns;
+      const column = row % 2 === 0 ? offsetInRow : layout.columns - 1 - offsetInRow;
+      const startsRow = offsetInRow === 0;
+      const endsRow = offsetInRow === layout.columns - 1;
+      const isFirst = index === 0;
+      const isLast = index === graphEvents.length - 1;
+      const incomingPosition = isFirst
+        ? undefined
+        : startsRow ? Position.Top : row % 2 === 0 ? Position.Left : Position.Right;
+      const outgoingPosition = isLast
+        ? undefined
+        : endsRow ? Position.Bottom : row % 2 === 0 ? Position.Right : Position.Left;
+
+      return {
+        id: event.id,
+        type: 'observedEvent',
+        position: {
+          x: column * (GRAPH_NODE_WIDTH + GRAPH_COLUMN_GAP),
+          y: row * (GRAPH_NODE_HEIGHT + GRAPH_ROW_GAP),
+        },
+        data: { event, incomingPosition, outgoingPosition },
+        draggable: false,
+      };
+    });
+    const edges = graphEvents.slice(1).map((event, index): Edge => ({
+      id: `sequence:${graphEvents[index]?.sequence}:${event.sequence}`,
+      source: graphEvents[index]?.id ?? '',
+      target: event.id,
+      sourceHandle: 'sequence-out',
+      targetHandle: 'sequence-in',
+      type: 'smoothstep',
+      animated: false,
+      markerEnd: { type: MarkerType.ArrowClosed, color: '#94a3b8', width: 12, height: 12 },
+      style: { stroke: '#94a3b8', strokeWidth: 1.5 },
+    }));
+    return { nodes, edges };
+  }, [graphEvents, layout.columns]);
 
   if (graphEvents.length === 0) {
     return (
@@ -212,28 +312,38 @@ function ObservedEventGraph({ events }: { events: CodeObservatoryEvent[] }) {
   }
 
   return (
-    <div className="visual-workflow-canvas h-full overflow-hidden rounded-xl border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-950">
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={NODE_TYPES}
-        fitView
-        fitViewOptions={{ padding: 0.16, maxZoom: 1 }}
-        nodesDraggable={false}
-        nodesConnectable={false}
-        elementsSelectable={false}
-        panOnDrag
-        zoomOnScroll={false}
-        proOptions={{ hideAttribution: true }}
-      >
-        <Background color="#94a3b8" gap={20} size={1} />
-        <Controls showInteractive={false} />
-      </ReactFlow>
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      <div className="flex shrink-0 items-center justify-between gap-2 px-1 text-[10px] text-slate-400">
+        <span>
+          最近 {graphEvents.length} 条
+          {graphEvents.length > 0 && ` · #${graphEvents[0]?.sequence}–#${graphEvents[graphEvents.length - 1]?.sequence}`}
+        </span>
+        <span className="text-right">箭头仅表示观测序号先后，不代表因果</span>
+      </div>
+      <div ref={canvasRef} className="visual-workflow-canvas min-h-0 flex-1 overflow-hidden rounded-xl border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-950">
+        <ReactFlow
+          key={`${layout.columns}:${layout.rows}`}
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={NODE_TYPES}
+          fitView
+          fitViewOptions={{ padding: 0.14, minZoom: 0.35, maxZoom: 1 }}
+          nodesDraggable={false}
+          nodesConnectable={false}
+          elementsSelectable={false}
+          panOnDrag
+          zoomOnScroll={false}
+          proOptions={{ hideAttribution: true }}
+        >
+          <Background color="#94a3b8" gap={24} size={0.8} />
+          <Controls showInteractive={false} />
+        </ReactFlow>
+      </div>
     </div>
   );
 }
 
-export function CodeObservatoryLauncher({ run }: { run?: CodeAgentRun }) {
+export function CodeObservatoryLauncher({ run, sidebarCollapsed }: { run?: CodeAgentRun; sidebarCollapsed: boolean }) {
   const [isOpen, setIsOpen] = useState(false);
   const close = useCallback(() => setIsOpen(false), []);
 
@@ -264,14 +374,25 @@ export function CodeObservatoryLauncher({ run }: { run?: CodeAgentRun }) {
         <Activity size={14} aria-hidden="true" />
         链路观测
       </button>
-      {isOpen && run && (
-        <CodeObservatoryPanel key={run.id} run={run} onClose={close} />
-      )}
+      {isOpen && run && typeof document !== 'undefined'
+        ? createPortal(
+          <CodeObservatoryPanel key={run.id} run={run} onClose={close} sidebarCollapsed={sidebarCollapsed} />,
+          document.body,
+        )
+        : null}
     </>
   );
 }
 
-function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: () => void }) {
+function CodeObservatoryPanel({
+  run,
+  onClose,
+  sidebarCollapsed,
+}: {
+  run: CodeAgentRun;
+  onClose: () => void;
+  sidebarCollapsed: boolean;
+}) {
   const [state, dispatch] = useReducer(
     reduceCodeObservatoryState,
     run.id,
@@ -400,7 +521,7 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
 
   return (
     <div className={isFullscreen
-      ? 'fixed inset-0 z-[100] flex'
+      ? `fixed inset-y-0 right-0 left-0 z-[100] flex ${sidebarCollapsed ? 'lg:left-14' : 'lg:left-72'}`
       : 'fixed inset-x-3 bottom-3 top-[72px] z-[100] flex justify-end md:inset-x-8 md:bottom-8 md:top-[76px]'}>
       <aside
         id="code-observatory-panel"
@@ -486,7 +607,7 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
           <section aria-labelledby="code-observatory-flow-title" className="flex min-h-0 flex-col">
             <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
               <h2 id="code-observatory-flow-title" className="text-xs font-semibold text-slate-700 dark:text-slate-200">事件时序</h2>
-              <span className="text-[10px] text-slate-400">连线仅表示序号先后，不代表因果</span>
+              <span className="text-[10px] text-slate-400">按事件类别分色，序号蛇形排列</span>
             </div>
             <div className="min-h-0 flex-1">
               <ObservedEventGraph events={events} />

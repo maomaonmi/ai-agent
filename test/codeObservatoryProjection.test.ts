@@ -97,5 +97,6 @@ test('projects backend observation offsets and keeps verification outcomes disti
   assert.equal(projected[1]?.status, 'inconclusive');
   assert.equal(projected[0]?.label, '验证记录 · 验证结果提交');
   assert.equal(projected[0]?.sourceRole, 'runtime_committed');
+  assert.equal(projected[0]?.category, 'verification');
   assert.ok(projected.every((item) => !JSON.stringify(item).includes('source_role')));
 });

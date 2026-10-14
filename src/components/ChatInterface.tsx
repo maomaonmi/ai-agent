@@ -4423,6 +4423,7 @@ export default function ChatInterface() {
               code={generatedCode}
               prompts={codePrompts}
               topbarTargetId="code-workspace-topbar-slot"
+              sidebarCollapsed={isHistoryCollapsed}
               topbarActions={(
                 <div className="flex shrink-0 items-center gap-2">
                   <button

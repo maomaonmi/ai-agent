@@ -27,6 +27,7 @@ export interface CodeObservatoryEvent {
   label: string;
   status: CodeObservatoryStatus;
   sourceRole?: string;
+  category?: CodeObservatoryCategory;
 }
 
 const PHASE_LABELS: Record<string, string> = {
@@ -92,7 +93,7 @@ const KNOWN_STATUSES = new Set<CodeObservatoryStatus>([
   'cancelled',
 ]);
 
-const EVENT_CATEGORY_LABELS: Record<string, string> = {
+export const EVENT_CATEGORY_LABELS = {
   intake: '任务接入',
   control: '控制判定',
   execution: '执行活动',
@@ -103,7 +104,9 @@ const EVENT_CATEGORY_LABELS: Record<string, string> = {
   terminal: '终态决策',
   observation: '观测记录',
   other: '流程事件',
-};
+} as const;
+
+export type CodeObservatoryCategory = keyof typeof EVENT_CATEGORY_LABELS;
 
 const VERIFICATION_STATUSES = new Set<CodeObservatoryStatus>([
   'verified',
@@ -115,6 +118,12 @@ const VERIFICATION_STATUSES = new Set<CodeObservatoryStatus>([
   'invalid_test',
   'infra_failure',
 ]);
+
+function safeEventCategory(value: string): CodeObservatoryCategory {
+  return Object.prototype.hasOwnProperty.call(EVENT_CATEGORY_LABELS, value)
+    ? value as CodeObservatoryCategory
+    : 'other';
+}
 
 function safeFeedStatus(event: CodeObservatoryWireEvent): CodeObservatoryStatus {
   const verification = event.status?.verification;
@@ -154,9 +163,8 @@ export function projectCodeObservatoryFeedEvents(
     ) continue;
 
     seenOffsets.add(offset);
-    const category = Object.prototype.hasOwnProperty.call(EVENT_CATEGORY_LABELS, event.event_category)
-      ? EVENT_CATEGORY_LABELS[event.event_category]
-      : '流程事件';
+    const eventCategory = safeEventCategory(event.event_category);
+    const category = EVENT_CATEGORY_LABELS[eventCategory];
     const typeLabel = Object.prototype.hasOwnProperty.call(TYPE_LABELS, event.event_type)
       ? TYPE_LABELS[event.event_type]
       : undefined;
@@ -170,6 +178,7 @@ export function projectCodeObservatoryFeedEvents(
       label: typeLabel ? `${category} · ${typeLabel}` : category,
       status: safeFeedStatus(event),
       sourceRole: event.source_role,
+      category: eventCategory,
     });
   }
 

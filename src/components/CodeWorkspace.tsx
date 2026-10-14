@@ -86,6 +86,7 @@ interface CodeWorkspaceProps {
   prompts: string[];
   topbarActions?: ReactNode;
   topbarTargetId?: string;
+  sidebarCollapsed: boolean;
   // Why: 与 prompts 平行，回显每条用户提问附带的图片缩略图。
   promptAttachments?: ChatAttachment[][];
   input: string;
@@ -218,6 +219,7 @@ export default function CodeWorkspace({
   code,
   prompts,
   topbarActions,
+  sidebarCollapsed,
   topbarTargetId,
   promptAttachments = [],
   input,
@@ -1895,7 +1897,7 @@ export default function CodeWorkspace({
           >
             {isInspectMode ? '退出检查' : '检查元素'}
           </button>
-          <CodeObservatoryLauncher run={latestAgentRun} />
+          <CodeObservatoryLauncher run={latestAgentRun} sidebarCollapsed={sidebarCollapsed} />
           {topbarActions}
         </div>
       </div>
