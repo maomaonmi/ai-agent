@@ -20,6 +20,7 @@ import { runCodeObservatoryStream } from '../Code/codeObservatoryStream';
 import type { CodeObservatoryConnection } from '../Code/codeObservatoryTypes';
 import { DecisionInspector } from './DecisionInspector';
 import { EvidenceInspector } from './EvidenceInspector';
+import { OperationRelationsInspector } from './OperationRelationsInspector';
 import type { CodeAgentRun } from '../lib/api';
 import { CodeObservatoryApiError, getCodeObservatorySnapshot, type CodeObservatoryErrorCode } from '../lib/codeObservatoryApi';
 
@@ -278,11 +279,18 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
   );
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [inspectorTab, setInspectorTab] = useState<'events' | 'decisions' | 'evidence'>('events');
+  const [inspectorTab, setInspectorTab] = useState<'events' | 'decisions' | 'evidence' | 'operation'>('events');
   const events = useMemo(
     () => projectCodeObservatoryFeedEvents(run.id, state.events, EVENT_LIMIT),
     [run.id, state.events],
   );
+  const operationIds = useMemo(
+    () => [...new Set(state.events
+      .map((event) => event.operation_id)
+      .filter((operationId): operationId is string => Boolean(operationId)))],
+    [state.events],
+  );
+  const operationId = operationIds.length === 1 ? operationIds[0] : null;
   const lastSequence = state.observationOffset;
   const executionStatus = state.status?.execution ?? 'unknown';
   const verificationStatus = state.status?.verification ?? 'unknown';
@@ -341,6 +349,16 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
       controller.abort();
     };
   }, [refreshVersion, run.id]);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsFullscreen(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isFullscreen]);
 
   const latestEvents = useMemo(() => [...events].reverse(), [events]);
   const connectionMessage = state.connectionError
@@ -426,11 +444,12 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
               aria-pressed={isFullscreen}
               aria-label={isFullscreen ? '退出链路面板全屏' : '全屏显示链路面板'}
               title={isFullscreen ? '退出全屏' : '全屏显示'}
-              className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-2 text-xs text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
             >
               {isFullscreen
                 ? <Minimize2 size={14} aria-hidden="true" />
                 : <Maximize2 size={14} aria-hidden="true" />}
+              <span>{isFullscreen ? '退出全屏' : '全屏'}</span>
             </button>
             <button
               type="button"
@@ -498,8 +517,15 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
                   onClick={() => setInspectorTab('evidence')}
                   className={`rounded-md px-2 py-1 text-[10px] font-medium ${inspectorTab === 'evidence' ? 'bg-white text-slate-800 shadow-sm dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 dark:text-slate-400'}`}
                 >证据检查 · {state.evidence.length}</button>
+                <button
+                  type="button"
+                  aria-pressed={inspectorTab === 'operation'}
+                  aria-controls="code-observatory-inspector-panel"
+                  onClick={() => setInspectorTab('operation')}
+                  className={`shrink-0 rounded-md px-2 py-1 text-[10px] font-medium ${inspectorTab === 'operation' ? 'bg-white text-slate-800 shadow-sm dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 dark:text-slate-400'}`}
+                >Operation · {operationId ? '聚合' : '未关联'}</button>
               </div>
-              <span className="text-[10px] text-slate-400">{inspectorTab === 'events' ? `最近 ${EVENT_LIMIT} 条` : '只读 · 来源事实'}</span>
+              <span className="shrink-0 text-[10px] text-slate-400">{inspectorTab === 'events' ? `最近 ${EVENT_LIMIT} 条` : '只读 · 来源事实'}</span>
             </div>
             <div
               id="code-observatory-inspector-panel"
@@ -510,6 +536,20 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
                 <DecisionInspector decisions={state.decisions} />
               ) : inspectorTab === 'evidence' ? (
                 <EvidenceInspector key={run.id} runId={run.id} evidence={state.evidence} />
+              ) : inspectorTab === 'operation' ? (
+                operationId ? (
+                  <OperationRelationsInspector
+                    key={`${run.id}:${operationId}`}
+                    operationId={operationId}
+                    focusedRunId={run.id}
+                  />
+                ) : (
+                  <div role="status" className="p-4 text-xs text-slate-500">
+                    {operationIds.length > 1
+                      ? 'Run 持久事件引用了多个 Operation 身份，聚合信息已隐藏。'
+                      : '该 Run 没有持久 operation_id；未按文本或时间推断归属。'}
+                  </div>
+                )
               ) : eventPanelContent}
             </div>
           </section>

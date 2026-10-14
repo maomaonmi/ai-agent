@@ -226,6 +226,127 @@ export interface CodeObservatorySnapshot {
   };
 }
 
+export interface CodeObservatoryOperationRun {
+  run_id: string;
+  roles: Array<'execution' | 'recovery' | 'verification' | 'action' | 'current' | 'resume'>;
+  execution_generations: number[];
+  association_status: 'explicit_event' | 'operation_projection' | 'current_pointer';
+  source_refs: CodeObservatorySourceRef[];
+}
+
+export interface CodeObservatoryOperationRunLink {
+  from_run_id: string;
+  to_run_id: string;
+  relation_kind: 'execution_claim' | 'execution_takeover' | 'resume' | 'verification' | 'repair_authorization';
+  binding_status: 'explicit' | 'candidate_match' | 'candidate_mismatch' | 'verification_missing' | 'identity_mismatch';
+  candidate_revision?: string | null;
+  verification_epoch?: number | null;
+  verification_epoch_status?: 'matched' | 'mismatched' | 'unknown' | null;
+  source_kind: 'runtime_event' | 'operation_projection';
+  source_refs: CodeObservatorySourceRef[];
+}
+
+export interface CodeObservatoryRecoveryAttempt {
+  attempt_id: string;
+  run_id: string;
+  action_id: string;
+  executor_id: string;
+  lane_id: string;
+  status: 'started' | 'completed' | 'failed' | 'unknown' | 'cancelled';
+  attempt_number: number;
+  started_at_ms: number;
+  completed_at_ms?: number | null;
+  candidate_revision?: string | null;
+  based_on_operation_version?: number | null;
+  side_effect_class: 'none' | 'idempotent' | 'compensatable' | 'non_idempotent';
+  error_code?: string | null;
+  required_authorization_ids: string[];
+  source_refs: CodeObservatorySourceRef[];
+}
+
+export interface CodeObservatoryRepairAuthorization {
+  authorization_id: string;
+  dispatch_run_id: string;
+  verification_run_id: string;
+  candidate_revision: string;
+  verification_epoch: number;
+  binding_status: 'candidate_match' | 'candidate_mismatch' | 'verification_missing' | 'identity_mismatch';
+  verification_epoch_status: 'matched' | 'mismatched' | 'unknown';
+  source_ref: CodeObservatorySourceRef;
+}
+
+export interface CodeObservatoryUnknownAction {
+  action_id: string;
+  tool_name: string;
+  run_id?: string | null;
+  execution_generation?: number | null;
+  status: 'unknown';
+  source_ref?: CodeObservatorySourceRef | null;
+}
+
+export interface CodeObservatoryReconciliation {
+  action_id: string;
+  tool_name: string;
+  execution_generation: number;
+  outcome: 'confirmed_applied' | 'confirmed_not_applied';
+  binding_status: 'explicit' | 'identity_mismatch';
+  source_ref: CodeObservatorySourceRef;
+}
+
+export interface CodeObservatoryVerification {
+  source_run_id?: string | null;
+  verification_run_id: string;
+  candidate_revision: string;
+  verification_epoch?: number | null;
+  status: string;
+  verified?: boolean | null;
+  source_ref: CodeObservatorySourceRef;
+}
+
+export interface CodeObservatoryOperationView {
+  operation_id: string;
+  lifecycle?: string | null;
+  version?: number | null;
+  execution_generation?: number | null;
+  current_run_id?: string | null;
+  recovery_budget: {
+    takeovers_used?: number | null;
+    takeovers_limit?: number | null;
+    status: 'available' | 'exhausted' | 'unknown';
+  };
+  runs: CodeObservatoryOperationRun[];
+  run_links: CodeObservatoryOperationRunLink[];
+  recovery_attempts: CodeObservatoryRecoveryAttempt[];
+  repair_authorizations: CodeObservatoryRepairAuthorization[];
+  verifications: CodeObservatoryVerification[];
+  unknown_actions: CodeObservatoryUnknownAction[];
+  reconciliations: CodeObservatoryReconciliation[];
+  source_gaps: string[];
+}
+
+export interface CodeObservatoryOperationSnapshot {
+  schema_version: 'code-observatory/v1';
+  projection_version: number;
+  operation_id: string;
+  operation: CodeObservatoryOperationView;
+  feed: {
+    schema_version: 'code-observatory/v1';
+    aggregate_kind: 'operation';
+    aggregate_id: string;
+    status: CodeObservatoryStatusAxes;
+    cursor: {
+      aggregate_kind: 'operation';
+      aggregate_id: string;
+      projection_version: number;
+      observation_offset: number;
+      retention_floor_offset: number;
+    };
+    events: CodeObservatoryWireEvent[];
+    source_watermarks: CodeObservatorySourceWatermark[];
+    has_more: boolean;
+  };
+}
+
 export interface CodeObservatoryEventPage {
   schema_version: 'code-observatory/v1';
   projection_version: number;
@@ -276,6 +397,19 @@ export async function getCodeObservatorySnapshot(
   );
   if (!response.ok) await throwCodeObservatoryApiError(response);
   return response.json() as Promise<CodeObservatorySnapshot>;
+}
+
+/** Read the persisted Operation aggregate and its explicit Run/recovery links. */
+export async function getCodeObservatoryOperationSnapshot(
+  operationId: string,
+  signal?: AbortSignal,
+): Promise<CodeObservatoryOperationSnapshot> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/code/observatory/operations/${encodeURIComponent(operationId)}/snapshot`,
+    { headers: { Accept: 'application/json' }, cache: 'no-store', signal },
+  );
+  if (!response.ok) await throwCodeObservatoryApiError(response);
+  return response.json() as Promise<CodeObservatoryOperationSnapshot>;
 }
 
 /** Read one bounded page from the same immutable observation-offset stream. */
