@@ -10,7 +10,7 @@ import {
   type Node,
   type NodeProps,
 } from '@xyflow/react';
-import { Activity, AlertCircle, Clock3, RefreshCw, X } from 'lucide-react';
+import { Activity, AlertCircle, Clock3, Maximize2, Minimize2, RefreshCw, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import '@xyflow/react/dist/style.css';
 
@@ -173,6 +173,7 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
   const [readState, setReadState] = useState<'loading' | 'ready' | 'error'>('loading');
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [lastSequence, setLastSequence] = useState(0);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const cursorRef = useRef(0);
   const runStatus = run.trace.status ?? (run.trace.isRunning ? 'running' : 'completed');
   const isRunActive = run.trace.isRunning;
@@ -226,11 +227,15 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
   const latestEvents = useMemo(() => [...events].reverse(), [events]);
 
   return (
-    <div className="fixed inset-x-3 bottom-3 top-[72px] z-[100] flex justify-end md:inset-x-8 md:bottom-8 md:top-[76px]">
+    <div className={isFullscreen
+      ? 'fixed inset-0 z-[100] flex'
+      : 'fixed inset-x-3 bottom-3 top-[72px] z-[100] flex justify-end md:inset-x-8 md:bottom-8 md:top-[76px]'}>
       <aside
         id="code-observatory-panel"
         aria-label="Code 链路观测面板"
-        className="flex h-full w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900"
+        className={`flex h-full w-full flex-col overflow-hidden border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900 ${
+          isFullscreen ? 'max-w-none rounded-none' : 'max-w-5xl rounded-2xl'
+        }`}
       >
         <header className="flex shrink-0 items-center justify-between gap-4 border-b border-slate-200 px-5 py-4 dark:border-slate-700">
           <div className="min-w-0">
@@ -258,6 +263,18 @@ function CodeObservatoryPanel({ run, onClose }: { run: CodeAgentRun; onClose: ()
               className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
             >
               <RefreshCw size={14} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsFullscreen((fullscreen) => !fullscreen)}
+              aria-pressed={isFullscreen}
+              aria-label={isFullscreen ? '退出链路面板全屏' : '全屏显示链路面板'}
+              title={isFullscreen ? '退出全屏' : '全屏显示'}
+              className="rounded-lg border border-slate-200 p-2 text-slate-600 hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+            >
+              {isFullscreen
+                ? <Minimize2 size={14} aria-hidden="true" />
+                : <Maximize2 size={14} aria-hidden="true" />}
             </button>
             <button
               type="button"

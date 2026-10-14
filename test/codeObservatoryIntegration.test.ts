@@ -23,3 +23,9 @@ test('loads persisted events through replay and renders them in React Flow witho
   assert.match(panelSource, /<ReactFlow[\s\S]*?nodes=\{nodes\}[\s\S]*?edges=\{edges\}/);
   assert.doesNotMatch(panelSource, /event\.content|event\.metadata|event\.command/);
 });
+
+test('offers an accessible full-screen toggle that expands the panel to the viewport', () => {
+  assert.match(panelSource, /aria-label=\{isFullscreen \? '退出链路面板全屏' : '全屏显示链路面板'\}/);
+  assert.match(panelSource, /aria-pressed=\{isFullscreen\}/);
+  assert.match(panelSource, /'fixed inset-0 z-\[100\] flex'/);
+});
