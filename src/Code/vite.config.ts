@@ -5,6 +5,8 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    host: '127.0.0.1',
+    strictPort: true,
     proxy: {
       // 前端跑在 5173，后端(FastAPI)跑在 8000，这里做转发避免跨域配置麻烦
       '/api': {
