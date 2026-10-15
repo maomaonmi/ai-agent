@@ -318,6 +318,8 @@ export function RequirementEvidenceGraph({
               fitView
               fitViewOptions={{ padding: 0.18, minZoom: 0.28, maxZoom: 0.9 }}
               onNodeClick={(_event, node) => setSelectedNodeId(node.id)}
+              onSelectionChange={({ nodes }) => setSelectedNodeId(nodes[nodes.length - 1]?.id ?? null)}
+              nodesFocusable
               nodesDraggable={false}
               nodesConnectable={false}
               elementsSelectable

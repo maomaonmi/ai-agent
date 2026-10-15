@@ -74,6 +74,7 @@ export function projectControlTopology(
     type: 'controlState',
     position: statePosition(state.state_id, index),
     data: { stateId: state.state_id, terminal: state.terminal },
+    ariaLabel: `控制状态：${CONTROL_STATE_LABELS[state.state_id] ?? state.state_id}`,
     selected: selection?.kind === 'state' && selection.id === state.state_id,
     draggable: false,
   }));

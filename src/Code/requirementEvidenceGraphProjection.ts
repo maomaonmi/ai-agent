@@ -59,6 +59,7 @@ export function projectRequirementEvidenceGraph(
       type: 'requirementEvidenceNode',
       position: { x: lane * X_GAP, y: row * Y_GAP },
       data: { fact },
+      ariaLabel: `${fact.kind}：${fact.entity_id}；${fact.status ?? '未知'}`,
       draggable: false,
       selectable: true,
     };

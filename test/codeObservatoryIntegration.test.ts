@@ -16,6 +16,10 @@ const evidenceViewSource = readFileSync(resolve(testDirectory, '../src/Code/evid
 const apiSource = readFileSync(resolve(testDirectory, '../src/lib/codeObservatoryApi.ts'), 'utf8');
 const reducerSource = readFileSync(resolve(testDirectory, '../src/Code/codeObservatoryReducer.ts'), 'utf8');
 const streamSource = readFileSync(resolve(testDirectory, '../src/Code/codeObservatoryStream.ts'), 'utf8');
+const controlTopologySource = readFileSync(resolve(testDirectory, '../src/components/ControlTopology.tsx'), 'utf8');
+const requirementGraphSource = readFileSync(resolve(testDirectory, '../src/components/RequirementEvidenceGraph.tsx'), 'utf8');
+const controlProjectionSource = readFileSync(resolve(testDirectory, '../src/Code/controlTopologyProjection.ts'), 'utf8');
+const globalStyles = readFileSync(resolve(testDirectory, '../src/app/globals.css'), 'utf8');
 
 test('mounts the observatory launcher in the Code workbench top toolbar', () => {
   const toolbarStart = workspaceSource.indexOf('const topbar = (');
@@ -54,6 +58,26 @@ test('offers an accessible full-screen toggle that expands the panel to the view
   assert.match(panelSource, /fixed inset-y-0 right-0 left-0 z-\[100\] flex/);
   assert.match(panelSource, /lg:left-14/);
   assert.match(panelSource, /lg:left-72/);
+});
+
+test('treats the panel as a modal dialog with keyboard focus management', () => {
+  assert.match(panelSource, /role="dialog"/);
+  assert.match(panelSource, /aria-modal="true"/);
+  assert.match(panelSource, /aria-labelledby="code-observatory-panel-title"/);
+  assert.match(panelSource, /focusableElements/);
+  assert.match(panelSource, /event\.shiftKey/);
+  assert.match(panelSource, /requestAnimationFrame\(/);
+  assert.match(panelSource, /flex-wrap items-center justify-between gap-x-4/);
+  assert.match(globalStyles, /\.code-observatory-dialog :is\(button, \[tabindex\]\):focus-visible/);
+});
+
+test('routes keyboard graph selection into the same inspectors as pointer selection', () => {
+  assert.match(executionGraphSource, /onSelectionChange=\{\(\{ nodes \}\)/);
+  assert.match(executionGraphSource, /ariaLabel: `\$\{NODE_KIND_LABELS/);
+  assert.match(requirementGraphSource, /onSelectionChange=\{\(\{ nodes \}\)/);
+  assert.match(controlTopologySource, /edgesFocusable/);
+  assert.match(controlTopologySource, /onSelectionChange=\{\(\{ nodes, edges \}\)/);
+  assert.match(controlProjectionSource, /ariaLabel: `控制状态：/);
 });
 
 test('offers the versioned control-rule graph without replacing the event timeline', () => {

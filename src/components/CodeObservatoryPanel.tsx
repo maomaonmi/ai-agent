@@ -354,6 +354,7 @@ function ObservedEventGraph({ events }: { events: CodeObservatoryEvent[] }) {
           fitViewOptions={{ padding: 0.14, minZoom: 0.35, maxZoom: 1 }}
           nodesDraggable={false}
           nodesConnectable={false}
+          nodesFocusable={false}
           elementsSelectable={false}
           panOnDrag
           zoomOnScroll={false}
@@ -370,15 +371,6 @@ function ObservedEventGraph({ events }: { events: CodeObservatoryEvent[] }) {
 export function CodeObservatoryLauncher({ run, sidebarCollapsed }: { run?: CodeAgentRun; sidebarCollapsed: boolean }) {
   const [isOpen, setIsOpen] = useState(false);
   const close = useCallback(() => setIsOpen(false), []);
-
-  useEffect(() => {
-    if (!isOpen) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close();
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [close, isOpen]);
 
   return (
     <>
@@ -431,6 +423,8 @@ function CodeObservatoryPanel({
   const replayControllerRef = useRef<AbortController | null>(null);
   const [graphView, setGraphView] = useState<'timeline' | 'execution' | 'control' | 'requirements'>('timeline');
   const [inspectorTab, setInspectorTab] = useState<'events' | 'decisions' | 'evidence' | 'operation'>('events');
+  const panelRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
   const replayState = useMemo(
     () => replaySnapshot ? createCodeObservatoryReplayState(replaySnapshot, run.id) : null,
     [replaySnapshot, run.id],
@@ -511,6 +505,57 @@ function CodeObservatoryPanel({
   useEffect(() => () => replayControllerRef.current?.abort(), []);
 
   useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    closeButtonRef.current?.focus();
+    return () => {
+      if (previousFocus?.isConnected) {
+        window.requestAnimationFrame(() => previousFocus.focus());
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleDialogKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        if (isFullscreen) setIsFullscreen(false);
+        else onClose();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusableElements = Array.from(panel.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )).filter((element) => (
+        element.getAttribute('aria-hidden') !== 'true'
+        && !element.closest('[hidden]')
+        && getComputedStyle(element).visibility !== 'hidden'
+      ));
+      const first = focusableElements[0];
+      const last = focusableElements[focusableElements.length - 1];
+      const active = document.activeElement;
+
+      if (!first || !last) {
+        event.preventDefault();
+        panel.focus();
+      } else if (event.shiftKey && (active === first || !panel.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !panel.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleDialogKeyDown);
+    return () => document.removeEventListener('keydown', handleDialogKeyDown);
+  }, [isFullscreen, onClose]);
+
+  useEffect(() => {
     const controller = new AbortController();
     dispatch({ type: 'snapshot_loading' });
     const connect = async () => {
@@ -564,16 +609,6 @@ function CodeObservatoryPanel({
     };
   }, [refreshVersion, run.id]);
 
-  useEffect(() => {
-    if (!isFullscreen) return;
-
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setIsFullscreen(false);
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isFullscreen]);
-
   const latestEvents = useMemo(() => [...events].reverse(), [events]);
   const connectionMessage = state.connectionError
     ? API_ERROR_LABELS[state.connectionError]
@@ -619,23 +654,27 @@ function CodeObservatoryPanel({
       ? `fixed inset-y-0 right-0 left-0 z-[100] flex ${sidebarCollapsed ? 'lg:left-14' : 'lg:left-72'}`
       : 'fixed inset-x-3 bottom-3 top-[72px] z-[100] flex justify-end md:inset-x-8 md:bottom-8 md:top-[76px]'}>
       <aside
+        ref={panelRef}
         id="code-observatory-panel"
-        aria-label="Code 链路观测面板"
-        className={`flex h-full w-full flex-col overflow-hidden border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900 ${
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="code-observatory-panel-title"
+        tabIndex={-1}
+        className={`code-observatory-dialog flex h-full w-full flex-col overflow-hidden border border-slate-200 bg-white shadow-2xl dark:border-slate-700 dark:bg-slate-900 ${
           isFullscreen ? 'max-w-none rounded-none' : 'max-w-5xl rounded-2xl'
         }`}
       >
-        <header className="flex shrink-0 items-center justify-between gap-4 border-b border-slate-200 px-5 py-4 dark:border-slate-700">
+        <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-slate-200 px-4 py-3 sm:px-5 sm:py-4 dark:border-slate-700">
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
+            <h2 id="code-observatory-panel-title" className="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
               <Activity size={16} className="text-cyan-600 dark:text-cyan-300" aria-hidden="true" />
               Code 链路观测
-            </div>
+            </h2>
             <div className="mt-1 truncate font-mono text-[11px] text-slate-500" title={run.id}>
               Run {run.id}
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="ml-auto flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2">
             <span className={`rounded-full border px-2.5 py-1 text-[11px] font-medium ${
               executionStatus === 'running'
                 ? 'border-sky-200 bg-sky-50 text-sky-700 dark:border-sky-400/30 dark:bg-sky-400/10 dark:text-sky-200'
@@ -668,6 +707,7 @@ function CodeObservatoryPanel({
               <span>{isFullscreen ? '退出全屏' : '全屏'}</span>
             </button>
             <button
+              ref={closeButtonRef}
               type="button"
               onClick={onClose}
               aria-label="关闭链路观测面板"
@@ -767,7 +807,7 @@ function CodeObservatoryPanel({
         {graphView === 'control' ? (
           <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
             <div className="flex shrink-0 items-center justify-between gap-3">
-              <div role="group" aria-label="链路图类型" className="flex items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+              <div role="group" aria-label="链路图类型" className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
                 <button
                   type="button"
                   aria-pressed="false"
@@ -801,7 +841,7 @@ function CodeObservatoryPanel({
         ) : graphView === 'execution' ? (
           <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
             <div className="flex shrink-0 items-center justify-between gap-3">
-              <div role="group" aria-label="链路图类型" className="flex items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+              <div role="group" aria-label="链路图类型" className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
                 <button
                   type="button"
                   aria-pressed="false"
@@ -882,11 +922,11 @@ function CodeObservatoryPanel({
             </div>
           </div>
         ) : (
-        <div className="grid min-h-0 flex-1 grid-rows-[minmax(190px,0.9fr)_minmax(190px,1.1fr)] gap-4 p-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(260px,0.8fr)] lg:grid-rows-1">
+        <div className="grid min-h-0 flex-1 grid-rows-[minmax(140px,0.8fr)_minmax(160px,1.2fr)] gap-3 p-3 sm:gap-4 sm:p-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(260px,0.8fr)] lg:grid-rows-1">
           <section aria-labelledby="code-observatory-flow-title" className="flex min-h-0 flex-col">
             <h2 id="code-observatory-flow-title" className="sr-only">事件时序</h2>
             <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
-              <div role="group" aria-label="链路图类型" className="flex items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+              <div role="group" aria-label="链路图类型" className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
                 <button
                   type="button"
                   aria-pressed
@@ -920,7 +960,7 @@ function CodeObservatoryPanel({
 
           <section aria-label="事件记录与决策检查" className="flex min-h-0 flex-col">
             <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
-              <div role="group" aria-label="观测详情" className="flex items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
+              <div role="group" aria-label="观测详情" className="flex flex-wrap items-center gap-1 rounded-lg bg-slate-100 p-1 dark:bg-slate-800">
                 <button
                   type="button"
                   aria-pressed={inspectorTab === 'events'}

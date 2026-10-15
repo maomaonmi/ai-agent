@@ -29,8 +29,6 @@ import { ControlTopologyInspector } from './ControlTopologyInspector';
 function ControlStateNode({ data, selected }: NodeProps<ControlTopologyNode>) {
   return (
     <div
-      role="group"
-      aria-label={`控制状态：${CONTROL_STATE_LABELS[data.stateId] ?? data.stateId}`}
       className={`relative w-[208px] rounded-lg border border-l-4 px-3 py-2.5 shadow-sm transition-colors ${
         selected
           ? 'border-cyan-400 border-l-cyan-600 bg-cyan-50 ring-2 ring-cyan-500/20 dark:border-cyan-400 dark:bg-cyan-950/70'
@@ -93,6 +91,15 @@ function ControlTopologyGraph({
         proOptions={{ hideAttribution: true }}
         onNodeClick={(_event, node) => onSelectionChange({ kind: 'state', id: node.data.stateId })}
         onEdgeClick={(_event, edge) => onSelectionChange({ kind: 'transition_group', id: edge.id })}
+        nodesFocusable
+        edgesFocusable
+        onSelectionChange={({ nodes, edges }) => {
+          const selectedNode = nodes[nodes.length - 1];
+          const selectedEdge = edges[edges.length - 1];
+          if (selectedNode) onSelectionChange({ kind: 'state', id: selectedNode.data.stateId });
+          else if (selectedEdge) onSelectionChange({ kind: 'transition_group', id: selectedEdge.id });
+          else onSelectionChange(null);
+        }}
         onPaneClick={() => onSelectionChange(null)}
         defaultEdgeOptions={{
           type: 'smoothstep',
@@ -186,7 +193,7 @@ export function ControlTopology({ reloadKey = 0 }: { reloadKey?: number }) {
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 grid-rows-[minmax(280px,1fr)_minmax(180px,0.8fr)] gap-3 xl:grid-cols-[minmax(0,1fr)_340px] xl:grid-rows-1">
+      <div className="grid min-h-0 flex-1 grid-rows-[minmax(160px,1fr)_minmax(120px,0.8fr)] gap-3 sm:grid-rows-[minmax(240px,1fr)_minmax(150px,0.8fr)] xl:grid-cols-[minmax(0,1fr)_340px] xl:grid-rows-1">
         <section aria-label="控制状态与允许转换图" className="flex min-h-0 flex-col gap-2">
           <div className="flex shrink-0 items-start gap-2 rounded-lg border border-amber-200 bg-amber-50/80 px-3 py-2 dark:border-amber-400/20 dark:bg-amber-400/5">
             <ShieldAlert size={13} className="mt-0.5 shrink-0 text-amber-700 dark:text-amber-300" aria-hidden="true" />

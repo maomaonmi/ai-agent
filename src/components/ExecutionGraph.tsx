@@ -263,14 +263,20 @@ export function ExecutionGraph({
   const projection = useMemo(() => projectExecutionGraph({
     runId, nodes, spans, events, decisions, evidence, operation, collapsedKinds,
   }), [collapsedKinds, decisions, events, evidence, nodes, operation, runId, spans]);
-  const flowNodes = useMemo<FlowNode[]>(() => projection.nodes.map((graphNode) => ({
-    id: graphNode.id,
-    type: 'executionGraphNode',
-    position: graphNode.position,
-    data: { graphNode },
-    draggable: false,
-    selectable: true,
-  })), [projection.nodes]);
+  const flowNodes = useMemo<FlowNode[]>(() => projection.nodes.map((graphNode) => {
+    const status = graphNode.verificationStatus && graphNode.verificationStatus !== 'unknown'
+      ? graphNode.verificationStatus
+      : graphNode.executionStatus;
+    return {
+      id: graphNode.id,
+      type: 'executionGraphNode',
+      position: graphNode.position,
+      data: { graphNode },
+      ariaLabel: `${NODE_KIND_LABELS[graphNode.kind]}：${graphNode.label}；${statusLabel(status)}`,
+      draggable: false,
+      selectable: true,
+    };
+  }), [projection.nodes]);
   const flowEdges = useMemo<FlowEdge[]>(() => projection.edges.map((edge) => ({
     id: edge.id,
     source: edge.source,
@@ -288,8 +294,8 @@ export function ExecutionGraph({
   const coverage = coverageMessages(projection.coverage);
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[minmax(0,1fr)_minmax(155px,0.55fr)] gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(260px,0.34fr)] lg:grid-rows-1">
-      <section aria-label="实际执行图画布" className="relative min-h-[240px] overflow-hidden rounded-xl border border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-950">
+    <div className="grid h-full min-h-0 grid-rows-[minmax(180px,1fr)_minmax(120px,0.55fr)] gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(260px,0.34fr)] lg:grid-rows-1">
+      <section aria-label="实际执行图画布" className="relative min-h-[180px] overflow-hidden rounded-xl border border-slate-200 bg-slate-50 sm:min-h-[240px] dark:border-slate-700 dark:bg-slate-950">
         <div className="absolute right-3 top-3 z-10 flex max-w-[72%] flex-wrap justify-end gap-1" role="group" aria-label="折叠执行图分组">
           {COLLAPSIBLE_KINDS.map((kind) => {
             const groupNode = projection.nodes.find((node) => node.kind === 'group' && node.groupKind === kind);
@@ -328,6 +334,7 @@ export function ExecutionGraph({
             fitViewOptions={{ padding: 0.18, minZoom: 0.22, maxZoom: 1 }}
             nodesDraggable={false}
             nodesConnectable={false}
+            nodesFocusable
             elementsSelectable
             panOnDrag
             zoomOnScroll
@@ -339,6 +346,18 @@ export function ExecutionGraph({
                 return;
               }
               setSelectedNodeId(node.id);
+            }}
+            onSelectionChange={({ nodes }) => {
+              const selectedNode = nodes[nodes.length - 1];
+              if (!selectedNode) {
+                setSelectedNodeId(null);
+              } else if (selectedNode.data.graphNode.kind === 'group' && selectedNode.data.graphNode.groupKind) {
+                const groupKind = selectedNode.data.graphNode.groupKind;
+                setCollapsedKinds((current) => current.filter((kind) => kind !== groupKind));
+                setSelectedNodeId(null);
+              } else {
+                setSelectedNodeId(selectedNode.id);
+              }
             }}
             onPaneClick={() => setSelectedNodeId(null)}
             proOptions={{ hideAttribution: true }}
