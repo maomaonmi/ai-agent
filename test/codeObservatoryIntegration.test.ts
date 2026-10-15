@@ -42,7 +42,7 @@ test('loads the persisted observation snapshot and renders safe events in React 
   assert.doesNotMatch(panelSource, /window\.setInterval/);
   assert.doesNotMatch(panelSource, /event\.content|event\.metadata|event\.command/);
   assert.doesNotMatch(panelSource, /run\.trace\.status/);
-  assert.match(panelSource, /state\.status\?\.execution/);
+  assert.match(panelSource, /displayState\.status\?\.execution/);
   assert.match(panelSource, /state\.connection/);
   assert.match(reducerSource, /MAX_CODE_OBSERVATORY_EVENTS/);
   assert.match(streamSource, /recoverCodeObservatoryGap/);
@@ -60,15 +60,16 @@ test('offers the versioned control-rule graph without replacing the event timeli
   assert.match(panelSource, /setGraphView\('control'\)/);
   assert.match(panelSource, /setGraphView\('timeline'\)/);
   assert.match(panelSource, /<ControlTopology reloadKey=\{refreshVersion\} \/>/);
-  assert.match(panelSource, /静态规则参考 · 不代表 Run 实际执行路径/);
+  assert.match(panelSource, /当前静态规则参考 · 不代表 Run 实际执行路径/);
   assert.match(apiSource, /\/api\/code\/observatory\/topology/);
 });
 
 test('offers the actual execution graph from persisted nodes, spans, causation and operation relations', () => {
   assert.match(panelSource, /setGraphView\('execution'\)/);
   assert.match(panelSource, /<ExecutionGraph/);
-  assert.match(panelSource, /nodes=\{state\.nodes\}/);
-  assert.match(panelSource, /spans=\{state\.spans\}/);
+  assert.match(panelSource, /nodes=\{displayState\.nodes\}/);
+  assert.match(panelSource, /spans=\{displayState\.spans\}/);
+  assert.match(panelSource, /events=\{displayState\.events\}/);
   assert.match(executionGraphSource, /getCodeObservatoryOperationSnapshot\(/);
   assert.match(executionProjectionSource, /causation_refs/);
   assert.match(executionProjectionSource, /artifact_dependency/);
@@ -82,8 +83,8 @@ test('offers the actual execution graph from persisted nodes, spans, causation a
 
 test('shows source-backed decisions and makes missing history explicit', () => {
   assert.match(panelSource, /aria-label="观测详情"/);
-  assert.match(panelSource, /决策检查 · \{state\.decisions\.length\}/);
-  assert.match(panelSource, /<DecisionInspector decisions=\{state\.decisions\} \/>/);
+  assert.match(panelSource, /决策检查 · \{displayState\.decisions\.length\}/);
+  assert.match(panelSource, /<DecisionInspector decisions=\{displayState\.decisions\} \/>/);
   assert.match(decisionInspectorSource, /decision\.source_gaps/);
   assert.match(decisionInspectorSource, /decision\.reason_code \?\? '未记录'/);
   assert.match(decisionViewSource, /decision\.versions\.candidate_revision \?\? '未记录'/);
@@ -94,12 +95,26 @@ test('shows source-backed decisions and makes missing history explicit', () => {
 });
 
 test('shows evidence retention and candidate gaps with an escaped text-only preview', () => {
-  assert.match(panelSource, /证据检查 · \{state\.evidence\.length\}/);
-  assert.match(panelSource, /<EvidenceInspector key=\{run\.id\} runId=\{run\.id\} evidence=\{state\.evidence\} \/>/);
+  assert.match(panelSource, /证据检查 · \{displayState\.evidence\.length\}/);
+  assert.match(panelSource, /<EvidenceInspector key=\{run\.id\} runId=\{run\.id\} evidence=\{displayState\.evidence\} \/>/);
   assert.match(evidenceInspectorSource, /getCodeObservatoryEvidencePreview\(/);
   assert.match(evidenceInspectorSource, /<pre[\s\S]*?>\s*\{preview\.preview\.content\}\s*<\/pre>/);
   assert.doesNotMatch(evidenceInspectorSource, /dangerouslySetInnerHTML|window\.open|location\.href/);
   assert.match(evidenceInspectorSource, /evidencePreviewErrorLabel\(code\)/);
   assert.match(evidenceViewSource, /candidate_revision_mismatch: '证据绑定到了其他候选版本'/);
   assert.match(evidenceViewSource, /persistent_artifact_binding_not_recorded/);
+});
+
+test('replays one fixed offset while live SSE continues and current-only panels stay hidden', () => {
+  assert.match(panelSource, /getCodeObservatoryReplaySnapshot\(/);
+  assert.match(panelSource, /const displayState = replayState \?\? state/);
+  assert.match(panelSource, /createCodeObservatoryReplayState\(replaySnapshot, run\.id\)/);
+  assert.match(panelSource, /上一个事件/);
+  assert.match(panelSource, /下一个事件/);
+  assert.match(panelSource, /退出回放/);
+  assert.match(panelSource, /实时订阅/);
+  assert.match(panelSource, /isReplaying \?/);
+  assert.match(panelSource, /需求关系图依赖当前 Operation 计划/);
+  assert.match(panelSource, /Operation 聚合视图读取当前恢复预算/);
+  assert.match(reducerSource, /createCodeObservatoryReplayState/);
 });

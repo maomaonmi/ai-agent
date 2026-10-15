@@ -297,6 +297,17 @@ export interface CodeObservatorySnapshot {
   };
 }
 
+export interface CodeObservatoryReplaySnapshot {
+  schema_version: 'code-observatory/v1';
+  projection_version: number;
+  replay_offset: number;
+  replay_history_start_offset: number;
+  head_offset: number;
+  retention_floor_offset: number;
+  cursor: string;
+  feed: CodeObservatorySnapshot['feed'];
+}
+
 export interface CodeObservatoryOperationRun {
   run_id: string;
   roles: Array<'execution' | 'recovery' | 'verification' | 'action' | 'current' | 'resume'>;
@@ -542,6 +553,25 @@ export async function getCodeObservatorySnapshot(
   );
   if (!response.ok) await throwCodeObservatoryApiError(response);
   return response.json() as Promise<CodeObservatorySnapshot>;
+}
+
+/** Rebuild one fixed historical Run snapshot from persisted events only. */
+export async function getCodeObservatoryReplaySnapshot(
+  runId: string,
+  offset: number,
+  projectionVersion = 1,
+  signal?: AbortSignal,
+): Promise<CodeObservatoryReplaySnapshot> {
+  const query = new URLSearchParams({
+    offset: String(offset),
+    projection_version: String(projectionVersion),
+  });
+  const response = await fetch(
+    `${API_BASE_URL}/api/code/observatory/runs/${encodeURIComponent(runId)}/replay?${query.toString()}`,
+    { headers: { Accept: 'application/json' }, cache: 'no-store', signal },
+  );
+  if (!response.ok) await throwCodeObservatoryApiError(response);
+  return response.json() as Promise<CodeObservatoryReplaySnapshot>;
 }
 
 /** Read the persisted Operation aggregate and its explicit Run/recovery links. */

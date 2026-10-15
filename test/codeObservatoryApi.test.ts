@@ -6,6 +6,7 @@ import {
   getCodeControlTopology,
   getCodeObservatoryEvidencePreview,
   getCodeObservatoryEvents,
+  getCodeObservatoryReplaySnapshot,
   getCodeObservatorySnapshot,
   openCodeObservatoryStream,
 } from '../src/lib/codeObservatoryApi.ts';
@@ -56,6 +57,34 @@ test('snapshot API is a cache-free GET scoped to the encoded Run identity', asyn
     const result = await getCodeObservatorySnapshot('run-observe');
     assert.equal(result.schema_version, 'code-observatory/v1');
     assert.match(requestedUrl, /\/api\/code\/observatory\/runs\/run-observe\/snapshot$/);
+    assert.equal(requestedInit?.method, undefined);
+    assert.equal(requestedInit?.cache, 'no-store');
+    assert.equal(new Headers(requestedInit?.headers).get('accept'), 'application/json');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('replay API requests one fixed offset and projection version without caching', async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = '';
+  let requestedInit: RequestInit | undefined;
+  globalThis.fetch = async (input, init) => {
+    requestedUrl = String(input);
+    requestedInit = init;
+    return new Response(JSON.stringify({ replay_offset: 42 }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const result = await getCodeObservatoryReplaySnapshot('run/observe', 42, 1);
+    const url = new URL(requestedUrl);
+    assert.equal(result.replay_offset, 42);
+    assert.equal(url.pathname, '/api/code/observatory/runs/run%2Fobserve/replay');
+    assert.equal(url.searchParams.get('offset'), '42');
+    assert.equal(url.searchParams.get('projection_version'), '1');
     assert.equal(requestedInit?.method, undefined);
     assert.equal(requestedInit?.cache, 'no-store');
     assert.equal(new Headers(requestedInit?.headers).get('accept'), 'application/json');

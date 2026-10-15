@@ -23,7 +23,11 @@ import {
   type CodeObservatoryEvent,
   type CodeObservatoryStatus,
 } from '../Code/codeObservatoryProjection';
-import { createCodeObservatoryState, reduceCodeObservatoryState } from '../Code/codeObservatoryReducer';
+import {
+  createCodeObservatoryReplayState,
+  createCodeObservatoryState,
+  reduceCodeObservatoryState,
+} from '../Code/codeObservatoryReducer';
 import { runCodeObservatoryStream } from '../Code/codeObservatoryStream';
 import type { CodeObservatoryConnection } from '../Code/codeObservatoryTypes';
 import { DecisionInspector } from './DecisionInspector';
@@ -33,7 +37,13 @@ import { RequirementEvidenceGraph } from './RequirementEvidenceGraph';
 import { EvidenceInspector } from './EvidenceInspector';
 import { OperationRelationsInspector } from './OperationRelationsInspector';
 import type { CodeAgentRun } from '../lib/api';
-import { CodeObservatoryApiError, getCodeObservatorySnapshot, type CodeObservatoryErrorCode } from '../lib/codeObservatoryApi';
+import {
+  CodeObservatoryApiError,
+  getCodeObservatoryReplaySnapshot,
+  getCodeObservatorySnapshot,
+  type CodeObservatoryErrorCode,
+  type CodeObservatoryReplaySnapshot,
+} from '../lib/codeObservatoryApi';
 
 const EVENT_LIMIT = 24;
 const GRAPH_EVENT_LIMIT = 24;
@@ -414,23 +424,91 @@ function CodeObservatoryPanel({
   );
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [replaySnapshot, setReplaySnapshot] = useState<CodeObservatoryReplaySnapshot | null>(null);
+  const [replaySelectedOffset, setReplaySelectedOffset] = useState(0);
+  const [replayLoading, setReplayLoading] = useState(false);
+  const [replayError, setReplayError] = useState<CodeObservatoryErrorCode | null>(null);
+  const replayControllerRef = useRef<AbortController | null>(null);
   const [graphView, setGraphView] = useState<'timeline' | 'execution' | 'control' | 'requirements'>('timeline');
   const [inspectorTab, setInspectorTab] = useState<'events' | 'decisions' | 'evidence' | 'operation'>('events');
+  const replayState = useMemo(
+    () => replaySnapshot ? createCodeObservatoryReplayState(replaySnapshot, run.id) : null,
+    [replaySnapshot, run.id],
+  );
+  const isReplaying = replayState !== null;
+  const displayState = replayState ?? state;
   const events = useMemo(
-    () => projectCodeObservatoryFeedEvents(run.id, state.events, EVENT_LIMIT),
-    [run.id, state.events],
+    () => projectCodeObservatoryFeedEvents(run.id, displayState.events, EVENT_LIMIT),
+    [run.id, displayState.events],
   );
   const operationIds = useMemo(
-    () => [...new Set(state.events
+    () => [...new Set(displayState.events
       .map((event) => event.operation_id)
       .filter((operationId): operationId is string => Boolean(operationId)))],
-    [state.events],
+    [displayState.events],
   );
   const operationId = operationIds.length === 1 ? operationIds[0] : null;
-  const lastSequence = state.observationOffset;
-  const executionStatus = state.status?.execution ?? 'unknown';
-  const verificationStatus = state.status?.verification ?? 'unknown';
-  const observationStatus = state.status?.observation ?? 'incomplete';
+  const lastSequence = displayState.observationOffset;
+  const executionStatus = displayState.status?.execution ?? 'unknown';
+  const verificationStatus = displayState.status?.verification ?? 'unknown';
+  const observationStatus = displayState.status?.observation ?? 'incomplete';
+
+  const loadReplayOffset = useCallback(async (offset: number) => {
+    if (state.projectionVersion === null) return;
+    replayControllerRef.current?.abort();
+    const controller = new AbortController();
+    replayControllerRef.current = controller;
+    setReplayLoading(true);
+    setReplayError(null);
+    try {
+      const snapshot = await getCodeObservatoryReplaySnapshot(
+        run.id,
+        offset,
+        state.projectionVersion,
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      if (!createCodeObservatoryReplayState(snapshot, run.id)) {
+        setReplaySelectedOffset(replaySnapshot?.replay_offset ?? state.observationOffset);
+        setReplayError('PROJECTION_INCOMPLETE');
+        return;
+      }
+      setReplaySnapshot(snapshot);
+      setReplaySelectedOffset(snapshot.replay_offset);
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setReplaySelectedOffset(replaySnapshot?.replay_offset ?? state.observationOffset);
+        setReplayError(error instanceof CodeObservatoryApiError ? error.code : 'REQUEST_FAILED');
+      }
+    } finally {
+      if (!controller.signal.aborted) setReplayLoading(false);
+    }
+  }, [replaySnapshot?.replay_offset, run.id, state.observationOffset, state.projectionVersion]);
+
+  const enterReplay = useCallback(() => {
+    void loadReplayOffset(state.observationOffset);
+  }, [loadReplayOffset, state.observationOffset]);
+
+  const stepReplay = useCallback((delta: number) => {
+    if (!replaySnapshot) return;
+    const offset = Math.max(
+      replaySnapshot.retention_floor_offset,
+      Math.min(replaySnapshot.head_offset, replaySelectedOffset + delta),
+    );
+    setReplaySelectedOffset(offset);
+    if (offset !== replaySnapshot.replay_offset) void loadReplayOffset(offset);
+  }, [loadReplayOffset, replaySelectedOffset, replaySnapshot]);
+
+  const exitReplay = useCallback(() => {
+    replayControllerRef.current?.abort();
+    replayControllerRef.current = null;
+    setReplaySnapshot(null);
+    setReplaySelectedOffset(0);
+    setReplayError(null);
+    setReplayLoading(false);
+  }, []);
+
+  useEffect(() => () => replayControllerRef.current?.abort(), []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -502,7 +580,7 @@ function CodeObservatoryPanel({
     : state.gapTargetOffset !== null
       ? `正在补齐观测序号 ${state.observationOffset + 1}–${state.gapTargetOffset}`
       : CONNECTION_LABELS[state.connection];
-  const eventPanelContent = (state.connection === 'loading' || state.connection === 'idle') && events.length === 0 ? (
+  const eventPanelContent = !isReplaying && (state.connection === 'loading' || state.connection === 'idle') && events.length === 0 ? (
     <div className="flex h-full items-center justify-center text-xs text-slate-400">正在读取持久事件…</div>
   ) : state.connection === 'error' && events.length === 0 ? (
     <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-xs text-slate-500">
@@ -511,7 +589,9 @@ function CodeObservatoryPanel({
     </div>
   ) : latestEvents.length === 0 ? (
     <div className="flex h-full items-center justify-center px-4 text-center text-xs text-slate-400">
-      {state.connection === 'error'
+      {isReplaying
+        ? '所选观测水位之前没有保留事件。'
+        : state.connection === 'error'
         ? `${API_ERROR_LABELS[state.connectionError ?? 'REQUEST_FAILED']} 请重新同步。`
         : '后端尚无可用持久事件；面板不会用前端状态推测结果。'}
     </div>
@@ -606,7 +686,7 @@ function CodeObservatoryPanel({
             <div className="mt-1 text-lg font-semibold tabular-nums text-slate-800 dark:text-slate-100">{events.length}</div>
           </div>
           <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-800/70">
-            <div className="text-[10px] font-medium uppercase tracking-wide text-slate-400">最新观测序号</div>
+            <div className="text-[10px] font-medium uppercase tracking-wide text-slate-400">{isReplaying ? '回放观测水位' : '最新观测序号'}</div>
             <div className="mt-1 font-mono text-lg font-semibold tabular-nums text-slate-800 dark:text-slate-100">{lastSequence || '—'}</div>
           </div>
           <div className="col-span-2 grid grid-cols-2 gap-x-3 gap-y-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-[10px] text-slate-600 sm:col-span-1 dark:border-slate-700 dark:bg-slate-800/70 dark:text-slate-300">
@@ -616,6 +696,72 @@ function CodeObservatoryPanel({
               连接 · {CONNECTION_LABELS[state.connection]}
             </span>
           </div>
+        </div>
+
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-slate-200 px-4 py-2.5 dark:border-slate-700">
+          {isReplaying && replaySnapshot ? (
+            <>
+              <span className="rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-[10px] font-medium text-violet-700 dark:border-violet-400/30 dark:bg-violet-400/10 dark:text-violet-200">
+                历史回放 · {replaySnapshot.replay_offset} / {replaySnapshot.head_offset}
+              </span>
+              <button
+                type="button"
+                onClick={() => stepReplay(-1)}
+                disabled={replayLoading || replaySelectedOffset <= replaySnapshot.retention_floor_offset}
+                className="rounded-md border border-slate-200 px-2 py-1 text-[10px] text-slate-600 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              >上一个事件</button>
+              <button
+                type="button"
+                onClick={() => stepReplay(1)}
+                disabled={replayLoading || replaySelectedOffset >= replaySnapshot.head_offset}
+                className="rounded-md border border-slate-200 px-2 py-1 text-[10px] text-slate-600 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              >下一个事件</button>
+              <label className="sr-only" htmlFor="code-observatory-replay-offset">选择回放观测水位</label>
+              <input
+                id="code-observatory-replay-offset"
+                type="range"
+                min={replaySnapshot.retention_floor_offset}
+                max={Math.max(replaySnapshot.retention_floor_offset, replaySnapshot.head_offset)}
+                value={replaySelectedOffset}
+                aria-valuetext={`回放水位 ${replaySelectedOffset} / ${replaySnapshot.head_offset}`}
+                onChange={(event) => setReplaySelectedOffset(Number(event.currentTarget.value))}
+                disabled={replayLoading || replaySnapshot.head_offset <= replaySnapshot.retention_floor_offset}
+                className="min-w-24 flex-1 accent-violet-600"
+              />
+              <button
+                type="button"
+                onClick={() => void loadReplayOffset(replaySelectedOffset)}
+                disabled={replayLoading || replaySelectedOffset === replaySnapshot.replay_offset}
+                className="rounded-md border border-violet-200 px-2 py-1 text-[10px] font-medium text-violet-700 hover:bg-violet-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-violet-400/30 dark:text-violet-200 dark:hover:bg-violet-400/10"
+              >{replayLoading ? '读取中…' : '定位'}</button>
+              <button
+                type="button"
+                onClick={exitReplay}
+                className="rounded-md border border-slate-200 px-2 py-1 text-[10px] text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              >退出回放</button>
+              <span
+                className="text-[10px] text-slate-400"
+                title={`从 observation offset ${replaySnapshot.replay_history_start_offset} 起重建；来源覆盖标记为不完整`}
+              >
+                只读重建 · 起点 #{replaySnapshot.replay_history_start_offset} · 不会重新执行
+              </span>
+            </>
+          ) : (
+            <>
+              <span className="text-[10px] text-slate-500 dark:text-slate-400">实时观测 · SSE 持续接收</span>
+              <button
+                type="button"
+                onClick={enterReplay}
+                disabled={replayLoading || state.projectionVersion === null || state.observationOffset < 1}
+                className="rounded-md border border-slate-200 px-2.5 py-1 text-[10px] font-medium text-slate-600 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              >{replayLoading ? '读取历史…' : '进入历史回放'}</button>
+            </>
+          )}
+          {replayError && (
+            <span role="status" className="text-[10px] text-amber-600 dark:text-amber-300">
+              {API_ERROR_LABELS[replayError]}
+            </span>
+          )}
         </div>
 
         {graphView === 'control' ? (
@@ -646,7 +792,7 @@ function CodeObservatoryPanel({
                   className="rounded-md px-2.5 py-1.5 text-[10px] font-medium text-slate-500 hover:text-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 dark:text-slate-400 dark:hover:text-slate-100"
                 >需求关系图</button>
               </div>
-              <span className="text-right text-[10px] text-slate-400">静态规则参考 · 不代表 Run 实际执行路径</span>
+              <span className="text-right text-[10px] text-slate-400">当前静态规则参考 · 不代表 Run 实际执行路径</span>
             </div>
             <div className="min-h-0 flex-1">
               <ControlTopology reloadKey={refreshVersion} />
@@ -686,11 +832,11 @@ function CodeObservatoryPanel({
               <ExecutionGraph
                 runId={run.id}
                 operationId={operationId}
-                nodes={state.nodes}
-                spans={state.spans}
-                events={state.events}
-                decisions={state.decisions}
-                evidence={state.evidence}
+                nodes={displayState.nodes}
+                spans={displayState.spans}
+                events={displayState.events}
+                decisions={displayState.decisions}
+                evidence={displayState.evidence}
                 observationStatus={observationStatus}
               />
             </div>
@@ -726,7 +872,13 @@ function CodeObservatoryPanel({
               <span className="text-right text-[10px] text-slate-400">只连接持久 ID 与当前版本证据；缺失关系明确显示</span>
             </div>
             <div className="min-h-0 flex-1">
-              <RequirementEvidenceGraph operationId={operationId} refreshKey={refreshVersion} />
+              {isReplaying ? (
+                <div role="status" className="flex h-full items-center justify-center rounded-xl border border-dashed border-slate-300 px-6 text-center text-xs leading-6 text-slate-500 dark:border-slate-700 dark:text-slate-400">
+                  需求关系图依赖当前 Operation 计划和验收投影，尚无按回放水位保存的历史版本。本次回放不展示当前关系，避免混入未来状态。
+                </div>
+              ) : (
+                <RequirementEvidenceGraph operationId={operationId} refreshKey={refreshVersion} />
+              )}
             </div>
           </div>
         ) : (
@@ -782,14 +934,14 @@ function CodeObservatoryPanel({
                   aria-controls="code-observatory-inspector-panel"
                   onClick={() => setInspectorTab('decisions')}
                   className={`rounded-md px-2 py-1 text-[10px] font-medium ${inspectorTab === 'decisions' ? 'bg-white text-slate-800 shadow-sm dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 dark:text-slate-400'}`}
-                >决策检查 · {state.decisions.length}</button>
+                >决策检查 · {displayState.decisions.length}</button>
                 <button
                   type="button"
                   aria-pressed={inspectorTab === 'evidence'}
                   aria-controls="code-observatory-inspector-panel"
                   onClick={() => setInspectorTab('evidence')}
                   className={`rounded-md px-2 py-1 text-[10px] font-medium ${inspectorTab === 'evidence' ? 'bg-white text-slate-800 shadow-sm dark:bg-slate-700 dark:text-slate-100' : 'text-slate-500 dark:text-slate-400'}`}
-                >证据检查 · {state.evidence.length}</button>
+                >证据检查 · {displayState.evidence.length}</button>
                 <button
                   type="button"
                   aria-pressed={inspectorTab === 'operation'}
@@ -806,11 +958,15 @@ function CodeObservatoryPanel({
               className="min-h-0 flex-1 overflow-y-auto rounded-xl border border-slate-200 dark:border-slate-700"
             >
               {inspectorTab === 'decisions' ? (
-                <DecisionInspector decisions={state.decisions} />
+                <DecisionInspector decisions={displayState.decisions} />
               ) : inspectorTab === 'evidence' ? (
-                <EvidenceInspector key={run.id} runId={run.id} evidence={state.evidence} />
+                <EvidenceInspector key={run.id} runId={run.id} evidence={displayState.evidence} />
               ) : inspectorTab === 'operation' ? (
-                operationId ? (
+                isReplaying ? (
+                  <div role="status" className="p-4 text-xs leading-6 text-slate-500 dark:text-slate-400">
+                    Operation 聚合视图读取当前恢复预算和执行关联；这些字段尚未按观测水位版本化，历史回放期间已隐藏。
+                  </div>
+                ) : operationId ? (
                   <OperationRelationsInspector
                     key={`${run.id}:${operationId}`}
                     operationId={operationId}
@@ -829,7 +985,9 @@ function CodeObservatoryPanel({
         </div>
         )}
         <footer aria-live="polite" className="flex shrink-0 items-center justify-between gap-3 border-t border-slate-200 px-5 py-2.5 text-[10px] text-slate-400 dark:border-slate-700">
-          <span>{state.connection === 'error'
+          <span>{isReplaying
+            ? `历史回放 · offset ${displayState.observationOffset} / ${displayState.headOffset}；实时订阅${CONNECTION_LABELS[state.connection]}`
+            : state.connection === 'error'
             ? `${API_ERROR_LABELS[state.connectionError ?? 'REQUEST_FAILED']}${state.events.length > 0 ? '，保留当前可信数据' : '，请重新同步'}`
             : state.connection === 'loading' ? '正在读取后端投影'
               : state.connection === 'catching_up' ? connectionMessage

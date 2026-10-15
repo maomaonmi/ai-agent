@@ -1,5 +1,6 @@
 import type {
   CodeObservatoryEventPage,
+  CodeObservatoryReplaySnapshot,
   CodeObservatorySnapshot,
   CodeObservatoryWireEvent,
 } from '../lib/codeObservatoryApi';
@@ -29,6 +30,56 @@ export function createCodeObservatoryState(aggregateId: string): CodeObservatory
     connection: 'idle',
     connectionError: null,
     gapTargetOffset: null,
+  };
+}
+
+/** Convert a replay response into a display state without touching the live reducer. */
+export function createCodeObservatoryReplayState(
+  snapshot: CodeObservatoryReplaySnapshot,
+  aggregateId: string,
+): CodeObservatoryState | null {
+  if (
+    snapshot.schema_version !== 'code-observatory/v1'
+    || snapshot.projection_version !== 1
+    || snapshot.feed.schema_version !== 'code-observatory/v1'
+    || snapshot.feed.aggregate_kind !== 'run'
+    || snapshot.feed.aggregate_id !== aggregateId
+    || snapshot.replay_offset > snapshot.head_offset
+    || snapshot.retention_floor_offset > snapshot.replay_offset
+    || snapshot.replay_history_start_offset < snapshot.retention_floor_offset
+    || snapshot.replay_history_start_offset > snapshot.replay_offset
+    || snapshot.feed.cursor.observation_offset !== snapshot.replay_offset
+    || snapshot.feed.cursor.retention_floor_offset !== snapshot.retention_floor_offset
+    || !isOffset(snapshot.replay_offset)
+    || !isOffset(snapshot.replay_history_start_offset)
+    || !isOffset(snapshot.head_offset)
+  ) return null;
+
+  let expectedOffset = snapshot.replay_history_start_offset + 1;
+  for (const event of snapshot.feed.events) {
+    if (event.observation_offset !== expectedOffset) return null;
+    expectedOffset += 1;
+  }
+  if (snapshot.replay_offset > snapshot.replay_history_start_offset
+    && expectedOffset - 1 !== snapshot.replay_offset) return null;
+
+  const replayAsSnapshot: CodeObservatorySnapshot = {
+    schema_version: snapshot.schema_version,
+    projection_version: snapshot.projection_version,
+    head_offset: snapshot.replay_offset,
+    retention_floor_offset: snapshot.retention_floor_offset,
+    cursor: snapshot.cursor,
+    feed: snapshot.feed,
+  };
+  const replayState = receiveSnapshot(
+    createCodeObservatoryState(aggregateId),
+    replayAsSnapshot,
+  );
+  if (replayState.connection === 'error') return null;
+  return {
+    ...replayState,
+    headOffset: snapshot.head_offset,
+    connection: 'closed',
   };
 }
 
