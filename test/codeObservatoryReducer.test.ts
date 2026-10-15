@@ -263,6 +263,32 @@ test('catch-up page fills a gap and advances the opaque cursor atomically', () =
   assert.equal(recovered.connection, 'live');
 });
 
+test('ten thousand catch-up events retain only the bounded client history', () => {
+  let state = loadedState(0);
+  const headOffset = 10_000;
+  const pageSize = 500;
+
+  for (let startOffset = 1; startOffset <= headOffset; startOffset += pageSize) {
+    const events = Array.from(
+      { length: Math.min(pageSize, headOffset - startOffset + 1) },
+      (_, index) => event(startOffset + index),
+    );
+    const catchupPage = page(events, startOffset - 1);
+    catchupPage.head_offset = headOffset;
+    state = reduceCodeObservatoryState(state, {
+      type: 'catchup_page_received',
+      page: catchupPage,
+      requestedAfterOffset: startOffset - 1,
+    });
+  }
+
+  assert.equal(state.observationOffset, headOffset);
+  assert.equal(state.headOffset, headOffset);
+  assert.equal(state.events.length, 500);
+  assert.equal(state.events[0]?.observation_offset, 9_501);
+  assert.equal(state.events.at(-1)?.observation_offset, headOffset);
+});
+
 test('unknown schema and invalid page gaps fail closed without changing business status', () => {
   const initial = loadedState(1);
   const unsupported = reduceCodeObservatoryState(initial, {
