@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const workspaceSource = readFileSync(resolve(testDirectory, '../src/components/CodeWorkspace.tsx'), 'utf8');
 const panelSource = readFileSync(resolve(testDirectory, '../src/components/CodeObservatoryPanel.tsx'), 'utf8');
+const featureFlagSource = readFileSync(resolve(testDirectory, '../src/lib/codeObservatoryFeatureFlag.ts'), 'utf8');
 const executionGraphSource = readFileSync(resolve(testDirectory, '../src/components/ExecutionGraph.tsx'), 'utf8');
 const executionProjectionSource = readFileSync(resolve(testDirectory, '../src/Code/executionGraphProjection.ts'), 'utf8');
 const decisionInspectorSource = readFileSync(resolve(testDirectory, '../src/components/DecisionInspector.tsx'), 'utf8');
@@ -31,6 +32,21 @@ test('mounts the observatory launcher in the Code workbench top toolbar', () => 
   assert.ok(toolbarStart >= 0);
   assert.ok(toolbarEnd > toolbarStart);
   assert.ok(launcher > toolbarStart && launcher < toolbarEnd);
+});
+
+test('disabling observability hides only its launcher and unmount aborts only the read subscription', () => {
+  const subscriptionStart = panelSource.indexOf(
+    'useEffect(() => {\n    const controller = new AbortController();',
+  );
+  const subscriptionEnd = panelSource.indexOf('\n  const latestEvents', subscriptionStart);
+  const subscriptionEffect = panelSource.slice(subscriptionStart, subscriptionEnd);
+
+  assert.match(featureFlagSource, /NEXT_PUBLIC_CODE_OBSERVATORY_ENABLED/);
+  assert.match(panelSource, /if \(!isCodeObservatoryEnabled\(\)\) return null;/);
+  assert.ok(subscriptionStart >= 0);
+  assert.ok(subscriptionEnd > subscriptionStart);
+  assert.match(subscriptionEffect, /return \(\) => \{\s*controller\.abort\(\);\s*\};/);
+  assert.doesNotMatch(subscriptionEffect, /cancel(?:Run|Operation|Task)/i);
 });
 
 test('loads the persisted observation snapshot and renders safe events in React Flow', () => {
