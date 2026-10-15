@@ -37,6 +37,7 @@ import { RequirementEvidenceGraph } from './RequirementEvidenceGraph';
 import { EvidenceInspector } from './EvidenceInspector';
 import { OperationRelationsInspector } from './OperationRelationsInspector';
 import type { CodeAgentRun } from '../lib/api';
+import { isCodeObservatoryEnabled } from '../lib/codeObservatoryFeatureFlag';
 import {
   CodeObservatoryApiError,
   getCodeObservatoryReplaySnapshot,
@@ -371,6 +372,8 @@ function ObservedEventGraph({ events }: { events: CodeObservatoryEvent[] }) {
 export function CodeObservatoryLauncher({ run, sidebarCollapsed }: { run?: CodeAgentRun; sidebarCollapsed: boolean }) {
   const [isOpen, setIsOpen] = useState(false);
   const close = useCallback(() => setIsOpen(false), []);
+
+  if (!isCodeObservatoryEnabled()) return null;
 
   return (
     <>
