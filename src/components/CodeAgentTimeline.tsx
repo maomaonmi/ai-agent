@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import type {
   CodeAcceptanceReport,
@@ -23,11 +23,24 @@ import {
   Terminal,
   Wrench,
 } from 'lucide-react';
-import { filterHookTimelineEvents, shouldShowActorLabel } from '../Code/agentTimeline';
+import {
+  describeTestAgentActionInChinese,
+  describeActionIntentInChinese,
+  filterDuplicateFinalSummaryEvents,
+  filterHookTimelineEvents,
+  shouldShowActorLabel,
+  projectTimelineCompletionFeedback,
+  timelineStatusLabel,
+  toolNameInChinese,
+} from '../Code/agentTimeline';
+import { plannerBudgetPresentation } from '../Code/plannerBudgetPresentation';
 import { placeAcceptanceTimelineEvents } from '../Code/acceptanceTimeline';
-import { getGoldenTraceEligibility } from '../Code/goldenTraceEligibility';
+import {
+  getGoldenTraceEligibility,
+  type GoldenTraceSaveMode,
+} from '../Code/goldenTraceEligibility';
 
-type AcceptanceState = 'idle' | 'running' | 'passed' | 'failed' | 'blocked';
+type AcceptanceState = 'idle' | 'running' | 'passed' | 'failed' | 'unverifiable' | 'blocked';
 
 const formatEvidence = (value: unknown): string => {
   if (typeof value === 'string') return value;
@@ -48,18 +61,19 @@ interface CodeAgentTimelineProps {
   acceptanceProgressMessage?: string;
   acceptanceStartSequence?: number;
   taskPlan?: CodeTaskPlanState;
+  executionPlan?: CodeTaskPlanState;
   onOpenDiff?: (path: string) => void;
   onOpenTerminal?: (runId?: string) => void;
   sourceRun?: CodeAgentRun;
-  onSaveGoldenTrace?: (run: CodeAgentRun) => void;
+  onSaveGoldenTrace?: (run: CodeAgentRun, mode?: GoldenTraceSaveMode) => void;
   title?: string;
 }
 const ACTOR_LABEL: Record<CodeAgentActorKind, string> = {
-  main: '主代码 Agent',
-  test: '测试子 Agent / 浏览器验证器',
-  ops: '运维 Agent',
+  main: '主代码智能体',
+  test: '测试子智能体 / 浏览器验证器',
+  ops: '运维智能体',
   system: '系统',
-  readonly: '只读 Agent',
+  readonly: '只读智能体',
 };
 
 const ACTOR_STYLE: Record<CodeAgentActorKind, string> = {
@@ -86,6 +100,8 @@ function StageIcon({
     ? 'text-rose-500'
     : statusText === 'passed' || statusText === 'completed'
       ? 'text-emerald-500'
+      : statusText === 'unverifiable'
+        ? 'text-amber-500'
       : 'text-slate-500';
   if (statusText === 'failed' || statusText === 'blocked') return <AlertCircle className={`${iconClass} ${iconTone}`} aria-hidden="true" />;
   if (statusText === 'passed' || statusText === 'completed') return <CheckCircle2 className={`${iconClass} ${iconTone}`} aria-hidden="true" />;
@@ -103,7 +119,7 @@ const STAGE_LABEL: Record<CodeAgentTimelineEvent['stage'], string> = {
   preflight: '执行前思考',
   thinking: '思考',
   output: '输出',
-  tool_call: '工具调用',
+  tool_call: '行动',
   observation: '观察',
   file_change: '文件变更',
   validation: '校验',
@@ -115,7 +131,8 @@ const STAGE_LABEL: Record<CodeAgentTimelineEvent['stage'], string> = {
 function statusText(state: AcceptanceState): string {
   if (state === 'running') return '浏览器验证器正在执行';
   if (state === 'passed') return '验收通过';
-  if (state === 'failed') return '浏览器验证未通过，已交给主 Agent';
+  if (state === 'failed') return '浏览器验证未通过';
+  if (state === 'unverifiable') return '浏览器验证暂时无法判定';
   if (state === 'blocked') return '浏览器验证已阻塞或终止';
   return '等待浏览器验证';
 }
@@ -314,7 +331,7 @@ function FullToolResultCard({ event, toolName, report }: {
       </summary>
       <div className={`${timelineDetailIndent} pb-2`}>
         <div className="mb-1 text-xs font-medium text-slate-500">
-          {toolName} 完整返回
+          {toolNameInChinese(toolName)} · Runtime 完整回执
         </div>
         <pre
           tabIndex={0}
@@ -380,11 +397,30 @@ function TestAgentEvidenceCard({ event, onOpenTerminal }: {
   const report = (metadata.testAgentRun && typeof metadata.testAgentRun === 'object'
     ? metadata.testAgentRun
     : metadata) as Record<string, unknown>;
+  // The timeline event runId identifies the Code Agent lifecycle. A bounded
+  // runner may have its own output session, so terminal navigation must use
+  // that explicit transport identity when one is available.
+  const terminalSessionId = [
+    report.terminal_session_id,
+    report.terminal_run_id,
+    report.terminalSessionId,
+    report.terminalRunId,
+    metadata.terminal_session_id,
+    metadata.terminal_run_id,
+    metadata.terminalSessionId,
+    metadata.terminalRunId,
+  ].find((value): value is string => typeof value === 'string' && value.trim().length > 0);
   const command = formatCommand(report.command);
   const stdout = formatOutput(report.stdout ?? report.runner_stdout);
   const stderr = formatOutput(report.stderr ?? report.runner_stderr);
   const artifact = formatOutput(report.artifact);
   const candidateRevision = formatOutput(report.candidate_revision);
+  const checkpointError = report.checkpoint_error && typeof report.checkpoint_error === 'object'
+    ? report.checkpoint_error as Record<string, unknown>
+    : null;
+  const checkpointTraceback = checkpointError
+    ? formatOutput(checkpointError.traceback)
+    : '';
   const contract = runtimeCompiledContract(report);
   const draft = report.generated_contract ?? report.generated_goal ?? (
     contract == null ? report.acceptance_goal : null
@@ -392,12 +428,123 @@ function TestAgentEvidenceCard({ event, onOpenTerminal }: {
   const contractText = contract == null ? '' : formatEvidence(contract);
   const draftText = draft == null ? '' : formatEvidence(draft);
   const validationErrors = formatOutput(report.validation_errors);
+  const plannerFailure = (
+    metadata.planner_failure && typeof metadata.planner_failure === 'object'
+      ? metadata.planner_failure
+      : report.planner_failure && typeof report.planner_failure === 'object'
+        ? report.planner_failure
+        : null
+  ) as Record<string, unknown> | null;
+  const plannerStage = String(metadata.planner_stage ?? plannerFailure?.stage ?? '');
+  const plannerDraftPreview = typeof metadata.planner_draft_preview === 'string'
+    ? metadata.planner_draft_preview
+    : '';
+  const status = String(event.status || report.status || 'scheduled');
+  const isPlannerProgress = (
+    metadata.eventType === 'test_agent_contract_replan'
+    && metadata.planner_call_active !== false
+    && ['model_request_started', 'model_progress', 'model_output_progress', 'model_token_progress'].includes(status)
+  );
+  const serverElapsedSeconds = typeof metadata.elapsed_seconds === 'number'
+    ? Math.max(0, metadata.elapsed_seconds)
+    : 0;
+  const [liveElapsedSeconds, setLiveElapsedSeconds] = useState(serverElapsedSeconds);
+  useEffect(() => {
+    setLiveElapsedSeconds(0);
+    if (!isPlannerProgress) return undefined;
+
+    const timer = window.setInterval(() => {
+      setLiveElapsedSeconds((current) => current + 1);
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [event.eventId, isPlannerProgress, plannerStage]);
+  useEffect(() => {
+    if (isPlannerProgress) {
+      setLiveElapsedSeconds((current) => Math.max(current, serverElapsedSeconds));
+    }
+  }, [isPlannerProgress, serverElapsedSeconds]);
+
+  const plannerProgressText = isPlannerProgress
+    ? event.content.match(/已等待\s*[\d.]+\s*秒/)
+      ? event.content.replace(
+        /已等待\s*[\d.]+\s*秒/,
+        `已等待 ${Math.max(liveElapsedSeconds, serverElapsedSeconds).toFixed(1)} 秒`,
+      )
+      : `${event.content} 已等待 ${Math.max(liveElapsedSeconds, serverElapsedSeconds).toFixed(1)} 秒。`
+    : event.content;
+  const plannerBudget = plannerBudgetPresentation(
+    plannerFailure?.reasoning_budget_mode,
+  );
+  const plannerReasoningBudgetValue = plannerFailure
+    ? plannerFailure.reasoning_budget_mode === 'separate'
+      ? plannerFailure.requested_thinking_budget == null
+        ? '未提供'
+        : `${plannerFailure.requested_thinking_budget} tokens`
+      : plannerFailure.provider_reasoning_tokens ?? '上游未返回'
+    : undefined;
+  const plannerCompletionUsageValue = plannerFailure
+    ? plannerFailure.reasoning_budget_mode === 'separate'
+      ? plannerFailure.provider_visible_output_tokens == null
+        ? '上游未提供推理/回答分项用量'
+        : `${plannerFailure.provider_visible_output_tokens} / ${plannerFailure.requested_output_tokens ?? '未知'} tokens`
+      : plannerFailure.provider_completion_tokens == null
+        ? '上游未返回'
+        : `${plannerFailure.provider_completion_tokens} / ${plannerFailure.requested_output_tokens ?? '未知'} tokens`
+    : undefined;
+  const rawPlannerFinishReason = String(plannerFailure?.provider_finish_reason ?? '');
+  const plannerFinishReason = rawPlannerFinishReason === 'length'
+    ? '达到生成上限'
+    : rawPlannerFinishReason === 'stop'
+      ? '正常结束'
+      : rawPlannerFinishReason === 'unknown'
+        ? '上游未提供'
+        : rawPlannerFinishReason || undefined;
+  const plannerFailureFields = plannerFailure
+    ? [
+      ['失败类别', plannerFailure.failure_kind ?? plannerFailure.kind],
+      ['预算语义', plannerBudget.summary],
+      ['结束原因', plannerFinishReason],
+      ['可见输出', plannerFailure.response_chars == null ? '上游未返回' : `${plannerFailure.response_chars} 字符`],
+      ['上游是否返回 Token 用量', plannerFailure.provider_usage_available == null
+        ? undefined
+        : plannerFailure.provider_usage_available ? '是' : '否'],
+      [plannerBudget.completionUsageLabel, plannerCompletionUsageValue],
+      ...(plannerFailure.reasoning_budget_mode === 'separate'
+        && plannerFailure.provider_completion_tokens != null
+        ? [['上游总 completion 用量', `${plannerFailure.provider_completion_tokens} tokens`] as [string, unknown]]
+        : []),
+      [plannerBudget.completionLimitLabel, plannerFailure.requested_output_tokens],
+      [plannerBudget.reasoningBudgetLabel, plannerReasoningBudgetValue],
+      ['输入 token 用量', plannerFailure.provider_prompt_tokens ?? '上游未返回'],
+      ...(plannerFailure.reasoning_budget_mode === 'separate'
+        ? [['上游推理 token 用量', plannerFailure.provider_reasoning_tokens ?? '上游未返回'] as [string, unknown]]
+        : []),
+      ['推理流字符', plannerFailure.provider_reasoning_chars],
+      ['推理档位', plannerFailure.requested_reasoning_effort],
+      ['请求等待上限', plannerFailure.timeout_seconds == null
+        ? undefined
+        : `${plannerFailure.timeout_seconds} 秒`],
+      ['已收到响应', plannerFailure.response_started == null
+        ? undefined
+        : plannerFailure.response_started ? '是' : '否'],
+      ['异常', plannerFailure.exception_type
+        ? `${plannerFailure.exception_type}${plannerFailure.exception_message ? `：${plannerFailure.exception_message}` : ''}`
+        : undefined],
+    ].filter(([, value]) => value != null && String(value).trim().length > 0) as [string, unknown][]
+    : [];
+  const reportedUsageLines = [
+    ...(Array.isArray(metadata.provider_usage_by_turn)
+      ? metadata.provider_usage_by_turn.map(providerUsageLine).filter(Boolean)
+      : []),
+    providerUsageLine(metadata.provider_usage),
+  ].filter((line, index, all): line is string => Boolean(line) && all.indexOf(line) === index);
   const hasDetails = Boolean(
     command || stdout || stderr || report.returncode != null || artifact
-      || candidateRevision || contractText || draftText || validationErrors,
+      || candidateRevision || contractText || draftText || validationErrors || checkpointError
+      || plannerFailureFields.length > 0 || reportedUsageLines.length > 0,
   );
-  const status = String(event.status || report.status || 'scheduled');
-  const shouldOpen = status === 'failed' || status === 'blocked';
+  const shouldOpen = isPlannerProgress || reportedUsageLines.length > 0
+    || status === 'failed' || status === 'blocked' || status === 'needs_agent';
 
   return (
     <div className={`flex items-start gap-2 rounded-md ${timelinePanelSurface} px-3 py-2 sm:px-4`}>
@@ -405,15 +552,58 @@ function TestAgentEvidenceCard({ event, onOpenTerminal }: {
         <summary className="flex cursor-pointer list-none items-center gap-2 text-xs leading-5 text-slate-600 marker:hidden">
           <span aria-hidden="true" className="text-slate-400">⌄</span>
           <Terminal size={13} aria-hidden="true" className="shrink-0 text-slate-400" />
-          <span className="min-w-0 flex-1 break-words font-medium">{event.content}</span>
-          {!hasDetails && <span className="shrink-0 text-[11px] text-slate-400">等待结果</span>}
+          <span className="min-w-0 flex-1 break-words font-medium">{plannerProgressText}</span>
+          {!hasDetails && !isPlannerProgress && <span className="shrink-0 text-[11px] text-slate-400">等待结果</span>}
         </summary>
         <div className={`${timelineDetailIndent} mt-2 space-y-2 text-xs leading-5 text-slate-600`}>
+          {reportedUsageLines.length > 0 && (
+            <div aria-label="上游实际 Token 用量" className="rounded bg-white px-2 py-1.5">
+              <div className="mb-0.5 font-medium text-slate-600">上游实际 Token 用量</div>
+              {reportedUsageLines.map((line) => <div key={line} className="text-[11px] text-slate-500">{line}</div>)}
+            </div>
+          )}
+          {plannerDraftPreview && (
+            <div>
+              <div className="mb-1 font-medium text-blue-700">模型公开提案草案 · 尚未验证或提交</div>
+              <pre tabIndex={0} aria-label="验收规划模型公开提案草案" className={`max-h-56 overflow-auto whitespace-pre-wrap break-words rounded ${timelinePanelSurface} px-2 py-1.5 font-mono text-[11px] leading-5 text-slate-700 outline-none focus-visible:ring-2 focus-visible:ring-blue-500`}>{plannerDraftPreview}</pre>
+            </div>
+          )}
+          {plannerFailureFields.length > 0 && (
+            <div role="status" className="rounded border border-amber-200 bg-amber-50/60 p-2">
+              <div className="mb-1 font-medium text-amber-800">
+                规划失败诊断已交给主 Agent · {plannerStage || '验收规划'}
+              </div>
+              <dl className="grid gap-x-3 gap-y-0.5 sm:grid-cols-[max-content_1fr]">
+                {plannerFailureFields.map(([label, value]) => (
+                  <div key={label} className="contents">
+                    <dt className="text-slate-500">{label}</dt>
+                    <dd className="break-words font-mono text-slate-700">{String(value)}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          )}
           {artifact && (
             <div className="text-slate-500">脚本：<code className="font-mono text-slate-700">{artifact}</code></div>
           )}
           {candidateRevision && (
             <div className="text-slate-500">候选版本：<code className="font-mono text-slate-700">{candidateRevision}</code></div>
+          )}
+          {checkpointError && (
+            <div className="rounded border border-rose-200 bg-rose-50 p-2 text-rose-800">
+              <div className="font-medium">验收运行时异常 · {formatOutput(checkpointError.stage)}</div>
+              <div className="mt-0.5">
+                {formatOutput(checkpointError.exception_type)}：{formatOutput(checkpointError.message)}
+              </div>
+              {checkpointTraceback && (
+                <details className="mt-1 rounded border border-rose-200 bg-white px-2 py-1">
+                  <summary className="cursor-pointer font-medium">查看 Python traceback</summary>
+                  <pre className="mt-1 max-h-56 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-5">
+                    {checkpointTraceback}
+                  </pre>
+                </details>
+              )}
+            </div>
           )}
           {contractText && (
             <div>
@@ -463,12 +653,62 @@ function TestAgentEvidenceCard({ event, onOpenTerminal }: {
           type="button"
           title="跳转到右侧终端"
           aria-label="跳转到右侧终端"
-          onClick={() => onOpenTerminal(event.runId)}
+          onClick={() => onOpenTerminal(terminalSessionId ?? event.runId)}
           className="mt-0.5 shrink-0 rounded border border-slate-200 bg-white p-1.5 text-slate-500 transition-colors hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <ExternalLink size={14} aria-hidden="true" />
         </button>
       )}
+    </div>
+  );
+}
+
+function ActionIntentCard({ event }: {
+  event: CodeAgentTimelineEvent;
+}) {
+  const testAgentAction = event.metadata?.test_agent_model_action === true;
+  return (
+    <div role="status" className="rounded-md bg-white px-3 py-1 text-sm leading-5 text-slate-700 sm:px-4">
+      {testAgentAction
+        ? describeTestAgentActionInChinese(event)
+        : describeActionIntentInChinese(event)}
+    </div>
+  );
+}
+
+function providerUsageLine(value: unknown): string {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const usage = value as Record<string, unknown>;
+  const parts: string[] = [];
+  if (typeof usage.provider_prompt_tokens === 'number') parts.push(`输入 ${usage.provider_prompt_tokens}`);
+  if (typeof usage.provider_completion_tokens === 'number') parts.push(`生成 ${usage.provider_completion_tokens}`);
+  if (typeof usage.provider_reasoning_tokens === 'number') parts.push(`推理 ${usage.provider_reasoning_tokens}`);
+  if (typeof usage.provider_visible_output_tokens === 'number') parts.push(`可见输出 ${usage.provider_visible_output_tokens}`);
+  if (typeof usage.provider_total_tokens === 'number') parts.push(`总计 ${usage.provider_total_tokens}`);
+  if (parts.length === 0) return '';
+  const turn = typeof usage.turn === 'number' ? `第 ${usage.turn} 次请求 · ` : '';
+  const model = typeof usage.provider_model === 'string' && usage.provider_model
+    ? `${usage.provider_model} · `
+    : '';
+  return `上游实际用量 · ${model}${turn}${parts.join(' · ')} tokens`;
+}
+
+function ProviderUsageSummary({ metadata }: { metadata: Record<string, unknown> | undefined }) {
+  if (!metadata) return null;
+  const lines: string[] = [];
+  const byTurn = Array.isArray(metadata.provider_usage_by_turn)
+    ? metadata.provider_usage_by_turn
+    : [];
+  byTurn.forEach((usage) => {
+    const line = providerUsageLine(usage);
+    if (line && !lines.includes(line)) lines.push(line);
+  });
+  const direct = providerUsageLine(metadata.provider_usage);
+  if (direct && !lines.includes(direct)) lines.push(direct);
+  if (lines.length === 0) return null;
+  return (
+    <div className="mt-1 text-[11px] leading-5 text-slate-500" aria-label="上游实际 Token 用量">
+      {lines.map((line) => <div key={line}>{line}</div>)}
     </div>
   );
 }
@@ -481,6 +721,9 @@ function TimelineEventCard({ event, onOpenDiff, onOpenTerminal, isRunning }: {
 }) {
   const source = event.metadata?.source;
   const eventType = event.metadata?.eventType;
+  if (event.metadata?.event_semantics === 'action_intent') {
+    return <ActionIntentCard event={event} />;
+  }
   if (
     event.actorKind === 'test'
     && (eventType === 'test_agent_execution' || eventType === 'test_agent_result' || eventType === 'test_agent_contract_replan' || eventType === 'test_agent_run')
@@ -500,7 +743,21 @@ function TimelineEventCard({ event, onOpenDiff, onOpenTerminal, isRunning }: {
   if (event.stage === 'status' && toolName && toolReport) {
     return <FullToolResultCard event={event} toolName={toolName} report={toolReport} />;
   }
-  if (event.stage === 'preflight' || event.stage === 'thinking') {
+  if (event.stage === 'preflight') {
+    // Why: preflight 是任务的真实起点（持久存储内最小 seq），必须始终默认展开；
+    // done=true 只表示规划完成，不能把它折叠回与普通思考一样的开合状态。
+    return (
+      <details className={`rounded-md border border-blue-100 bg-blue-50/40 px-3 sm:px-4`} open>
+        <summary className="cursor-pointer list-none py-2 text-xs font-medium text-slate-600 marker:hidden">
+          <span className="mr-2 text-slate-400">⌄</span>{thoughtSummary(event, isRunning)}
+        </summary>
+        <div className={`${timelineDetailIndent} pb-2 text-xs leading-5 text-slate-600`}>
+          <div className="whitespace-pre-wrap break-words">{event.content}</div>
+        </div>
+      </details>
+    );
+  }
+  if (event.stage === 'thinking') {
     return (
       <details className={`rounded-md ${timelinePanelSurface} px-3 sm:px-4`} open={!event.done && isRunning}>
         <summary className="cursor-pointer list-none py-2 text-xs font-medium text-slate-600 marker:hidden">
@@ -517,27 +774,46 @@ function TimelineEventCard({ event, onOpenDiff, onOpenTerminal, isRunning }: {
   if (event.stage === 'file_change' && filePath) {
     const additions = event.file?.additions ?? 0;
     const deletions = event.file?.deletions ?? 0;
+    const diffLines = event.file?.diffLines ?? [];
     return (
-      <div className={`flex items-center justify-between gap-3 rounded-md ${timelinePanelSurface} px-3 py-2 sm:px-4`}>
-        <div className="min-w-0">
-          <div className="text-xs font-medium text-slate-700">{event.content}</div>
-          <div className="mt-0.5 truncate font-mono text-[11px] text-slate-500" title={filePath}>{filePath}</div>
+      <div className={`rounded-md ${timelinePanelSurface} px-3 py-2 sm:px-4`}>
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-xs font-medium text-slate-700">{event.content}</div>
+            <div className="mt-0.5 truncate font-mono text-[11px] text-slate-500" title={filePath}>{filePath}</div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <span className="font-mono text-[11px]">
+              <span className="text-emerald-600">+{additions}</span>
+              <span className="ml-1.5 text-rose-600">-{deletions}</span>
+            </span>
+            {onOpenDiff && (
+              <button
+                type="button"
+                onClick={() => onOpenDiff(filePath)}
+                className="rounded-md border border-slate-100 bg-white px-2 py-0.5 text-[11px] font-medium text-slate-600 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+              >
+                查看文件
+              </button>
+            )}
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <span className="font-mono text-[11px]">
-            <span className="text-emerald-600">+{additions}</span>
-            <span className="ml-1.5 text-rose-600">-{deletions}</span>
-          </span>
-          {onOpenDiff && (
-            <button
-              type="button"
-              onClick={() => onOpenDiff(filePath)}
-              className="rounded-md border border-slate-100 bg-white px-2 py-0.5 text-[11px] font-medium text-slate-600 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
-            >
-              查看变更
-            </button>
-          )}
-        </div>
+        {diffLines.length > 0 && (
+          <div aria-label={`${filePath} 行级差异`} className="mt-2 max-h-56 overflow-auto rounded border border-slate-200 bg-slate-50 py-1 font-mono text-[11px] leading-5">
+            {diffLines.map((line, index) => (
+              <div
+                key={`${index}:${line}`}
+                className={`whitespace-pre px-2 ${line.startsWith('+') && !line.startsWith('+++')
+                  ? 'bg-emerald-50 text-emerald-800'
+                  : line.startsWith('-') && !line.startsWith('---')
+                    ? 'bg-rose-50 text-rose-800'
+                    : 'text-slate-500'}`}
+              >
+                {line || ' '}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     );
   }
@@ -556,6 +832,7 @@ function TimelineEventCard({ event, onOpenDiff, onOpenTerminal, isRunning }: {
         {STAGE_LABEL[event.stage]}
       </span>
       <span className="whitespace-pre-wrap break-words">{event.content}</span>
+      <ProviderUsageSummary metadata={event.metadata} />
     </div>
   );
 }
@@ -565,18 +842,48 @@ function formatVerificationValue(value: unknown): string {
   const labels: Record<string, string> = {
     passed: '通过',
     verified: '通过',
+    not_applicable: '不适用',
+    implemented: '已实现',
+    in_progress: '进行中',
+    planned: '待实现',
+    unresolved: '待诊断',
     completed: '完成',
     completed_unverified: '完成，未验收',
     awaiting_runtime_verification: '等待验收',
     unavailable: '不可用',
     not_run: '未运行',
+    unverified: '未验收',
+    needs_specification: '验收规范未闭合',
+    partial: '部分覆盖',
+    complete: '全部通过',
+    COMPLETE: '全部通过',
+    PARTIAL: '部分覆盖',
+    NONE: '尚无验收证据',
+    OPEN: '待验收',
+    INVALID: '验收规范无效',
+    STALE: '候选版本已变化',
     pending: '等待中',
     failed: '失败',
+    contradicted: '未通过',
+    invalid_test: '验收计划无效',
+    infra_failure: '验证环境失败',
     blocked: '已阻塞',
     inconclusive: '无法确定',
   };
   const text = String(value);
   return labels[text] ?? text;
+}
+
+function formatConstraintAuditStatus(value: unknown): string {
+  const labels: Record<string, string> = {
+    complete: '运行限制审计完成',
+    not_required: '本轮无需限制审计',
+    incomplete: '运行限制审计未完成',
+    unbound: '运行限制尚未绑定',
+    unavailable: '尚未完成审计',
+  };
+  const text = String(value ?? 'unavailable');
+  return labels[text] ?? formatVerificationValue(text);
 }
 
 function CompletionFeedbackCard({
@@ -593,11 +900,70 @@ function CompletionFeedbackCard({
     acceptance_validation: 'not_run',
   };
   const validationErrors = verification.validation_errors ?? [];
+  const taskRows = feedback.tasks?.obligations ?? [];
+  const diffs = feedback.diffs ?? [];
   return (
     <div aria-label="代码完成反馈" className={`mb-2 rounded-md ${timelinePanelSurface} p-2.5 text-xs text-slate-700`}>
-      <div className="mb-1 font-semibold text-slate-800">完成反馈</div>
+      <div className="mb-1 font-semibold text-slate-800">本轮结果</div>
       {feedback.summary && <MarkdownMessage content={feedback.summary} density="compact" />}
-      <div className="mt-2 font-medium text-slate-600">已完成修改 · {changes.length} 个文件</div>
+      {feedback.tasks && (
+        <section aria-label="任务实现与验收状态" className="mt-2">
+          <div className="mb-1 flex flex-wrap items-center justify-between gap-1 font-medium text-slate-600">
+            <span>任务状态</span>
+            <span>
+              {feedback.tasks.implemented_count}/{feedback.tasks.required_count} 已实现 ·{' '}
+              {feedback.tasks.verified_count}/{feedback.tasks.required_count} 已验收
+            </span>
+          </div>
+          {taskRows.length > 0 ? (
+            <ul className="space-y-1" aria-label="持久目标义务">
+              {taskRows.map((task) => (
+                <li key={task.obligation_id} className={`rounded ${timelinePanelSurface} px-2 py-1.5`}>
+                  <div className="flex flex-wrap items-start justify-between gap-1.5">
+                    <span className="min-w-0 flex-1 whitespace-pre-wrap break-words text-slate-700">{task.title}</span>
+                    <span className="shrink-0 text-slate-500">
+                      实现：{formatVerificationValue(task.implementation_status)}
+                    </span>
+                    <span className="shrink-0 text-slate-500">
+                      验收：{formatVerificationValue(task.verification_status)}
+                    </span>
+                  </div>
+                  {task.clauses.length > 0 && (
+                    <ul className="mt-1 space-y-0.5 border-l border-slate-200 pl-2 text-[11px] text-slate-500">
+                      {task.clauses.map((clause) => (
+                        <li key={clause.clause_id} className="flex flex-wrap justify-between gap-x-2 gap-y-0.5">
+                          <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{clause.semantic_text}</span>
+                          <span className="shrink-0">
+                            {clause.spec_status !== 'ready'
+                              ? formatVerificationValue(clause.spec_status)
+                              : formatVerificationValue(clause.verdict)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div role="status" className="text-slate-400">当前没有必需任务。</div>
+          )}
+        </section>
+      )}
+      {feedback.acceptance && (
+        <div role="status" className="mt-2 text-slate-600">
+          验收覆盖：{feedback.acceptance.verified_clause_ids.length}/
+          {feedback.acceptance.required_clause_ids.length} 条款通过 ·{' '}
+          {feedback.acceptance.goal_verified ? '目标验收通过' : formatVerificationValue(feedback.acceptance.status)}
+        </div>
+      )}
+      <div className="mt-2 font-medium text-slate-600">
+        {changes.length > 0
+          ? `文件变化 · ${changes.length} 个文件`
+          : feedback.change_inventory_status === 'unavailable'
+            ? '文件变化清单尚不可用'
+            : '本轮未检测到文件变化'}
+      </div>
       {changes.length > 0 ? (
         <div className="mt-1 space-y-1">
           {changes.map((change) => (
@@ -625,11 +991,49 @@ function CompletionFeedbackCard({
       ) : (
         <div className="mt-1 text-slate-400">没有检测到文件差异。</div>
       )}
+      {diffs.length > 0 && (
+        <details className={`mt-2 rounded ${timelinePanelSurface} px-2 py-1.5`}>
+          <summary className="cursor-pointer font-medium text-slate-600">
+            查看本轮保存的 diff（{diffs.length} 个文件）
+          </summary>
+          <div className="mt-2 space-y-2">
+            {diffs.map((diff) => (
+              <details key={diff.diff_ref} className="rounded border border-slate-200">
+                <summary className="cursor-pointer px-2 py-1 font-mono text-[11px] text-slate-600">
+                  {diff.path}{diff.truncated ? ' · 预览已截断' : ''}
+                </summary>
+                <pre aria-label={`${diff.path} 持久化差异预览`} className="max-h-56 overflow-auto border-t border-slate-200 py-1 font-mono text-[11px] leading-5">
+                  {diff.preview.split('\n').map((line, index) => (
+                    <span
+                      key={`${diff.diff_ref}:${index}`}
+                      className={`block whitespace-pre px-2 ${line.startsWith('+') && !line.startsWith('+++')
+                        ? 'bg-emerald-50 text-emerald-800'
+                        : line.startsWith('-') && !line.startsWith('---')
+                          ? 'bg-rose-50 text-rose-800'
+                          : 'text-slate-500'}`}
+                    >
+                      {line || ' '}
+                    </span>
+                  ))}
+                </pre>
+              </details>
+            ))}
+            {feedback.diffs_truncated && (
+              <div className="text-[11px] text-slate-500">为控制报告大小，未保存所有文件的完整 diff 预览。</div>
+            )}
+          </div>
+        </details>
+      )}
       <div className="mt-2 font-medium text-slate-600">验证结果</div>
       <div className="mt-1 grid gap-1 text-[11px] sm:grid-cols-3">
         <span>运行状态：{formatVerificationValue(verification.status)}</span>
         <span>静态校验：{formatVerificationValue(verification.static_validation)}</span>
         <span>自动验收：{formatVerificationValue(verification.acceptance_validation)}</span>
+      </div>
+      <div role="status" className="mt-1 text-[11px] text-slate-500">
+        执行限制审计：{formatConstraintAuditStatus(
+          feedback.facts?.constraint_audit.audit_status ?? 'unavailable',
+        )}
       </div>
       {validationErrors.length > 0 && (
         <details className={`mt-2 rounded ${timelinePanelSurface} px-2 py-1.5 text-[11px] text-amber-800`}>
@@ -639,22 +1043,6 @@ function CompletionFeedbackCard({
       )}
     </div>
   );
-}
-
-function projectLegacyCompletionFeedback(sourceRun?: CodeAgentRun): CodeCompletionFeedback | undefined {
-  const trace = sourceRun?.trace;
-  const changes = trace?.fileChanges;
-  if (!trace || !changes?.length) return undefined;
-  const status = trace.status ?? 'unknown';
-  return {
-    summary: trace.summary ?? '',
-    changes: changes.map((change) => ({ ...change, operation: 'modify' })),
-    verification: {
-      status,
-      static_validation: 'unknown',
-      acceptance_validation: status === 'completed_unverified' ? 'unavailable' : 'not_run',
-    },
-  };
 }
 
 function TimelineEventList({
@@ -670,37 +1058,43 @@ function TimelineEventList({
 }) {
   return (
     <ol className="relative space-y-0">
-      {events.map((event, index) => (
-        <li key={event.eventId} className="relative pl-7 sm:pl-8">
-          {index < events.length - 1 && (
-            <span aria-hidden="true" className="absolute bottom-0 left-2.5 top-6 w-px bg-slate-200" />
-          )}
-          <span
-            aria-hidden="true"
-            className={`absolute left-0 top-0.5 flex h-5 w-5 items-center justify-center rounded-full border bg-white shadow-sm ${
-              event.status === 'failed' || event.status === 'blocked'
-                ? 'border-rose-200'
-                : event.status === 'passed' || event.status === 'completed'
-                  ? 'border-emerald-200'
-                  : 'border-slate-200'
-            }`}
-          >
-            <StageIcon stage={event.stage} status={event.status} />
-          </span>
+      {events.map((event, index) => {
+        const actionIntent = event.metadata?.event_semantics === 'action_intent';
+        const visibleStatus = timelineStatusLabel(event.status);
+        return (
+          <li key={event.eventId} className="relative pl-7 sm:pl-8">
+            {index < events.length - 1 && (
+              <span aria-hidden="true" className="absolute bottom-0 left-2.5 top-6 w-px bg-slate-200" />
+            )}
+            <span
+              aria-hidden="true"
+              className={`absolute left-0 top-0.5 flex h-5 w-5 items-center justify-center rounded-full border bg-white shadow-sm ${
+                event.status === 'failed' || event.status === 'blocked'
+                  ? 'border-rose-200'
+                  : event.status === 'passed' || event.status === 'completed'
+                    ? 'border-emerald-200'
+                    : 'border-slate-200'
+              }`}
+            >
+              <StageIcon stage={event.stage} status={event.status} />
+            </span>
             <div className="relative pb-3">
-              <div className="flex min-h-6 flex-wrap items-center gap-1.5">
-                {shouldShowActorLabel(events, index) && (
-                  <span className="inline-flex items-center rounded-full bg-slate-50 px-1.5 py-0.5">
-                    <ActorBadge kind={event.actorKind} />
-                  </span>
-                )}
-                <span className="text-xs font-medium text-slate-500">{STAGE_LABEL[event.stage]}</span>
-                {event.status && <span className="text-xs text-slate-400">· {event.status}</span>}
+              {!actionIntent && (
+                <div className="flex min-h-6 flex-wrap items-center gap-1.5">
+                  {shouldShowActorLabel(events, index) && (
+                    <span className="inline-flex items-center rounded-full bg-slate-50 px-1.5 py-0.5">
+                      <ActorBadge kind={event.actorKind} />
+                    </span>
+                  )}
+                  <span className="text-xs font-medium text-slate-500">{STAGE_LABEL[event.stage]}</span>
+                  {visibleStatus && <span className="text-xs text-slate-400">· {visibleStatus}</span>}
+                </div>
+              )}
+              <TimelineEventCard event={event} onOpenDiff={onOpenDiff} onOpenTerminal={onOpenTerminal} isRunning={isRunning} />
             </div>
-            <TimelineEventCard event={event} onOpenDiff={onOpenDiff} onOpenTerminal={onOpenTerminal} isRunning={isRunning} />
-          </div>
-        </li>
-      ))}
+          </li>
+        );
+      })}
     </ol>
   );
 }
@@ -715,7 +1109,7 @@ function TimelineActorControls({
   onToggle: (kind: CodeAgentActorKind) => void;
 }) {
   return (
-    <div className="mb-2 flex flex-wrap items-center gap-2" aria-label="Agent 链路控制">
+    <div className="mb-2 flex flex-wrap items-center gap-2" aria-label="智能体链路控制">
       {actorKinds.map((kind) => {
         const expanded = !collapsedActorKinds.has(kind);
         return (
@@ -747,6 +1141,7 @@ export default function CodeAgentTimeline({
   acceptanceProgressMessage,
   acceptanceStartSequence,
   taskPlan,
+  executionPlan,
   onOpenDiff,
   onOpenTerminal,
   sourceRun,
@@ -757,15 +1152,19 @@ export default function CodeAgentTimeline({
   // projection for older/partial event streams that already recorded the
   // authoritative file delta but did not carry completion_feedback; this
   // prevents the final file list from disappearing during a protocol upgrade.
-  const completionFeedback = sourceRun?.trace.completionFeedback
-    ?? projectLegacyCompletionFeedback(sourceRun);
+  const completionFeedback = useMemo(
+    () => projectTimelineCompletionFeedback(sourceRun, events), [events, sourceRun],
+  );
   const visibleEvents = useMemo(
-    () => filterHookTimelineEvents(events).filter((event) => (
-      event.metadata?.source !== 'context_usage'
-      // The final VFS ledger below replaces every provisional file event.
-      // Keeping both would show duplicate or stale line counts.
-      && !(completionFeedback && event.stage === 'file_change')
-    )),
+    () => filterDuplicateFinalSummaryEvents(
+      filterHookTimelineEvents(events).filter((event) => (
+        event.metadata?.source !== 'context_usage'
+        // The final VFS ledger below replaces every provisional file event.
+        // Keeping both would show duplicate or stale line counts.
+        && !(completionFeedback && event.stage === 'file_change')
+      )),
+      completionFeedback?.summary,
+    ),
     [completionFeedback, events],
   );
   const allEvents = useMemo(() => [
@@ -800,10 +1199,24 @@ export default function CodeAgentTimeline({
       .map((event) => event.file?.path || (typeof event.metadata?.path === 'string' ? event.metadata.path : ''))
       .filter(Boolean)).size;
   const goldenTraceEligibility = getGoldenTraceEligibility(sourceRun);
+  const goldenTraceSaveMode: GoldenTraceSaveMode | null = goldenTraceEligibility.eligible
+    ? 'verified'
+    : goldenTraceEligibility.draftEligible
+      ? 'draft'
+      : null;
   const actorKinds = useMemo(
     () => Array.from(new Set(allEvents.map((event) => event.actorKind))),
     [allEvents],
   );
+  // A one-step internal plan still drives Runtime progress and recovery, but
+  // it does not need a detailed task-list card in the user-facing timeline.
+  const visibleTaskPlan = taskPlan?.planKind === 'execution' && taskPlan.totalCount > 1
+    ? taskPlan
+    : undefined;
+  const visibleExecutionPlan = executionPlan?.planKind === 'execution'
+    && executionPlan.planningMode !== 'NONE'
+    ? executionPlan
+    : undefined;
   const [collapsedActorKinds, setCollapsedActorKinds] = useState<Set<CodeAgentActorKind>>(new Set());
   const renderEvents = useMemo(
     () => allEvents.filter((event) => !collapsedActorKinds.has(event.actorKind)),
@@ -817,7 +1230,7 @@ export default function CodeAgentTimeline({
       return next;
     });
   };
-  if (allEvents.length === 0 && !taskPlan && !completionFeedback) return null;
+  if (allEvents.length === 0 && !visibleTaskPlan && !visibleExecutionPlan && !completionFeedback) return null;
 
   return (
     <section aria-label={title} className="border-t border-slate-200 bg-white px-4 py-3 sm:px-6">
@@ -835,24 +1248,37 @@ export default function CodeAgentTimeline({
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
           {acceptanceState !== 'idle' && (
-            <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${acceptanceState === 'passed' ? 'bg-emerald-100 text-emerald-700' : acceptanceState === 'failed' ? 'bg-rose-100 text-rose-700' : acceptanceState === 'blocked' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
+            <span className={`rounded-full px-2 py-1 text-[11px] font-medium ${acceptanceState === 'passed' ? 'bg-emerald-100 text-emerald-700' : acceptanceState === 'failed' ? 'bg-rose-100 text-rose-700' : acceptanceState === 'blocked' || acceptanceState === 'unverifiable' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
               {statusText(acceptanceState)}
             </span>
           )}
-          {sourceRun && onSaveGoldenTrace && goldenTraceEligibility.eligible && (
+          {sourceRun && onSaveGoldenTrace && goldenTraceSaveMode && (
             <button
               type="button"
-              title="保存这条已通过真实浏览器验收的运行轨迹"
-              aria-label="保存为 Golden Trace"
-              onClick={() => onSaveGoldenTrace(sourceRun)}
+              title={goldenTraceSaveMode === 'draft'
+                ? '保存这条浏览器验收尚未闭合的运行轨迹草稿'
+                : '保存这条已通过真实浏览器验收的运行轨迹'}
+              aria-label={goldenTraceSaveMode === 'draft'
+                ? '保存为 Golden Trace 草稿'
+                : '保存为 Golden Trace'}
+              onClick={() => onSaveGoldenTrace(sourceRun, goldenTraceSaveMode)}
               className="rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-800 transition-colors hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
             >
-              保存为 Golden Trace
+              {goldenTraceSaveMode === 'draft'
+                ? '保存为 Golden Trace 草稿'
+                : '保存为 Golden Trace'}
             </button>
           )}
         </div>
       </div>
-      {taskPlan && <CodeTaskListCard plan={taskPlan} onOpenFile={onOpenDiff} />}
+      {visibleExecutionPlan && (
+        <CodeTaskListCard
+          plan={visibleExecutionPlan}
+          onOpenFile={onOpenDiff}
+          compact={visibleExecutionPlan.planningMode === 'COMPACT'}
+        />
+      )}
+      {visibleTaskPlan && <CodeTaskListCard plan={visibleTaskPlan} onOpenFile={onOpenDiff} />}
       <TimelineActorControls
         actorKinds={actorKinds}
         collapsedActorKinds={collapsedActorKinds}

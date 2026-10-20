@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   canTriggerAcceptanceRepair,
+  acceptancePresentationState,
   reduceAcceptanceProofOutcome,
 } from '../src/Code/acceptanceProofOutcome.ts';
 
@@ -77,4 +78,18 @@ test('a conclusive failed assertion remains repair-eligible at the UI gate', () 
 
   assert.equal(reduceAcceptanceProofOutcome(report), 'contradicted');
   assert.equal(canTriggerAcceptanceRepair(report), true);
+});
+
+test('acceptance presentation distinguishes unverifiable evidence from failure', () => {
+  assert.equal(acceptancePresentationState({
+    passed: false,
+    outcome: 'unverifiable',
+    deterministic_findings: [{ kind: 'state_not_observable' }],
+  }), 'unverifiable');
+  assert.equal(acceptancePresentationState({
+    passed: false,
+    assertions: [{ passed: false, actual: { evidence_status: 'failed' } }],
+  }), 'failed');
+  assert.equal(acceptancePresentationState({ passed: true }), 'passed');
+  assert.equal(acceptancePresentationState({ blocked: true }), 'blocked');
 });

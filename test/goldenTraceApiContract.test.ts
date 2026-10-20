@@ -123,3 +123,23 @@ test('Golden Trace client keeps semantic strategy separate from concrete executi
     assert.match(calls[1].url, /golden-traces\/case-1\/semantic-trace$/);
   });
 });
+
+test('Golden Trace client can explicitly create an incomplete source as a draft', async () => {
+  await withFakeFetch([
+    { created: true, existing: false, reactivated: false, case: { case_id: 'case-draft' } },
+  ], async (calls) => {
+    await createGoldenTrace({
+      sessionId: 'session-1',
+      sourceRunId: 'run-inconclusive',
+      title: '自动验收链路草稿',
+      sourceMode: 'draft',
+    });
+
+    assert.deepEqual(JSON.parse(String(calls[0].init?.body)), {
+      session_id: 'session-1',
+      source_run_id: 'run-inconclusive',
+      title: '自动验收链路草稿',
+      source_mode: 'draft',
+    });
+  });
+});

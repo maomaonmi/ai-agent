@@ -17,7 +17,7 @@ export function isAgentRunExecutionActive(
  * they do not have a server-side RuntimeFixCandidate to commit.
  */
 export function runtimeVerificationCandidateFromSummary(
-  event: Pick<RuntimeSummaryEvent, 'run_id' | 'base_revision' | 'candidate_revision' | 'status'>,
+  event: Pick<RuntimeSummaryEvent, 'run_id' | 'base_revision' | 'candidate_revision' | 'status' | 'acceptance_goal' | 'verification_session_id'>,
 ): NonNullable<CodeAgentTrace['runtimeVerification']> | undefined {
   if (
     event.status !== 'awaiting_runtime_verification'
@@ -29,6 +29,10 @@ export function runtimeVerificationCandidateFromSummary(
     runId: event.run_id,
     baseRevision: event.base_revision,
     candidateRevision: event.candidate_revision,
+    ...(event.acceptance_goal ? { acceptanceGoal: event.acceptance_goal } : {}),
+    ...(event.verification_session_id
+      ? { verificationSessionId: event.verification_session_id }
+      : {}),
   };
 }
 
@@ -43,10 +47,35 @@ export function projectRuntimeSummaryStatus(
   return 'completed';
 }
 
+function agentRunTimestamp(run: Pick<CodeAgentRun, 'createdAt'>): number | null {
+  const value = run.createdAt;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** Keep UI projections independent from the arrival order of async snapshots. */
+export function sortAgentRunsChronologically(agentRuns: CodeAgentRun[]): CodeAgentRun[] {
+  return agentRuns
+    .map((run, index) => ({ run, index, timestamp: agentRunTimestamp(run) }))
+    .sort((left, right) => {
+      if (left.timestamp === null && right.timestamp === null) return left.index - right.index;
+      if (left.timestamp === null) return 1;
+      if (right.timestamp === null) return -1;
+      return left.timestamp - right.timestamp || left.index - right.index;
+    })
+    .map(({ run }) => run);
+}
+
+export function getNewestAgentRun(agentRuns: CodeAgentRun[]): CodeAgentRun | undefined {
+  return sortAgentRunsChronologically(agentRuns).at(-1);
+}
+
 /** Project one summary event onto the trace's pending-candidate state. */
 export function projectRuntimeVerificationCandidate(
   previous: CodeAgentTrace['runtimeVerification'],
-  event: Pick<RuntimeSummaryEvent, 'run_id' | 'base_revision' | 'candidate_revision' | 'status' | 'done'>,
+  event: Pick<RuntimeSummaryEvent, 'run_id' | 'base_revision' | 'candidate_revision' | 'status' | 'done' | 'acceptance_goal' | 'verification_session_id'>,
 ): CodeAgentTrace['runtimeVerification'] {
   const candidate = runtimeVerificationCandidateFromSummary(event);
   return event.done ? candidate : candidate ?? previous;
@@ -55,7 +84,7 @@ export function projectRuntimeVerificationCandidate(
 /** Bind a full-stack runtime-fix candidate to the AgentLoop child run. */
 export function bindRuntimeVerificationCandidate(
   trace: CodeAgentTrace,
-  event: Pick<RuntimeSummaryEvent, 'run_id' | 'base_revision' | 'candidate_revision' | 'status' | 'resume_eligible' | 'active_scope' | 'scope_version' | 'scope_source' | 'allowed_next_action' | 'runtime_evidence'>,
+  event: Pick<RuntimeSummaryEvent, 'run_id' | 'base_revision' | 'candidate_revision' | 'status' | 'resume_eligible' | 'active_scope' | 'scope_version' | 'scope_source' | 'allowed_next_action' | 'runtime_evidence' | 'acceptance_goal' | 'verification_session_id'>,
 ): CodeAgentTrace {
   const candidate = runtimeVerificationCandidateFromSummary(event);
   if (!candidate) return trace;
@@ -75,6 +104,8 @@ export function bindRuntimeVerificationCandidate(
         ? { browserRunId: trace.runtimeVerification.browserRunId }
         : {}),
     },
+    acceptanceGoal: event.acceptance_goal ?? trace.acceptanceGoal,
+    verificationSessionId: event.verification_session_id ?? trace.verificationSessionId,
     activeScope: event.active_scope ?? trace.activeScope,
     scopeVersion: event.scope_version ?? trace.scopeVersion,
     scopeSource: event.scope_source ?? trace.scopeSource,
@@ -91,8 +122,9 @@ export function mapAgentRunsToPrompts(
   agentRuns: CodeAgentRun[],
   prompts: string[],
 ): Array<CodeAgentRun | undefined> {
+  const orderedRuns = sortAgentRunsChronologically(agentRuns);
   const rootsByText = new Map<string, CodeAgentRun[]>();
-  for (const run of agentRuns) {
+  for (const run of orderedRuns) {
     if (run.parentRunId || run.runKind === 'runtime_repair') continue;
     const key = run.request.trim();
     const list = rootsByText.get(key) ?? [];
@@ -122,7 +154,7 @@ export function mapAgentRunsToPrompts(
     // the root identity for prompt matching.
     let current = root;
     while (true) {
-      const descendant = agentRuns.findLast((run) => run.parentRunId === current.id);
+      const descendant = orderedRuns.findLast((run) => run.parentRunId === current.id);
       if (!descendant) return current;
       current = descendant;
     }

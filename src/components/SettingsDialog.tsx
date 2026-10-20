@@ -29,10 +29,13 @@ const GLM_MODEL_OPTIONS: Array<{ id: string; label: string; multimodal: boolean 
   { id: 'glm-5v-turbo', label: 'GLM-5V Turbo · 视觉', multimodal: true },
 ];
 
-// Why: DeepSeek 官方在售模型（v4-flash/pro），旧 deepseek-chat 2026/07/24 弃用。
+// Why: DeepSeek 官方在售模型（v4-flash/pro、v4.1-flash），旧 deepseek-chat 2026/07/24 弃用。
+// deepseek-flash 是 V4.1 Flash 的官方 ID（无 v4 前缀），须与后端 MODEL_CATALOG 同步登记，
+// 否则 CodeAgent 因目录未命中降级为整段 JSON 文本提案执行器。
 const DEEPSEEK_MODEL_OPTIONS: Array<{ id: string; label: string }> = [
   { id: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash · 性价比' },
   { id: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro · 旗舰' },
+  { id: 'deepseek-flash', label: 'DeepSeek V4.1 Flash · 性价比' },
 ];
 
 // Why: DeepSeek 官方 effort 字面 4 档（low/high/xhigh/max），与 GLM 7 档完全隔离。
@@ -57,8 +60,71 @@ const MINIMAX_FALLBACK_OPTIONS: Array<{ id: string; label: string; multimodal: b
   { id: 'MiniMax-M2.7', label: 'MiniMax M2.7 · 均衡', multimodal: false },
   { id: 'MiniMax-M2.7-highspeed', label: 'MiniMax M2.7 极速', multimodal: false },
   { id: 'MiniMax-M2.5', label: 'MiniMax M2.5 · 性价比', multimodal: false },
-  { id: 'MiniMax-M2.5-highspeed', label: 'MiniMax M2.5 极速', multimodal: false },
+  { id: 'MiniMax-M2.5-highspeed', label: 'MiniMax-M2.5 极速', multimodal: false },
 ];
+
+// Why: 字节 Seed（豆包）走火山方舟 OpenAI 兼容端点，后端 MODEL_CATALOG 尚未收录，
+// 此处按官方模型列表（2026-10 推荐清单）维护，供"自定义"页的厂商预设下拉使用。
+const SEED_MODEL_OPTIONS: Array<{ id: string; label: string; multimodal: boolean }> = [
+  { id: 'doubao-seed-evolving', label: 'Seed Evolving · Coding/Agent', multimodal: true },
+  { id: 'doubao-seed-2-1-pro-260915', label: 'Seed 2.1 Pro · 旗舰', multimodal: true },
+  { id: 'doubao-seed-2-1-lite-260915', label: 'Seed 2.1 Lite · 均衡', multimodal: true },
+  { id: 'doubao-seed-2-1-turbo-260628', label: 'Seed 2.1 Turbo · 性价比', multimodal: true },
+  { id: 'doubao-seed-2-0-mini-260428', label: 'Seed 2.0 Mini · 轻量', multimodal: true },
+];
+
+// Why: "自定义"页的厂商预设——选中后自动回填该厂商 OpenAI 兼容请求地址，
+// 并把模型 ID 下拉切换为该厂商最新模型清单；请求地址/模型 ID 仍可继续手改。
+type CustomVendor = 'deepseek' | 'glm' | 'qwen' | 'minimax' | 'seed';
+
+// Why: 弹层/下拉的"手填模型 ID"哨兵值，集中定义避免多处字面量漂移。
+const CUSTOM_MODEL_VALUE = '__custom__';
+
+type ProviderId = 'deepseek' | 'glm' | 'qwen' | 'minimax';
+
+// Why: 模型 ID 下拉项统一走这个结构——官方目录项自带上下文窗口，
+// 选中模型时才能同步「高级配置」的输入/输出上下文（历史 bug：切模型只改 model_id，上下文不联动）。
+interface ModelOption {
+  id: string;
+  label: string;
+  multimodal: boolean;
+  input_context?: number;
+  output_context?: number;
+}
+
+// Why: 官方四家模型清单以后端 GET /api/settings/model-catalog 为单一数据源（MODEL_CATALOG）；
+// 下表只在目录接口不可用时兜底，缺失上下文字段时不会覆盖用户既有配置。
+const FALLBACK_MODEL_OPTIONS: Record<ProviderId, ModelOption[]> = {
+  deepseek: DEEPSEEK_MODEL_OPTIONS.map((option) => ({ ...option, multimodal: false })),
+  glm: GLM_MODEL_OPTIONS,
+  qwen: QWEN_FALLBACK_OPTIONS,
+  minimax: MINIMAX_FALLBACK_OPTIONS,
+};
+
+// Why: 只有目录来源的选项带上下文窗口；静态兜底项缺失时保持用户既有配置不变。
+function contextPatch(option: ModelOption): Partial<ModelSettings> {
+  if (option.input_context == null || option.output_context == null) return {};
+  return { input_context: option.input_context, output_context: option.output_context };
+}
+
+const CUSTOM_VENDOR_PRESETS: Record<CustomVendor, { label: string; base_url: string }> = {
+  deepseek: { label: 'DeepSeek', base_url: 'https://api.deepseek.com' },
+  glm: { label: '智谱 GLM', base_url: 'https://open.bigmodel.cn/api/paas/v4' },
+  qwen: { label: '千问 Qwen', base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1' },
+  // Why: 自定义页 API 格式固定为 OpenAI Chat Completions，故用 MiniMax 的 /v1 兼容端点，
+  // 不能沿用官方 profile 的 /anthropic（那是 Anthropic Messages 协议地址）。
+  minimax: { label: 'MiniMax', base_url: 'https://api.minimaxi.com/v1' },
+  seed: { label: '字节 Seed（豆包）', base_url: 'https://ark.cn-beijing.volces.com/api/v3' },
+};
+
+// Why: 恢复已保存配置时反推厂商预设，避免"保存后重开设置预设下拉归零、模型下拉退化成手填"。
+function vendorFromBaseUrl(baseUrl: string): CustomVendor | '' {
+  const current = (baseUrl || '').trim().replace(/\/+$/, '');
+  const hit = (Object.keys(CUSTOM_VENDOR_PRESETS) as CustomVendor[]).find(
+    (id) => CUSTOM_VENDOR_PRESETS[id].base_url.replace(/\/+$/, '') === current
+  );
+  return hit ?? '';
+}
 
 const DEFAULTS: ModelSettings = {
   provider: 'deepseek', api_format: 'openai_chat_completions', base_url: PRESETS.deepseek.base_url,
@@ -214,13 +280,18 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
   const [message, setMessage] = useState('');
   const [theme, setTheme] = useState<Theme>('system');
   const [font, setFont] = useState<Font>('system');
-  const [qwenOptions, setQwenOptions] = useState(QWEN_FALLBACK_OPTIONS);
-  const [minimaxOptions, setMinimaxOptions] = useState(MINIMAX_FALLBACK_OPTIONS);
+  // Why: 官方四家模型清单来自后端目录（单一数据源）；未加载成功时回退 FALLBACK_MODEL_OPTIONS。
+  const [catalogOptions, setCatalogOptions] = useState<Partial<Record<ProviderId, ModelOption[]>>>({});
+  // Why: 记录"用户正在手填模型 ID"。手填期间不把当前值注入下拉，否则刚敲一个字输入框就被下拉吞掉；
+  // 非手填（如重新打开设置载入已保存的自定义模型）时才注入，保证下拉里能看到刚新增的模型。
+  const [editingCustomModel, setEditingCustomModel] = useState(false);
+  // Why: 仅"自定义"页使用的厂商预设选中项；官方四家的请求地址由各自 profile 决定，不走此状态。
+  const [customVendor, setCustomVendor] = useState<CustomVendor | ''>('');
 
   // ---- 全局服务 Key：搜索提供商选择 + Tavily / Firecrawl / Reranker / Suno ----
   // Why: 与 LLM API Key 不同，这些是跨 provider 复用的外部服务配置。
   // GET 只返回 has_* 状态（脱敏），所以用户编辑时要么清空重填，要么我们不显示旧值（只显示"已保存 xxx 位"占位）。
-  const [searchProvider, setSearchProvider] = useState<'tavily' | 'firecrawl'>('firecrawl');
+  const [searchProvider, setSearchProvider] = useState<'tavily' | 'firecrawl' | 'deepseek'>('deepseek');
   const [tavilyKey, setTavilyKey] = useState('');
   const [firecrawlKey, setFirecrawlKey] = useState('');
   const [rerankKey, setRerankKey] = useState('');
@@ -228,6 +299,8 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
   const [sunoCallbackUrl, setSunoCallbackUrl] = useState('');
   const [svcHasTavily, setSvcHasTavily] = useState(false);
   const [svcHasFirecrawl, setSvcHasFirecrawl] = useState(false);
+  // DeepSeek 官方联网 Key 复用「设置 → 模型」的 DeepSeek Key，只读派生状态。
+  const [svcHasDeepseekSearch, setSvcHasDeepseekSearch] = useState(false);
   const [svcHasRerank, setSvcHasRerank] = useState(false);
   const [svcHasSuno, setSvcHasSuno] = useState(false);
   const [svcHasSunoCallback, setSvcHasSunoCallback] = useState(false);
@@ -281,12 +354,13 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
 
   useEffect(() => {
     if (!open) return;
-    getModelSettings().then((data) => setForm({ ...DEFAULTS, ...data, api_key: '' })).catch(() => setMessage('后端未连接，外观设置仍可正常使用'));
+    getModelSettings().then((data) => { setForm({ ...DEFAULTS, ...data, api_key: '' }); setCustomVendor(vendorFromBaseUrl(data.base_url)); }).catch(() => setMessage('后端未连接，外观设置仍可正常使用'));
     getServiceSettings()
       .then((svc) => {
-        setSearchProvider(svc.search_provider || 'firecrawl');
+        setSearchProvider(svc.search_provider || 'deepseek');
         setSvcHasTavily(svc.has_tavily_key);
         setSvcHasFirecrawl(svc.has_firecrawl_key);
+        setSvcHasDeepseekSearch(Boolean(svc.has_deepseek_search_key));
         setSvcHasRerank(svc.has_rerank_key);
         setSvcHasSuno(Boolean(svc.has_suno_key));
         setSvcHasSunoCallback(Boolean(svc.has_suno_callback));
@@ -313,10 +387,19 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
       .catch(() => setSvcMessage('后端未连接，联网服务设置暂不可用'));
     getModelCatalog()
       .then((catalog) => {
-        const qwen = (catalog.qwen || []) as ModelVariant[];
-        if (qwen.length) setQwenOptions(qwen.map((v) => ({ id: v.model_id, label: v.label, multimodal: v.supports_vision })));
-        const minimax = (catalog.minimax || []) as ModelVariant[];
-        if (minimax.length) setMinimaxOptions(minimax.map((v) => ({ id: v.model_id, label: v.label, multimodal: v.supports_vision })));
+        const next: Partial<Record<ProviderId, ModelOption[]>> = {};
+        (['deepseek', 'glm', 'qwen', 'minimax'] as ProviderId[]).forEach((provider) => {
+          const variants = (catalog[provider] || []) as ModelVariant[];
+          if (!variants.length) return;
+          next[provider] = variants.map((variant) => ({
+            id: variant.model_id,
+            label: variant.label,
+            multimodal: variant.supports_vision,
+            input_context: variant.input_context,
+            output_context: variant.output_context,
+          }));
+        });
+        setCatalogOptions(next);
       })
       .catch(() => { /* 保留兜底选项 */ });
     const saved = JSON.parse(localStorage.getItem('appearance-settings') || '{}');
@@ -486,17 +569,46 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
   const patch = (next: Partial<ModelSettings>) => setForm((value) => ({ ...value, ...next }));
   const chooseProvider = async (provider: ModelSettings['provider']) => {
     setMessage('');
+    // Why: 切换服务商即离开"手填"上下文，重新载入的模型必须允许出现在下拉中。
+    setEditingCustomModel(false);
     try {
       const saved = await getModelSettings(provider);
       setForm({ ...DEFAULTS, ...saved, api_key: '' });
+      setCustomVendor(provider === 'custom' ? vendorFromBaseUrl(saved.base_url) : '');
     } catch {
       // Why: MiniMax 预设默认模型为 M3（支持视觉），multimodal 初始为 true；M2.x 系列不支持视觉，切模型时由下拉选项的 multimodal 字段覆盖。
+      setCustomVendor('');
       patch(provider === 'custom' ? { provider, api_key: '', has_api_key: false } : { provider, ...PRESETS[provider], api_key: '', has_api_key: false, model_family: provider, multimodal: provider === 'glm' || (provider === 'minimax' && MINIMAX_FALLBACK_OPTIONS[0]?.multimodal === true) });
     }
   };
+  // Why: 四家官方 provider 的模型清单统一走后端目录（失败时回退静态兜底），
+  // 目录项自带 input/output_context，切模型时才能联动「高级配置」的上下文窗口。
+  const optionsForProvider = (provider: ProviderId): ModelOption[] =>
+    catalogOptions[provider]?.length ? catalogOptions[provider]! : FALLBACK_MODEL_OPTIONS[provider];
+  // Why: "自定义"页的厂商预设与官方 provider 共用同一份清单；Seed 不在官方目录，单独走本地清单。
+  const optionsForVendor = (vendor: CustomVendor): ModelOption[] =>
+    vendor === 'seed' ? SEED_MODEL_OPTIONS : optionsForProvider(vendor);
+  const customModelOptions = customVendor ? optionsForVendor(customVendor) : null;
+  // Why: 选厂商 = 显式预设动作：回填该厂商请求地址并默认选中其最新模型；
+  // 手改地址/模型后不回写 customVendor，保证用户编辑不被状态同步覆盖。
+  const applyCustomVendor = (vendor: CustomVendor | '') => {
+    setCustomVendor(vendor);
+    setEditingCustomModel(false);
+    if (!vendor) return;
+    const latest = optionsForVendor(vendor)[0];
+    const next: Partial<ModelSettings> = { base_url: CUSTOM_VENDOR_PRESETS[vendor].base_url };
+    // Why: 预设是端点基地址而非完整 URL；若沿用上次手填的 full_url=true，请求会跳过 /chat/completions 拼接。
+    next.full_url = false;
+    if (latest) {
+      next.model_id = latest.id;
+      next.display_name = latest.label.slice(0, 32);
+      next.multimodal = latest.multimodal;
+    }
+    patch(next);
+  };
   const save = async () => {
     setSaving(true); setMessage('');
-    try { const result = await saveModelSettings(form); setForm((old) => ({ ...old, ...result, api_key: '' })); window.dispatchEvent(new Event('model-settings-changed')); setMessage('配置已保存并立即生效'); }
+    try { const result = await saveModelSettings(form); setForm((old) => ({ ...old, ...result, api_key: '' })); setEditingCustomModel(false); window.dispatchEvent(new Event('model-settings-changed')); setMessage('配置已保存并立即生效'); }
     catch (error) { setMessage(error instanceof Error ? error.message : '保存失败'); }
     finally { setSaving(false); }
   };
@@ -550,9 +662,10 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
         payload.suno_callback_base_url = sunoCallbackUrl.trim();
       }
       const result = await saveServiceSettings(payload);
-      setSearchProvider(result.search_provider || 'firecrawl');
+      setSearchProvider(result.search_provider || 'deepseek');
       setSvcHasTavily(result.has_tavily_key);
       setSvcHasFirecrawl(result.has_firecrawl_key);
+      setSvcHasDeepseekSearch(Boolean(result.has_deepseek_search_key));
       setSvcHasRerank(result.has_rerank_key);
       setSvcHasSuno(Boolean(result.has_suno_key));
       setSvcHasSunoCallback(Boolean(result.has_suno_callback));
@@ -649,117 +762,85 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
         <div className="flex gap-2 overflow-x-auto border-b border-slate-200 px-5 py-3 sm:hidden dark:border-slate-700"><button onClick={() => setSection('model')} className="shrink-0 rounded-lg px-3 py-2 text-sm">模型</button><button onClick={() => setSection('services')} className="shrink-0 rounded-lg px-3 py-2 text-sm">联网</button><button onClick={() => setSection('music')} className="shrink-0 rounded-lg px-3 py-2 text-sm">音乐 API</button><button onClick={() => setSection('memory')} className="shrink-0 rounded-lg px-3 py-2 text-sm">记忆</button><button onClick={() => setSection('directory')} className="shrink-0 rounded-lg px-3 py-2 text-sm">MCP·Skills</button><button onClick={() => setSection('appearance')} className="shrink-0 rounded-lg px-3 py-2 text-sm">外观</button></div>
         {section === 'model' ? <div className="space-y-6 p-5 sm:p-7">
           <div><label className="mb-2 block text-sm font-medium text-slate-800 dark:text-slate-200">模型服务商</label><div className="grid grid-cols-2 gap-2 sm:grid-cols-5">{(['deepseek','glm','qwen','minimax','custom'] as const).map((id) => <button type="button" key={id} onClick={() => void chooseProvider(id)} className={`rounded-xl border p-3 text-left transition ${form.provider === id ? 'border-sky-500 bg-sky-50 ring-1 ring-sky-500 dark:bg-sky-950/40' : 'border-slate-200 hover:border-slate-300 dark:border-slate-700'}`}><span className="block text-sm font-semibold text-slate-900 dark:text-white">{PROVIDER_LABELS[id]}</span><span className="mt-1 block text-xs text-slate-500">{id === 'custom' ? 'OpenAI 兼容接口' : '官方服务'}{form.provider === id && form.has_api_key ? ' · 密钥已保存' : ''}</span></button>)}</div></div>
+          {form.provider === 'custom' && (
+            <Field label="厂商预设" hint={customVendor ? `已回填 ${CUSTOM_VENDOR_PRESETS[customVendor].label} 的请求地址与最新模型清单；请求地址和模型 ID 仍可手动修改` : '选择厂商后自动回填该厂商请求地址，模型 ID 出现最新模型可选；留空为纯手动配置'}>
+              <Select value={customVendor} onChange={(v) => applyCustomVendor(v as CustomVendor | '')}>
+                <option value="">手动自定义（自行填写地址与模型 ID）</option>
+                {(Object.keys(CUSTOM_VENDOR_PRESETS) as CustomVendor[]).map((id) => (
+                  <option key={id} value={id}>{CUSTOM_VENDOR_PRESETS[id].label}</option>
+                ))}
+              </Select>
+            </Field>
+          )}
           <div className="grid gap-5 sm:grid-cols-2">
             <Field label="API 格式"><Select value={form.api_format}><option value="openai_chat_completions">OpenAI Chat Completions</option></Select></Field>
-            <Field label="模型 ID" required hint={form.provider === 'deepseek' || form.provider === 'glm' || form.provider === 'qwen' || form.provider === 'minimax' ? '可从下拉框选官方模型，或手动输入' : undefined}>
+            <Field label="模型 ID" required hint={form.provider !== 'custom' ? '可从下拉框选官方模型，或手动输入' : customVendor ? '可从下拉框选该厂商模型，或手动输入' : '手动输入真实模型 ID'}>
               {form.provider === 'deepseek' ? (
-                <div className="space-y-2">
-                  <Select
-                    value={DEEPSEEK_MODEL_OPTIONS.some((option) => option.id === form.model_id) ? form.model_id : '__custom__'}
-                    onChange={(v) => {
-                      if (v === '__custom__') return;
-                      const option = DEEPSEEK_MODEL_OPTIONS.find((item) => item.id === v);
-                      if (!option) return;
-                      // Why: DeepSeek 模型均不支持视觉，multimodal 固定 false；切模型时同步展示名。
-                      patch({
-                        model_id: option.id,
-                        display_name: option.label,
-                        multimodal: false,
-                      });
-                    }}
-                  >
-                    {DEEPSEEK_MODEL_OPTIONS.map((option) => (
-                      <option key={option.id} value={option.id}>{option.label}</option>
-                    ))}
-                    <option value="__custom__">自定义（在下方输入框填写）</option>
-                  </Select>
-                  {!DEEPSEEK_MODEL_OPTIONS.some((option) => option.id === form.model_id) && (
-                    <Input value={form.model_id} onChange={(v) => patch({ model_id: v })} placeholder="deepseek-v4-flash" />
-                  )}
-                </div>
+                <ModelIdField
+                  options={optionsForProvider('deepseek')}
+                  value={form.model_id}
+                  editingCustom={editingCustomModel}
+                  onEditingCustomChange={setEditingCustomModel}
+                  // Why: DeepSeek 模型均不支持视觉，multimodal 固定 false；切模型时同步展示名与上下文窗口。
+                  onSelectOption={(option) => patch({ model_id: option.id, display_name: option.label, multimodal: false, ...contextPatch(option) })}
+                  onValueChange={(v) => patch({ model_id: v })}
+                  placeholder="deepseek-v4-flash"
+                />
               ) : form.provider === 'glm' ? (
-                <div className="space-y-2">
-                  <Select
-                    value={GLM_MODEL_OPTIONS.some((option) => option.id === form.model_id) ? form.model_id : '__custom__'}
-                    onChange={(v) => {
-                      if (v === '__custom__') return;
-                      const option = GLM_MODEL_OPTIONS.find((item) => item.id === v);
-                      if (!option) return;
-                      // Why: 选 GLM-5V 时同步多模态开关和 vision_model_id；选纯文本模型时自动把 vision_model_id 保留为 glm-5v-turbo 以便普通对话上传图时仍能切到视觉模型。
-                      patch({
-                        model_id: option.id,
-                        display_name: option.label,
-                        multimodal: option.multimodal,
-                        vision_model_id: option.multimodal ? option.id : (form.vision_model_id || 'glm-5v-turbo'),
-                        text_model_id: option.multimodal ? (form.text_model_id || 'glm-5-turbo') : option.id,
-                      });
-                    }}
-                  >
-                    {GLM_MODEL_OPTIONS.map((option) => (
-                      <option key={option.id} value={option.id}>{option.label}</option>
-                    ))}
-                    <option value="__custom__">自定义（在下方输入框填写）</option>
-                  </Select>
-                  {!GLM_MODEL_OPTIONS.some((option) => option.id === form.model_id) && (
-                    <Input value={form.model_id} onChange={(v) => patch({ model_id: v })} placeholder="glm-5-turbo" />
-                  )}
-                </div>
+                <ModelIdField
+                  options={optionsForProvider('glm')}
+                  value={form.model_id}
+                  editingCustom={editingCustomModel}
+                  onEditingCustomChange={setEditingCustomModel}
+                  // Why: 选 GLM-5V 时同步多模态开关和 vision_model_id；选纯文本模型时自动把 vision_model_id 保留为 glm-5v-turbo，
+                  // 以便普通对话上传图时仍能切到视觉模型。
+                  onSelectOption={(option) => patch({
+                    model_id: option.id,
+                    display_name: option.label,
+                    multimodal: option.multimodal,
+                    vision_model_id: option.multimodal ? option.id : (form.vision_model_id || 'glm-5v-turbo'),
+                    text_model_id: option.multimodal ? (form.text_model_id || 'glm-5-turbo') : option.id,
+                    ...contextPatch(option),
+                  })}
+                  onValueChange={(v) => patch({ model_id: v })}
+                  placeholder="glm-5-turbo"
+                />
               ) : form.provider === 'qwen' ? (
-                <div className="space-y-2">
-                  <Select
-                    value={qwenOptions.some((option) => option.id === form.model_id) ? form.model_id : '__custom__'}
-                    onChange={(v) => {
-                      if (v === '__custom__') return;
-                      const option = qwenOptions.find((item) => item.id === v);
-                      if (!option) return;
-                      // Why: 千问无 vision_model_id 自动切换机制，视觉能力由当前模型本身决定；
-                      // 切模型时同步多模态标记与默认思考预算。
-                      patch({
-                        model_id: option.id,
-                        display_name: option.label,
-                        multimodal: option.multimodal,
-                        thinking_budget: form.thinking_budget ?? 8000,
-                      });
-                    }}
-                  >
-                    {qwenOptions.map((option) => (
-                      <option key={option.id} value={option.id}>{option.label}</option>
-                    ))}
-                    <option value="__custom__">自定义（在下方输入框填写）</option>
-                  </Select>
-                  {!qwenOptions.some((option) => option.id === form.model_id) && (
-                    <Input value={form.model_id} onChange={(v) => patch({ model_id: v })} placeholder="qwen3.7-plus" />
-                  )}
-                </div>
+                <ModelIdField
+                  options={optionsForProvider('qwen')}
+                  value={form.model_id}
+                  editingCustom={editingCustomModel}
+                  onEditingCustomChange={setEditingCustomModel}
+                  // Why: 千问无 vision_model_id 自动切换机制，视觉能力由当前模型本身决定；
+                  // 切模型时同步多模态标记、默认思考预算与上下文窗口。
+                  onSelectOption={(option) => patch({ model_id: option.id, display_name: option.label, multimodal: option.multimodal, thinking_budget: form.thinking_budget ?? 8000, ...contextPatch(option) })}
+                  onValueChange={(v) => patch({ model_id: v })}
+                  placeholder="qwen3.7-plus"
+                />
               ) : form.provider === 'minimax' ? (
-                <div className="space-y-2">
-                  <Select
-                    value={minimaxOptions.some((option) => option.id === form.model_id) ? form.model_id : '__custom__'}
-                    onChange={(v) => {
-                      if (v === '__custom__') return;
-                      const option = minimaxOptions.find((item) => item.id === v);
-                      if (!option) return;
-                      // Why: MiniMax 无 vision_model_id 自动切换机制，视觉能力由所选模型本身决定（仅 M3 支持视觉）；
-                      // 切模型时同步多模态标记与默认思考预算。
-                      patch({
-                        model_id: option.id,
-                        display_name: option.label,
-                        multimodal: option.multimodal,
-                        thinking_budget: form.thinking_budget ?? 8000,
-                      });
-                    }}
-                  >
-                    {minimaxOptions.map((option) => (
-                      <option key={option.id} value={option.id}>{option.label}</option>
-                    ))}
-                    <option value="__custom__">自定义（在下方输入框填写）</option>
-                  </Select>
-                  {!minimaxOptions.some((option) => option.id === form.model_id) && (
-                    <Input value={form.model_id} onChange={(v) => patch({ model_id: v })} placeholder="MiniMax-M3" />
-                  )}
-                </div>
+                <ModelIdField
+                  options={optionsForProvider('minimax')}
+                  value={form.model_id}
+                  editingCustom={editingCustomModel}
+                  onEditingCustomChange={setEditingCustomModel}
+                  // Why: MiniMax 无 vision_model_id 自动切换机制，视觉能力由所选模型本身决定（仅 M3 支持视觉）；
+                  // 切模型时同步多模态标记、默认思考预算与上下文窗口。
+                  onSelectOption={(option) => patch({ model_id: option.id, display_name: option.label, multimodal: option.multimodal, thinking_budget: form.thinking_budget ?? 8000, ...contextPatch(option) })}
+                  onValueChange={(v) => patch({ model_id: v })}
+                  placeholder="MiniMax-M3"
+                />
+              ) : customModelOptions ? (
+                <ModelIdField
+                  options={customModelOptions}
+                  value={form.model_id}
+                  editingCustom={editingCustomModel}
+                  onEditingCustomChange={setEditingCustomModel}
+                  onSelectOption={(option) => patch({ model_id: option.id, display_name: option.label.slice(0, 32), multimodal: option.multimodal, ...contextPatch(option) })}
+                  onValueChange={(v) => patch({ model_id: v })}
+                  placeholder={customModelOptions[0]?.id || '输入模型 ID'}
+                />
               ) : (
-                <Input value={form.model_id} onChange={(v) => patch({ model_id: v })}/>
+                <Input value={form.model_id} onChange={(v) => patch({ model_id: v })} placeholder="输入模型 ID" />
               )}
             </Field>
           </div>
@@ -818,10 +899,11 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
             </div>
           </section>
 
-          <Field label="DeepSeek 联网搜索服务提供商" required hint="Tavily 需绑支付，额度用完可切 Firecrawl（免费档 500 credits/月，无需绑卡）">
-            <div className="grid grid-cols-2 gap-3">
+          <Field label="联网搜索服务提供商" required hint="DeepSeek 官方联网复用「设置 → 模型」的 DeepSeek Key；失败时自动降级 Firecrawl → Tavily">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               {([
-                ['firecrawl', 'Firecrawl（推荐 · 免费档无需绑卡）', 'https://www.firecrawl.dev'],
+                ['deepseek', 'DeepSeek 官方联网（推荐 · 复用模型 Key）', 'https://api-docs.deepseek.com/zh-cn/guides/search'],
+                ['firecrawl', 'Firecrawl（免费档无需绑卡）', 'https://www.firecrawl.dev'],
                 ['tavily', 'Tavily（老牌，有额度限制）', 'https://tavily.com'],
               ] as const).map(([id, label, link]) => <button
                 type="button"
@@ -839,12 +921,24 @@ export default function SettingsDialog({ open, onClose, initialSection, initialS
                   rel="noreferrer"
                   onClick={(e) => e.stopPropagation()}
                   className="flex items-center gap-1 text-xs text-slate-500 hover:text-sky-700 dark:text-slate-400 dark:hover:text-sky-300"
-                >{id === 'firecrawl' ? '注册获取 Key' : '官网'}<ExternalLink size={11}/></a>
+                >{id === 'firecrawl' ? '注册获取 Key' : id === 'deepseek' ? '查看官方文档' : '官网'}<ExternalLink size={11}/></a>
               </button>)}
             </div>
           </Field>
 
-          {searchProvider === 'tavily' ? (
+          {searchProvider === 'deepseek' ? (
+            <Field label="DeepSeek 官方联网凭据" hint="官方 Search / Fetch 与模型 API 共用同一个 Key，无需在此重复配置">
+              <div className="flex flex-col gap-2 rounded-xl border border-slate-200 bg-slate-50/60 p-4 dark:border-slate-700 dark:bg-slate-950/40 sm:flex-row sm:items-center sm:justify-between">
+                <div className="text-xs leading-relaxed text-slate-600 dark:text-slate-300">
+                  读取自「设置 → 模型」中 DeepSeek 的 API Key：<code className="rounded bg-slate-200/70 px-1 py-0.5 dark:bg-slate-800">https://api.deepseek.com/v1/tools/search</code>
+                  <br />未配置时会自动降级 Firecrawl → Tavily，不会中断搜索链路。
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${svcHasDeepseekSearch ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300'}`}>{svcHasDeepseekSearch ? '已配置' : '未配置（将降级）'}</span>
+                </div>
+              </div>
+            </Field>
+          ) : searchProvider === 'tavily' ? (
             <Field label="Tavily API Key" required hint={svcHasTavily ? '已保存；留空则不修改。缺失时 DeepSeek 联网模式面板将提示「未配置」' : '未配置时 DeepSeek 联网模式不可用'}>
               <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
                 <div className="relative flex-1">
@@ -1469,3 +1563,62 @@ function Field({ label, required, hint, children }: { label: string; required?: 
 function Input({ value, onChange, ...props }: { value: string; onChange: (v:string)=>void } & Omit<React.InputHTMLAttributes<HTMLInputElement>,'onChange'>) { return <input {...props} value={value} onChange={(e)=>onChange(e.target.value)} className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 dark:border-slate-700 dark:bg-slate-950 dark:text-white"/> }
 function NumberInput({ value, onChange }: { value:number; onChange:(v:number)=>void }) { return <input type="number" min={1} value={value} onChange={(e)=>onChange(Number(e.target.value))} className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-950"/> }
 function Select({ children, value, onChange }: {children:React.ReactNode;value:string;onChange?:(v:string)=>void}) { return <select value={value} onChange={(e)=>onChange?.(e.target.value)} className="h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-950">{children}</select> }
+
+/**
+ * 模型 ID 字段：下拉选择官方/预设模型，或手填自定义 ID。
+ *
+ * Why: 历史实现把"手填"与"已保存的自定义模型"混在一起——保存后重开设置时，
+ * 自定义 model_id 既不在下拉列表里也选不回；同时切模型只改 model_id，高级配置的
+ * 上下文窗口不联动。本组件统一收口这两件事：
+ *   1. 非手填态把已保存的自定义 model_id 注入下拉，保证"刚保存的模型能看到、能选回"；
+ *   2. 选中清单项时通过 onSelectOption 回传完整 option（含 input/output_context），
+ *      由调用方在同一 patch 中同步「高级配置」。
+ */
+function ModelIdField({
+  options,
+  value,
+  editingCustom,
+  onEditingCustomChange,
+  onSelectOption,
+  onValueChange,
+  placeholder,
+}: {
+  options: ModelOption[];
+  value: string;
+  editingCustom: boolean;
+  onEditingCustomChange: (value: boolean) => void;
+  onSelectOption: (option: ModelOption) => void;
+  onValueChange: (value: string) => void;
+  placeholder: string;
+}) {
+  // Why: 手填期间不注入当前值，否则刚敲的第一个字符会被下拉吞掉。
+  const savedCustom = Boolean(value) && !editingCustom && !options.some((option) => option.id === value);
+  const items: ModelOption[] = savedCustom
+    ? [...options, { id: value, label: `${value}（自定义）`, multimodal: false }]
+    : options;
+  const matched = !editingCustom && items.some((option) => option.id === value);
+  return (
+    <div className="space-y-2">
+      <Select
+        value={matched ? value : CUSTOM_MODEL_VALUE}
+        onChange={(next) => {
+          if (next === CUSTOM_MODEL_VALUE) {
+            onEditingCustomChange(true);
+            onValueChange('');
+            return;
+          }
+          const option = items.find((item) => item.id === next);
+          if (!option) return;
+          onEditingCustomChange(false);
+          onSelectOption(option);
+        }}
+      >
+        {items.map((option) => (
+          <option key={option.id} value={option.id}>{option.label}</option>
+        ))}
+        <option value={CUSTOM_MODEL_VALUE}>自定义（在下方输入框填写）</option>
+      </Select>
+      {!matched && <Input value={value} onChange={onValueChange} placeholder={placeholder} />}
+    </div>
+  );
+}

@@ -85,6 +85,8 @@ import CodeWorkspace from './CodeWorkspace';
 import CodeShowcasePage from './code-showcase/CodeShowcasePage';
 import { isRuntimeCandidateForBrowserRun } from '../Code/agentRunIdentity';
 import { CodeAgentActivityDeltaBuffer } from '../Code/codeEventStream';
+import { cleanClarificationContent, formatMissingInformation } from '../Code/clarification';
+import type { GoldenTraceSaveMode } from '../Code/goldenTraceEligibility';
 import {
   canTriggerAcceptanceRepair,
   reduceAcceptanceProofOutcome,
@@ -810,6 +812,7 @@ export default function ChatInterface() {
     compactContext,
     addTrustedTerminalPrefix,
     verifyRuntimeCandidate,
+    reconcileCurrentAgentTaskPlan,
     settleCurrentAgentRunAfterAcceptance,
   } = useCodeAutoRepair();
 
@@ -1187,6 +1190,7 @@ export default function ChatInterface() {
   }, [activeSessionId, conversationArtifactLinks]);
 
   const resetConversation = () => {
+    setRewritingIndex(null);
     setMessages([]);
     messagesRef.current = [];
     setSelectedResearchMessageIndex(null);
@@ -1224,6 +1228,7 @@ export default function ChatInterface() {
   };
 
   const applySnapshot = (snapshot: Partial<SessionSnapshot>) => {
+    setRewritingIndex(null);
     const defaults = readRuntimeDefaults();
     // 新格式优先 ChatMessage 扩展字段；老格式全局字段兜底挂到最后一条 assistant
     const rawMessages = snapshot.messages ?? [];
@@ -1359,13 +1364,19 @@ export default function ChatInterface() {
       : bundleVFS(vfs, { injectInspector: false }));
   }, [captureCodeVersion, restoreCode]);
 
-  const handleSaveGoldenTrace = useCallback(async (run: CodeAgentRun) => {
+  const handleSaveGoldenTrace = useCallback(async (
+    run: CodeAgentRun,
+    mode: GoldenTraceSaveMode = 'verified',
+  ) => {
     if (!activeSessionId || activeSessionId === LEGACY_GLOBAL_SESSION_ID) {
       setError('当前会话尚未持久化，无法保存 Golden Trace。');
       return;
     }
     const defaultTitle = run.request.trim().slice(0, 80) || '交互式前端运行时修复';
-    const title = window.prompt('为这条成功轨迹命名：', defaultTitle)?.trim();
+    const title = window.prompt(
+      mode === 'draft' ? '为这条 Golden Trace 草稿命名：' : '为这条成功轨迹命名：',
+      defaultTitle,
+    )?.trim();
     if (!title) return;
     setError(null);
     try {
@@ -1373,13 +1384,16 @@ export default function ChatInterface() {
         sessionId: activeSessionId,
         sourceRunId: run.id,
         title,
+        sourceMode: mode,
       });
       setNotice(
         result.reactivated
           ? '这条 Golden Trace 已从退役状态恢复为草稿，可继续评估或上架。'
           : result.existing
             ? '这条运行轨迹已经保存过了。'
-            : 'Golden Trace 已保存，可在记忆面板中查看.',
+            : mode === 'draft'
+              ? 'Golden Trace 草稿已保存；自动验收通过后才能上架为 Golden。'
+              : 'Golden Trace 已保存，可在记忆面板中查看.',
       );
       window.dispatchEvent(new Event('memory-updated'));
     } catch (cause) {
@@ -2279,9 +2293,7 @@ export default function ChatInterface() {
       || input.decision.intent === 'clarify';
     const needsApproval = capabilityDisposition === 'require_approval';
     if (needsClarification || needsApproval) {
-      const missing = (input.decision.missing_information ?? [])
-        .map((item) => `${item.key}：${item.description}`)
-        .join('\n');
+      const missing = formatMissingInformation(input.decision.missing_information).join('\n');
       const prefix = needsApproval
         ? '当前操作涉及需要确认的外部副作用，尚未执行。'
         : '为了继续当前操作，还需要补充以下信息：';
@@ -2435,6 +2447,13 @@ export default function ChatInterface() {
       ? currentMessages.slice(0, rewriteIndex)
       : currentMessages;
     const isBranchRewrite = rewriteIndex != null;
+    // Rewriting the LAST user turn discards no later work: the user is amending
+    // the request that owns the current unfinished run. Such a branch keeps that
+    // run as the resume identity and keeps its implemented code, instead of
+    // replacing the turn the way an early-turn rewrite does. Early rewrites
+    // still cut the branch, exclude the replaced run, and roll back its code.
+    const rewritePreservesTargetRun = rewriteIndex != null
+      && !currentMessages.slice(rewriteIndex + 1).some((message) => message.role === 'user');
     // A rewrite is a code branch operation, not only a conversation edit.
     // Capture the current candidate first, then resolve the selected prompt's
     // pre-run snapshot so the replacement request cannot inherit later work.
@@ -2443,6 +2462,8 @@ export default function ChatInterface() {
     let codeBaseVersionId: string | undefined;
     let branchActiveCodeVersionId = activeCodeVersionId;
     let agentRunsForTurn = agentRuns;
+    let rewriteTargetRun: CodeAgentRun | undefined;
+    let rewriteTargetRunIds: string[] = [];
     if (mode === 'code') {
       const currentVfs = codeToSnapshotVFS(generatedCode);
       const ensuredBase = ensureCodeBaseSnapshot(
@@ -2457,7 +2478,7 @@ export default function ChatInterface() {
         setCodeVersions(ensuredBase.snapshots);
       }
 
-      if (isBranchRewrite) {
+      if (isBranchRewrite && !rewritePreservesTargetRun) {
         const rewriteBase = resolveCodeRewriteBase({
           messages: currentMessages,
           targetMessageIndex: rewriteIndex,
@@ -2470,8 +2491,9 @@ export default function ChatInterface() {
           branchActiveCodeVersionId = copiedBase.versionId;
           setActiveCodeVersionId(copiedBase.versionId);
           setSelectedElement(null);
-          // restore() updates the hook's ref synchronously, so the mutation
-          // request below reads the restored branch even before React renders.
+          // Rewrite always starts from the selected prompt's pre-run snapshot.
+          // Restore updates the code ref synchronously before any awaited route
+          // call, so generation cannot accidentally inherit the old candidate.
           restoreCode(codeForTurn);
           if (!rewriteBase.exact) {
             setNotice('这条历史消息缺少精确的重写基线，已使用可确认的兼容快照；后续代码轮次会自动保存精确基线。');
@@ -2491,15 +2513,24 @@ export default function ChatInterface() {
         .slice(0, rewriteIndex)
         .filter((message) => message.role === 'user')
         .length;
-      const runsToDiscard = mapAgentRunsToPrompts(agentRuns, codePromptsBeforeRewrite)
-        .slice(targetPromptIndex)
+      const promptRuns = mapAgentRunsToPrompts(agentRuns, codePromptsBeforeRewrite);
+      rewriteTargetRun = promptRuns[targetPromptIndex];
+      rewriteTargetRunIds = rewriteTargetRun
+        ? getAgentRunFamilyIds(agentRuns, [rewriteTargetRun.id])
+        : [];
+      const laterRunIds = promptRuns
+        .slice(targetPromptIndex + 1)
         .flatMap((run) => run ? [run.id] : []);
-      const runIds = getAgentRunFamilyIds(agentRuns, runsToDiscard);
-      agentRunsForTurn = agentRuns.filter((run) => !runIds.includes(run.id));
-      discardAgentRuns(runIds);
-      if (runIds.length) {
+      const laterFamilyIds = getAgentRunFamilyIds(agentRuns, laterRunIds);
+      const targetFamily = new Set(rewriteTargetRunIds);
+      const discardedFutureRunIds = laterFamilyIds.filter((runId) => !targetFamily.has(runId));
+      // Keep the selected run available for branch reconciliation and discard
+      // only work from later turns. Its request text is not resume identity.
+      agentRunsForTurn = agentRuns.filter((run) => !discardedFutureRunIds.includes(run.id));
+      discardAgentRuns(discardedFutureRunIds);
+      if (discardedFutureRunIds.length) {
         window.dispatchEvent(new CustomEvent('code-agent-terminal-close', {
-          detail: { run_ids: runIds, reason: 'rewrite' },
+          detail: { run_ids: discardedFutureRunIds, reason: 'rewrite' },
         }));
       }
     }
@@ -2606,9 +2637,19 @@ export default function ChatInterface() {
       try {
         codeIntentContext = buildCodeIntentContext(turnBaseMessages, agentRunsForTurn, {
           activeRevisionId: branchActiveCodeVersionId,
+          // An early-turn rewrite starts a replacement branch. Exclude the old
+          // run family by stable identity before projecting runs onto the
+          // retained message prefix; equal request text cannot bind that run
+          // to this route as resumable work. Rewriting the last user turn is
+          // instead an amendment of that same operation, so its run identity
+          // is preserved past the prompt projection.
+          excludedRunIds: isBranchRewrite && !rewritePreservesTargetRun ? rewriteTargetRunIds : [],
+          preservedRunIds: rewritePreservesTargetRun ? rewriteTargetRunIds : [],
         });
         codeIntentDecision = await classifyCodeWorkbenchIntent(userMessage, {
-          hasProject: Boolean(codeForTurn.trim()),
+          // The Code composer always has an editable virtual draft, even
+          // before its first file exists. File contents are not workspace identity.
+          hasProject: true,
           hasUnfinishedRun: codeIntentContext.resumeCandidates.length > 0,
           entrypoint: isBranchRewrite ? 'rewrite' : undefined,
           recentTurns: codeIntentContext.recentTurns,
@@ -2619,18 +2660,71 @@ export default function ChatInterface() {
           sessionId: requestSessionId,
           requestId: userMessageId,
         });
-      } catch {
+      } catch (routeError) {
         // Classification failure must fail closed. A temporary router outage
         // must not be reinterpreted as a read-only answer, because that would
         // make an explicit follow-up look like a request for manual guidance.
+        // Keep the API's structured conflict message visible so a state
+        // reconciliation failure is not mislabeled as a generic router outage.
+        const routeErrorMessage = routeError instanceof Error
+          ? routeError.message.trim().slice(0, 400)
+          : '';
+        const routeErrorLabel = routeErrorMessage.includes('STATE_RECONCILIATION_REQUIRED')
+          ? '任务状态需要恢复'
+          : '意图路由失败';
         codeIntentDecision = {
           intent: 'conversation',
           confidence: 0,
-          reason: '意图路由暂时不可用，本轮未开始执行。',
+          reason: routeErrorMessage
+            ? `${routeErrorLabel}：${routeErrorMessage}。本轮未开始执行。`
+            : '意图路由暂时不可用，本轮未开始执行。',
           can_mutate: false,
           route_available: false,
         };
       }
+    }
+
+    const serverBoundResume = Boolean(
+      codeIntentDecision?.intent === 'resume'
+      && codeIntentDecision.desired_effect === 'mutate'
+      && codeIntentDecision.capability_disposition === 'workspace_mutation'
+      && codeIntentDecision.operation_relation === 'resume_unfinished_run'
+      && codeIntentDecision.operation_id?.trim(),
+    );
+
+    if (
+      mode === 'code'
+      && isBranchRewrite
+      && !rewritePreservesTargetRun
+      && rewriteTargetRunIds.length > 0
+      && codeIntentDecision?.route_available !== false
+      && !(
+        codeIntentDecision?.intent === 'resume'
+        && (
+          rewriteTargetRunIds.includes(codeIntentDecision.resume_run_id ?? '')
+          || Boolean(codeIntentDecision.operation_id)
+          && rewriteTargetRun?.trace.operationId === codeIntentDecision.operation_id
+        )
+      )
+    ) {
+      // If routing did not bind the rewritten prompt to its old operation,
+      // remove that stale identity from this branch before starting other work.
+      const discardedTargetRunIds = new Set(rewriteTargetRunIds);
+      agentRunsForTurn = agentRunsForTurn.filter((run) => !discardedTargetRunIds.has(run.id));
+      discardAgentRuns(rewriteTargetRunIds);
+      window.dispatchEvent(new CustomEvent('code-agent-terminal-close', {
+        detail: { run_ids: rewriteTargetRunIds, reason: 'rewrite' },
+      }));
+      const updated = await saveSessionSnapshot(
+        requestSessionId,
+        buildSnapshot(nextMessagesWithUser, agentRunsForTurn, {
+          generatedCode: codeForTurn,
+          codeVersions: codeVersionsForTurn,
+          activeCodeVersionId: branchActiveCodeVersionId,
+        }),
+        false,
+      );
+      setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
     }
 
     try {
@@ -2939,54 +3033,106 @@ export default function ChatInterface() {
         can_mutate: false,
         route_available: false,
       };
-        const isIncrementalChange = Boolean(codeForTurn.trim());
-        const targetElement = selectedElement;
-        // Why: MCP 会话级注入——与 webSearch/deepThinking 同链路，随 code 请求 meta 透传后端。
-        const mcpContext = { mode: mcpMode, serverIds: selectedMcpServerIds };
-        const mutationContext = {
-          ...mcpContext,
-          intent: decision.intent === 'runtime_fix'
-            ? 'runtime_fix' as const
-            : decision.intent === 'resume'
-              ? 'resume' as const
-              : 'action' as const,
-        };
+      const targetElement = selectedElement;
+      // Why: MCP 会话级注入——与 webSearch/deepThinking 同链路，随 code 请求 meta 透传后端。
+      const mcpContext = { mode: mcpMode, serverIds: selectedMcpServerIds };
+      const mutationContext = {
+        ...mcpContext,
+        intent: decision.intent === 'runtime_fix'
+          ? 'runtime_fix' as const
+          : decision.intent === 'resume'
+            ? 'resume' as const
+            : 'action' as const,
+      };
       try {
         const capabilityDisposition = decision.capability_disposition;
         const canWorkspaceMutate = capabilityDisposition === 'workspace_mutation'
           || (capabilityDisposition == null && decision.can_mutate);
+        const context = codeIntentContext ?? buildCodeIntentContext(turnBaseMessages, agentRunsForTurn);
+        const routerRecentTurns = context.recentTurns;
+        const selectedResumeRun = decision.intent === 'resume'
+          ? context.resumeCandidates.find((run) => run.id === decision.resume_run_id)
+            ?? context.resumeCandidates.find((run) => (
+              Boolean(decision.operation_id) && run.trace.operationId === decision.operation_id
+            ) || (
+              Boolean(decision.source_run_id) && run.id === decision.source_run_id
+            ))
+          : undefined;
+        const resumeTargetsRewrittenRun = Boolean(
+          isBranchRewrite
+          && decision.intent === 'resume'
+          && (
+            rewriteTargetRunIds.includes(decision.resume_run_id ?? '')
+            || (
+              Boolean(decision.operation_id)
+              && rewriteTargetRun?.trace.operationId === decision.operation_id
+            )
+          ),
+        );
+        const canResume = isBranchRewrite
+          ? resumeTargetsRewrittenRun && Boolean(selectedResumeRun || serverBoundResume)
+          : Boolean(selectedResumeRun || serverBoundResume);
+        const shouldResume = canWorkspaceMutate
+          && decision.intent === 'resume'
+          && canResume
+          // An empty rewrite base must use the generation endpoint, which can
+          // still bind to the selected operation and its durable goal ledger.
+          && (!isBranchRewrite || Boolean(codeForTurn.trim()));
+        // The target run may authorize resuming its operation, but a rewrite's
+        // source remains the prompt's recorded pre-run snapshot.
+        const codeForExecution = codeForTurn;
+        const executionCodeVersionId = branchActiveCodeVersionId;
+
+        const isIncrementalChange = Boolean(codeForExecution.trim());
+        const routerActiveRun: CodeIntentActiveRun | undefined = selectedResumeRun
+          ? {
+              ...toCodeIntentResumeCandidate(selectedResumeRun),
+              target_files: selectedResumeRun.trace.fileChanges?.map((change) => change.path),
+              ...(!isBranchRewrite ? {
+                runtime_read_evidence: selectedResumeRun.trace.runtimeReadEvidence,
+                verification_session_id: selectedResumeRun.trace.verificationSessionId,
+                last_verification: selectedResumeRun.trace.resumeEligible
+                  ? selectedResumeRun.trace.runtimeEvidence
+                  : undefined,
+              } : {
+                runtime_verification: false,
+                verification_session_id: undefined,
+                verification_session: undefined,
+              }),
+          }
+          : undefined;
         if (!canWorkspaceMutate) {
-          const context = codeIntentContext ?? buildCodeIntentContext(turnBaseMessages, agentRunsForTurn);
           await handleCodeReadOnlyConversation({
             requestSessionId,
             userMessage,
             assistantMessageId,
             requestToken,
             decision,
-            recentTurns: context.recentTurns,
+            recentTurns: routerRecentTurns,
             assistantReferences: context.assistantReferences,
           });
           return;
         }
-        const context = codeIntentContext ?? buildCodeIntentContext(turnBaseMessages, agentRunsForTurn);
-        const routerRecentTurns = context.recentTurns;
-        const selectedResumeRun = decision.intent === 'resume'
-          ? context.resumeCandidates.find((run) => run.id === decision.resume_run_id)
-          : undefined;
-        const routerActiveRun: CodeIntentActiveRun | undefined = selectedResumeRun
-          ? {
-              ...toCodeIntentResumeCandidate(selectedResumeRun),
-              target_files: selectedResumeRun.trace.fileChanges?.map((change) => change.path),
-              runtime_read_evidence: selectedResumeRun.trace.runtimeReadEvidence,
-              verification_session_id: selectedResumeRun.trace.verificationSessionId,
-              last_verification: selectedResumeRun.trace.resumeEligible
-                ? selectedResumeRun.trace.runtimeEvidence
-                : undefined,
-            }
-          : undefined;
-        const mutationResult = decision.intent === 'resume'
-          ? selectedResumeRun
-            ? await modifyCode(
+        if (decision.intent === 'resume' && !canResume) {
+          await handleCodeReadOnlyConversation({
+            requestSessionId,
+            userMessage,
+            assistantMessageId,
+            requestToken,
+            decision: {
+              intent: 'clarify',
+              confidence: 1,
+              reason: '没有找到可恢复的未完成 Agent run。',
+              can_mutate: false,
+            },
+            recentTurns: routerRecentTurns,
+            assistantReferences: context.assistantReferences,
+          });
+          return;
+        }
+
+        const mutationResult = shouldResume
+          ? await modifyCode(
                 userMessage,
                 targetElement,
                 requestAttachments,
@@ -2995,6 +3141,11 @@ export default function ChatInterface() {
                 { ...mutationContext, intent: 'resume', resume: true },
                 {
                   resumeFromRun: selectedResumeRun,
+                  resume: serverBoundResume,
+                  resumeSourceRunId: selectedResumeRun?.id
+                    ?? decision.resume_run_id
+                    ?? decision.source_run_id
+                    ?? undefined,
                   intentRouteId: decision.route_id ?? undefined,
                   operationId: decision.operation_id ?? undefined,
                   recentTurns: routerRecentTurns,
@@ -3005,26 +3156,12 @@ export default function ChatInterface() {
                   scopeSource: decision.scope_source,
                   allowedNextAction: decision.allowed_next_action,
                   acceptanceGoal: decision.acceptance_goal ?? undefined,
-                  runtimeEvidence: decision.intent === 'resume'
+                  runtimeEvidence: decision.intent === 'resume' && !isBranchRewrite
                     ? routerActiveRun?.last_verification
                     : undefined,
                 },
                 codeConsoleEntries,
               )
-            : await handleCodeReadOnlyConversation({
-                requestSessionId,
-                userMessage,
-                assistantMessageId,
-                requestToken,
-              decision: {
-                intent: 'clarify',
-                confidence: 1,
-                reason: '没有找到可恢复的未完成 Agent run。',
-                can_mutate: false,
-              },
-              recentTurns: routerRecentTurns,
-              assistantReferences: context.assistantReferences,
-            }).then(() => false)
           : isIncrementalChange
             ? await modifyCode(
                 userMessage,
@@ -3059,10 +3196,36 @@ export default function ChatInterface() {
                 decision.acceptance_goal ?? undefined,
                 decision.operation_id ?? undefined,
               );
+        if (typeof mutationResult === 'object' && 'notStartedReason' in mutationResult) {
+          const content = mutationResult.notStartedReason === 'empty_instruction'
+            ? '本轮未启动：修改指令为空，请重新提交。'
+            : '本轮未启动：当前分支没有可用代码候选，无法执行增量修改或续接。请恢复对应代码版本后重试。';
+          const assistantMessage: ChatMessage = {
+            id: assistantMessageId,
+            role: 'assistant',
+            content,
+          };
+          const nextMessages = [...messagesRef.current, assistantMessage];
+          messagesRef.current = nextMessages;
+          setMessages(nextMessages);
+          const updated = await saveSessionSnapshot(
+            requestSessionId,
+            buildSnapshot(nextMessages, agentRunsForTurn, {
+              generatedCode: codeForExecution,
+              codeVersions: codeVersionsForTurn,
+              activeCodeVersionId: executionCodeVersionId,
+            }),
+            false,
+          );
+          setSessions((previous) => [updated, ...previous.filter((item) => item.session_id !== updated.session_id)]);
+          return;
+        }
         const didComplete = typeof mutationResult === 'object'
           ? mutationResult.completed
           : mutationResult;
-        const isRuntimeCandidate = typeof mutationResult === 'object' && mutationResult.candidate;
+        const isRuntimeCandidate = typeof mutationResult === 'object'
+          && 'candidate' in mutationResult
+          && mutationResult.candidate;
         if (didComplete) {
           setSelectedElement(null);
           const assistantMessage: ChatMessage = {
@@ -4082,7 +4245,7 @@ export default function ChatInterface() {
           if (message.role !== 'assistant' || !message.codeResponseKind || promptIndex < 0) return [];
           return [{
             promptIndex,
-            content: message.content,
+            content: cleanClarificationContent(message.content, message.codeResponseKind),
             kind: message.codeResponseKind,
             timeline: message.codeReadOnlyTimeline ?? [],
             isRunning: isLoading && message.id === messages.at(-1)?.id,
@@ -4449,6 +4612,7 @@ export default function ChatInterface() {
               isWorkflowBusy={codeWorkflowBusy}
               isSessionReady={isSessionReady}
               runId={codeRunId}
+              sessionId={activeSessionId || undefined}
               status={codeStatus}
               snapshots={codeVersions}
               activeVersionId={activeCodeVersionId}
@@ -4471,7 +4635,7 @@ export default function ChatInterface() {
                   // still need an explicit terminal transition after the
                   // browser verifier settles, otherwise the child run keeps
                   // the whole Code workbench looking active forever.
-                  if (passed || blocked) settleCurrentAgentRunAfterAcceptance(passed);
+                  if (passed || blocked) settleCurrentAgentRunAfterAcceptance(passed, report.task_plan_snapshot);
                   return false;
                 }
                 const testConsoleEntries = (report.console ?? [])
@@ -4495,6 +4659,9 @@ export default function ChatInterface() {
                   setError(cause instanceof Error ? `运行时验证失败：${cause.message}` : '运行时验证失败，请稍后重试。');
                   return null;
                 });
+                reconcileCurrentAgentTaskPlan(
+                  result?.runtime_evidence?.task_plan_snapshot ?? report.task_plan_snapshot,
+                );
                 // Only a conclusive contradiction may start code repair.
                 // `passed=false` is not enough: the verifier may have emitted
                 // legacy failed flags while its evidence was inconclusive or
@@ -4537,7 +4704,10 @@ export default function ChatInterface() {
               onDeletePrompt={handleDeletePrompt}
               conversationAnswer={latestCodeConversationAnswer?.codeResponseKind
                 ? {
-                    content: latestCodeConversationAnswer.content,
+                    content: cleanClarificationContent(
+                      latestCodeConversationAnswer.content,
+                      latestCodeConversationAnswer.codeResponseKind,
+                    ),
                     kind: latestCodeConversationAnswer.codeResponseKind,
                     timeline: latestCodeConversationAnswer.codeReadOnlyTimeline ?? [],
                     isRunning: isLoading && latestCodeConversationAnswer.id === messages.at(-1)?.id,

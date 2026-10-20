@@ -3,6 +3,7 @@ import type { CodeAgentRun } from '../lib/api';
 export interface AgentTerminalSessionLike {
   run_id: string;
   is_manual: boolean;
+  is_external?: boolean;
 }
 
 /**
@@ -45,6 +46,7 @@ export function getStaleAgentTerminalRunIds(
   return Array.from(new Set(
     sessions
       .filter((session) => !session.is_manual)
+      .filter((session) => !session.is_external)
       .map((session) => session.run_id)
       .filter((runId) => Boolean(runId)
         && runId !== visibleRunId

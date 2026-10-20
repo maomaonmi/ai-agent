@@ -176,7 +176,7 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
   const liveBackendAgentRunIds = useMemo(
     () => new Set(
       sessions
-        .filter((session) => !session.is_manual)
+        .filter((session) => !session.is_manual && !session.is_external)
         .map((session) => session.run_id),
     ),
     [sessions],
@@ -205,7 +205,7 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
       }
     }
     for (const [runId, session] of byRunId) {
-      if (!session.is_manual && !allowedAgentRunIds.has(runId)) byRunId.delete(runId);
+      if (!session.is_manual && !session.is_external && !allowedAgentRunIds.has(runId)) byRunId.delete(runId);
     }
     for (const run of agentRuns) {
       if (closedAgentRunIds.has(run.id)) continue;
@@ -903,6 +903,8 @@ export function IntegratedTerminal(props: IntegratedTerminalProps) {
             const active = s.run_id === activeRunId;
             const label = s.is_manual
               ? '🖥  powershell'
+              : s.is_external
+                ? `⧉ ${s.title || 'execution output'}`
               : `🤖 ${s.title || s.run_id.slice(0, 10)}`;
             return (
               <div

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chooseMenuPlacement, chooseSubmenuSide } from '../src/components/menuPlacement.ts';
+import { chooseMenuAlign, chooseMenuPlacement, chooseSubmenuSide } from '../src/components/menuPlacement.ts';
 
 test('空间不足时菜单向上展开', () => {
   assert.equal(chooseMenuPlacement(650, 700, 800, 420), 'top');
@@ -20,4 +20,12 @@ test('右侧空间足够时悬停子菜单向右展开', () => {
 
 test('右侧空间不足时悬停子菜单向左展开', () => {
   assert.equal(chooseSubmenuSide(950, 1030, 1200, 300), 'left');
+});
+
+test('触发器靠近左缘且右侧放得下时菜单左对齐（避免被容器左缘裁掉）', () => {
+  assert.equal(chooseMenuAlign(120, 1200, 256), 'start');
+});
+
+test('右侧放不下整个菜单时回退右对齐', () => {
+  assert.equal(chooseMenuAlign(1000, 1200, 256), 'end');
 });

@@ -21,5 +21,7 @@ export interface TerminalSessionDescriptor {
   run_id: string;
   title: string;
   is_manual: boolean;
+  /** Output-only execution session; it must not be replaced by a shell. */
+  is_external?: boolean;
   exit_code: number | null;
 }

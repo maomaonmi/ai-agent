@@ -8,15 +8,17 @@ import type { CodeAgentActivityEvent } from '../lib/api';
  */
 export class CodeAgentEventBuffer {
   private readonly seenEventIds = new Set<string>();
-  private lastSequence = 0;
+  private readonly lastSequenceByRunId = new Map<string, number>();
   private readonly expectedRunId?: string;
 
   constructor(expectedRunId?: string) {
-    this.expectedRunId = expectedRunId;
+    this.expectedRunId = expectedRunId?.trim() || undefined;
   }
 
   get lastAcceptedSequence(): number {
-    return this.lastSequence;
+    return this.expectedRunId
+      ? this.lastSequenceByRunId.get(this.expectedRunId) ?? 0
+      : 0;
   }
 
   accept(event: CodeGenerationEvent): CodeGenerationEvent[] {
@@ -29,26 +31,30 @@ export class CodeAgentEventBuffer {
       event.type === 'runtime_summary'
       && Boolean((event as { completion_feedback?: unknown }).completion_feedback)
     );
+    const eventRunId = event.run_id?.trim() || undefined;
     if (
       this.expectedRunId
-      && event.run_id
-      && event.run_id !== this.expectedRunId
+      && eventRunId
+      && eventRunId !== this.expectedRunId
       && !isCompletionLedger
     ) {
       return [];
     }
 
-    if (event.event_id) {
-      if (this.seenEventIds.has(event.event_id)) return [];
-      this.seenEventIds.add(event.event_id);
+    // Event IDs and sequence numbers are only unique within their run stream.
+    // Completion ledgers from child runs may be projected into the parent UI,
+    // but must never move the parent's durable replay cursor.
+    const streamId = eventRunId || this.expectedRunId;
+    if (event.event_id && streamId) {
+      const eventIdentity = JSON.stringify([streamId, event.event_id]);
+      if (this.seenEventIds.has(eventIdentity)) return [];
+      this.seenEventIds.add(eventIdentity);
     }
 
-    if (typeof event.sequence === 'number') {
-      // Child-owned terminal ledgers can use a local sequence domain. Their
-      // durable payload must still reach the projector even when that local
-      // number is lower than the parent stream's last sequence.
-      if (event.sequence <= this.lastSequence && !isCompletionLedger) return [];
-      this.lastSequence = Math.max(this.lastSequence, event.sequence);
+    if (typeof event.sequence === 'number' && streamId) {
+      const lastSequence = this.lastSequenceByRunId.get(streamId) ?? 0;
+      if (event.sequence <= lastSequence) return [];
+      this.lastSequenceByRunId.set(streamId, event.sequence);
     }
 
     return [event];

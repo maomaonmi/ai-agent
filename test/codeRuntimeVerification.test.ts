@@ -10,6 +10,12 @@ import {
   projectRuntimeVerificationCandidate,
   runtimeVerificationCandidateFromSummary,
 } from '../src/Code/agentRunLifecycle.ts';
+import {
+  getAcceptanceEligibility,
+  findResidentAcceptanceResult,
+  isAcceptanceGoalReady,
+  isResidentAcceptanceTerminalRun,
+} from '../src/Code/acceptancePolicy.ts';
 import { isCodeWorkflowBusy } from '../src/Code/codeWorkflowState.ts';
 
 test('runtime candidate verification matches the browser run identity', () => {
@@ -142,4 +148,84 @@ test('idle Code workbench accepts a new turn', () => {
     agentStatus: 'completed',
     codeStatus: 'done',
   }), false);
+});
+
+test('browser acceptance waits for a bound Runtime goal instead of sending an empty goal', () => {
+  assert.equal(isAcceptanceGoalReady(undefined), false);
+  assert.equal(isAcceptanceGoalReady({ goal_type: 'unknown' }), false);
+  assert.equal(isAcceptanceGoalReady({ goal_type: 'open_runtime_behavior' }), true);
+  assert.equal(getAcceptanceEligibility(
+    { candidateRunId: 'agent-run-1', testedRunId: '' },
+    {
+      runId: 'code-run-1',
+      status: 'done',
+      acceptanceGoalReady: false,
+    },
+  ).shouldStart, false);
+});
+
+test('resident TestAgent result for the same candidate prevents a duplicate browser request', () => {
+  const result = findResidentAcceptanceResult([
+    {
+      eventId: 'test-result-1',
+      metadata: {
+        eventType: 'test_agent_result',
+        candidate_revision: 'candidate-1',
+        outcome: 'verified',
+      },
+    },
+  ], 'candidate-1');
+
+  assert.equal(result?.eventId, 'test-result-1');
+  const eligibility = getAcceptanceEligibility(
+    { candidateRunId: 'agent-run-1', testedRunId: '' },
+    {
+      runId: 'code-run-1',
+      status: 'done',
+      acceptanceGoalReady: true,
+      acceptanceAlreadyRecorded: true,
+    },
+  );
+  assert.equal(eligibility.shouldStart, false);
+  assert.equal(eligibility.state.testedRunId, '');
+});
+
+test('browser acceptance waits for the durable AgentLoop TestAgent result', () => {
+  assert.equal(getAcceptanceEligibility(
+    { candidateRunId: 'agent-run-1', testedRunId: '' },
+    {
+      runId: 'code-run-1',
+      status: 'done',
+      acceptanceGoalReady: true,
+      acceptancePending: true,
+    },
+  ).shouldStart, false);
+  assert.equal(isResidentAcceptanceTerminalRun({
+    status: 'awaiting_runtime_verification',
+    isRunning: false,
+  }), false);
+  assert.equal(isResidentAcceptanceTerminalRun({
+    status: 'completed',
+    isRunning: false,
+  }), true);
+});
+
+test('resident TestAgent result is ignored when it belongs to another candidate or is observation-only', () => {
+  assert.equal(findResidentAcceptanceResult([
+    {
+      metadata: {
+        eventType: 'test_agent_result',
+        candidate_revision: 'candidate-old',
+        outcome: 'verified',
+      },
+    },
+    {
+      metadata: {
+        eventType: 'test_agent_result',
+        candidate_revision: 'candidate-current',
+        observation_only: true,
+        outcome: 'verified',
+      },
+    },
+  ], 'candidate-current'), undefined);
 });

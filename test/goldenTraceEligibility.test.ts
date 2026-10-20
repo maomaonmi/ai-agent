@@ -69,3 +69,18 @@ test('runtime errors and incomplete boot make a source trace ineligible', () => 
     },
   })).eligible, false);
 });
+
+test('completed inconclusive browser evidence can be saved only as a draft', () => {
+  const eligibility = getGoldenTraceEligibility(makeRun({
+    status: 'completed_unverified',
+    runtimeEvidence: {
+      ...makeRun().trace.runtimeEvidence!,
+      status: 'inconclusive',
+      deterministic_verifier_passed: false,
+      goal_verified: false,
+    },
+  }));
+
+  assert.equal(eligibility.eligible, false);
+  assert.equal(eligibility.draftEligible, true);
+});

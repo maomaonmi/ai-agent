@@ -27,6 +27,21 @@ assert.match(
   /<ol className="relative space-y-0">/,
   'Each actor lane should use compact event spacing',
 );
+assert.match(
+  timelineSource,
+  /!actionIntent && \(\s*<div className="flex min-h-6 flex-wrap items-center gap-1\.5">/,
+  'Tool-intent rows should skip the empty label row so their text aligns with the icon',
+);
+assert.match(
+  timelineSource,
+  /rounded-md bg-white px-3 py-1 text-sm leading-5/,
+  'Action cards should keep their text aligned within the shared timeline gutter',
+);
+assert.match(
+  timelineSource,
+  /function ProviderUsageSummary[\s\S]*上游实际 Token 用量/,
+  'Timeline progress should expose provider-reported token usage',
+);
 assert.doesNotMatch(
   timelineSource,
   /rounded-md border border-slate-200 bg-slate-50/,

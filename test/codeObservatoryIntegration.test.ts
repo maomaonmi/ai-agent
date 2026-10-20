@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const workspaceSource = readFileSync(resolve(testDirectory, '../src/components/CodeWorkspace.tsx'), 'utf8');
 const panelSource = readFileSync(resolve(testDirectory, '../src/components/CodeObservatoryPanel.tsx'), 'utf8');
+const operationInspectorSource = readFileSync(resolve(testDirectory, '../src/components/OperationRelationsInspector.tsx'), 'utf8');
 const featureFlagSource = readFileSync(resolve(testDirectory, '../src/lib/codeObservatoryFeatureFlag.ts'), 'utf8');
 const executionGraphSource = readFileSync(resolve(testDirectory, '../src/components/ExecutionGraph.tsx'), 'utf8');
 const executionProjectionSource = readFileSync(resolve(testDirectory, '../src/Code/executionGraphProjection.ts'), 'utf8');
@@ -25,13 +26,19 @@ const globalStyles = readFileSync(resolve(testDirectory, '../src/app/globals.css
 test('mounts the observatory launcher in the Code workbench top toolbar', () => {
   const toolbarStart = workspaceSource.indexOf('const topbar = (');
   const toolbarEnd = workspaceSource.indexOf('\n  return (', toolbarStart);
-  const launcher = workspaceSource.indexOf(
-    '<CodeObservatoryLauncher run={latestAgentRun} sidebarCollapsed={sidebarCollapsed} />',
-  );
+  const launcher = workspaceSource.indexOf('<CodeObservatoryLauncher ');
 
   assert.ok(toolbarStart >= 0);
   assert.ok(toolbarEnd > toolbarStart);
   assert.ok(launcher > toolbarStart && launcher < toolbarEnd);
+  assert.match(workspaceSource.slice(launcher, toolbarEnd), /run=\{latestAgentRun\} agentRuns=\{agentRuns\}/);
+});
+
+test('projects operation usage only from linked Run telemetry and does not estimate provider fees', () => {
+  assert.match(panelSource, /<OperationRelationsInspector[\s\S]*?agentRuns=\{agentRuns\}/);
+  assert.match(operationInspectorSource, /projectOperationUsage\(operationId, projection\.operation\.runs, agentRuns\)/);
+  assert.match(operationInspectorSource, /Provider 费用未报告，未作估算/);
+  assert.match(operationInspectorSource, /这不代表零消耗/);
 });
 
 test('disabling observability hides only its launcher and unmount aborts only the read subscription', () => {

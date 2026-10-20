@@ -10,6 +10,10 @@ import {
   toCodeIntentResumeCandidate,
 } from '../src/lib/codeWorkbenchConversation.ts';
 import { summarizeAgentLoopRound } from '../src/Code/agentEventRouting.ts';
+import {
+  cleanClarificationContent,
+  formatMissingInformation,
+} from '../src/Code/clarification.ts';
 
 const chatInterfaceSource = fs.readFileSync(
   path.resolve(process.cwd(), 'src/components/ChatInterface.tsx'),
@@ -98,6 +102,83 @@ test('已完成的当前成果作为修订基线传给语义路由，而不是�
     revision_id: 'revision-33',
   });
   assert.match(chatInterfaceSource, /completedResult: codeIntentContext\.latestCompletedResult/);
+});
+
+test('重写分支按 run 身份排除被替换轮次，不因相同请求文本把它当作 resume 候选', () => {
+  const repeatedRequest = '创建欢迎页并验证浏览器断线恢复';
+  const priorRun = {
+    id: 'run-prior',
+    request: repeatedRequest,
+    projectKind: 'frontend' as const,
+    createdAt: '2026-10-12T10:00:00.000Z',
+    trace: { steps: [], output: '', phase: 'completed', isRunning: false, resumeEligible: false, status: 'completed' as const },
+  };
+  const rewrittenRun = {
+    id: 'run-being-rewritten',
+    request: repeatedRequest,
+    projectKind: 'frontend' as const,
+    createdAt: '2026-10-12T10:01:00.000Z',
+    trace: { steps: [], output: '', phase: 'blocked', isRunning: false, resumeEligible: true, status: 'needs_attention' as const },
+  };
+
+  const context = buildCodeIntentContext(
+    [{ id: 'prior-message', role: 'user', content: repeatedRequest }],
+    [priorRun, rewrittenRun],
+    { excludedRunIds: [rewrittenRun.id] },
+  );
+
+  assert.equal(context.latestRun?.id, priorRun.id);
+  assert.deepEqual(context.resumeCandidates, []);
+  assert.equal(context.latestCompletedResult?.run_id, priorRun.id);
+  assert.ok(chatInterfaceSource.includes(
+    'excludedRunIds: isBranchRewrite && !rewritePreservesTargetRun ? rewriteTargetRunIds : []',
+  ));
+  assert.ok(!chatInterfaceSource.includes('rewriteTargetRun.request.trim() === userMessage.trim()'));
+});
+
+test('重写最后一条用户消息保留该轮 run 身份，使其仍可作为 resume 候选', () => {
+  const unfinishedRun = {
+    id: 'run-unfinished',
+    request: '补完贪吃蛇的 foods 数组与重生逻辑',
+    projectKind: 'frontend' as const,
+    createdAt: '2026-10-12T10:01:00.000Z',
+    trace: {
+      steps: [], output: '', phase: 'awaiting_runtime_verification', isRunning: false,
+      resumeEligible: true, status: 'awaiting_runtime_verification' as const,
+    },
+  };
+
+  // The branch cut removed the prompt that bound this run, so prompt-text
+  // projection alone cannot surface it as resumable work.
+  const projectedOnly = buildCodeIntentContext(
+    [{ id: 'keep-1', role: 'user', content: '初始生成贪吃蛇' }],
+    [unfinishedRun],
+  );
+  assert.deepEqual(projectedOnly.resumeCandidates, []);
+  assert.equal(projectedOnly.latestCompletedResult, undefined);
+
+  const preserved = buildCodeIntentContext(
+    [{ id: 'keep-1', role: 'user', content: '初始生成贪吃蛇' }],
+    [unfinishedRun],
+    { preservedRunIds: [unfinishedRun.id] },
+  );
+  assert.deepEqual(preserved.resumeCandidates.map((run) => run.id), [unfinishedRun.id]);
+  assert.equal(preserved.latestCompletedResult, undefined);
+  const candidate = toCodeIntentResumeCandidate(preserved.resumeCandidates[0]);
+  assert.equal(candidate.run_id, unfinishedRun.id);
+  assert.equal(candidate.resume_eligible, true);
+});
+
+test('重写最后一条用户消息不排除该 run，也不回滚该轮代码', () => {
+  assert.match(
+    chatInterfaceSource,
+    /!currentMessages\.slice\(rewriteIndex \+ 1\)\.some\(\(message\) => message\.role === 'user'\)/,
+  );
+  assert.ok(chatInterfaceSource.includes('if (isBranchRewrite && !rewritePreservesTargetRun) {'));
+  assert.ok(chatInterfaceSource.includes(
+    'preservedRunIds: rewritePreservesTargetRun ? rewriteTargetRunIds : [],',
+  ));
+  assert.match(chatInterfaceSource, /&&\s*!rewritePreservesTargetRun\s*\n\s*&& rewriteTargetRunIds\.length > 0/);
 });
 
 test('上一条助手回答作为参考保留，但不混入用户事实或运行时证据', () => {
@@ -199,6 +280,33 @@ test('语义路由异常要展示结构化原因，不能吞成无上下文的�
   assert.match(chatInterfaceSource, /本轮没有执行修改/);
 });
 
+test('澄清条目缺少展示字段时不把 undefined 拼进消息', () => {
+  assert.match(
+    chatInterfaceSource,
+    /formatMissingInformation\(input\.decision\.missing_information\)/,
+  );
+  const formatted = formatMissingInformation([
+    { key: '交付目标', description: '请说明本轮要产出的结果。' },
+    { field: 'goal_interpretation.deliverables', reason: 'GOAL_DELIVERABLES_REQUIRED' },
+    { key: undefined, description: undefined },
+    null,
+  ]);
+
+  assert.deepEqual(formatted, ['交付目标：请说明本轮要产出的结果。']);
+  assert.doesNotMatch(formatted.join('\n'), /undefined/);
+});
+
+test('历史澄清消息只在展示时移除已持久化的 undefined 占位行', () => {
+  const content = '需要确认\n\n请补充一条明确的交付目标。\n\nundefined: undefined';
+
+  assert.match(chatInterfaceSource, /cleanClarificationContent\(message\.content, message\.codeResponseKind\)/);
+  assert.equal(
+    cleanClarificationContent(content, 'clarify'),
+    '需要确认\n\n请补充一条明确的交付目标。',
+  );
+  assert.equal(cleanClarificationContent(content, 'conversation'), content);
+});
+
 test('写入请求在流开始前失败时必须结算主 Agent 时间线', () => {
   assert.match(autoRepairSource, /failCurrentAgentRun/);
   assert.match(chatInterfaceSource, /failCurrentAgentRun\(message\)/);
@@ -216,7 +324,7 @@ test('新 Code 请求继承任务范围但不携带上一 run 的运行时错误
   assert.doesNotMatch(chatInterfaceSource, /const latestCodeRun = \[\.\.\.agentRunsForTurn\]\.reverse\(\)\[0\]/);
   assert.match(
     chatInterfaceSource,
-    /runtimeEvidence:\s*decision\.intent\s*===\s*'resume'\s*\?\s*routerActiveRun\?\.last_verification\s*:\s*undefined/,
+    /runtimeEvidence:\s*decision\.intent\s*===\s*'resume'\s*&&\s*!isBranchRewrite\s*\?\s*routerActiveRun\?\.last_verification\s*:\s*undefined/,
   );
   assert.match(
     chatInterfaceSource,

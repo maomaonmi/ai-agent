@@ -369,7 +369,15 @@ function ObservedEventGraph({ events }: { events: CodeObservatoryEvent[] }) {
   );
 }
 
-export function CodeObservatoryLauncher({ run, sidebarCollapsed }: { run?: CodeAgentRun; sidebarCollapsed: boolean }) {
+export function CodeObservatoryLauncher({
+  run,
+  agentRuns,
+  sidebarCollapsed,
+}: {
+  run?: CodeAgentRun;
+  agentRuns: CodeAgentRun[];
+  sidebarCollapsed: boolean;
+}) {
   const [isOpen, setIsOpen] = useState(false);
   const close = useCallback(() => setIsOpen(false), []);
 
@@ -395,7 +403,7 @@ export function CodeObservatoryLauncher({ run, sidebarCollapsed }: { run?: CodeA
       </button>
       {isOpen && run && typeof document !== 'undefined'
         ? createPortal(
-          <CodeObservatoryPanel key={run.id} run={run} onClose={close} sidebarCollapsed={sidebarCollapsed} />,
+          <CodeObservatoryPanel key={run.id} run={run} agentRuns={agentRuns} onClose={close} sidebarCollapsed={sidebarCollapsed} />,
           document.body,
         )
         : null}
@@ -405,10 +413,12 @@ export function CodeObservatoryLauncher({ run, sidebarCollapsed }: { run?: CodeA
 
 function CodeObservatoryPanel({
   run,
+  agentRuns,
   onClose,
   sidebarCollapsed,
 }: {
   run: CodeAgentRun;
+  agentRuns: CodeAgentRun[];
   onClose: () => void;
   sidebarCollapsed: boolean;
 }) {
@@ -1014,6 +1024,7 @@ function CodeObservatoryPanel({
                     key={`${run.id}:${operationId}`}
                     operationId={operationId}
                     focusedRunId={run.id}
+                    agentRuns={agentRuns}
                   />
                 ) : (
                   <div role="status" className="p-4 text-xs text-slate-500">

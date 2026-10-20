@@ -6,7 +6,9 @@ import {
   getCodeObservatoryOperationSnapshot,
   type CodeObservatoryOperationSnapshot,
 } from '../lib/codeObservatoryApi';
+import type { CodeAgentRun } from '../lib/api';
 import { projectCodeObservatoryRunRelations } from '../Code/runRelations';
+import { projectOperationUsage } from '../Code/operationUsage';
 
 const RELATION_LABELS = {
   execution_claim: '执行声明',
@@ -62,9 +64,11 @@ function errorMessage(error: unknown): string {
 export function OperationRelationsInspector({
   operationId,
   focusedRunId,
+  agentRuns,
 }: {
   operationId: string;
   focusedRunId: string;
+  agentRuns: CodeAgentRun[];
 }) {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
 
@@ -85,6 +89,9 @@ export function OperationRelationsInspector({
   const projection = useMemo(() => state.status === 'ready'
     ? projectCodeObservatoryRunRelations(state.snapshot, operationId, focusedRunId)
     : null, [focusedRunId, operationId, state]);
+  const usage = useMemo(() => projection
+    ? projectOperationUsage(operationId, projection.operation.runs, agentRuns)
+    : null, [agentRuns, operationId, projection]);
 
   if (state.status === 'loading') {
     return <div className="p-4 text-xs text-slate-500">正在读取 Operation 持久关系…</div>;
@@ -98,6 +105,11 @@ export function OperationRelationsInspector({
 
   const { operation } = projection;
   const budget = operation.recovery_budget;
+  const usageCoverageLabel = usage?.coverage === 'complete'
+    ? '完整'
+    : usage?.coverage === 'partial'
+      ? '部分记录'
+      : '暂无记录';
   return (
     <div className="space-y-4 p-3 text-xs text-slate-700 dark:text-slate-200">
       <section aria-labelledby="operation-overview-title" className="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
@@ -115,6 +127,41 @@ export function OperationRelationsInspector({
           <p className="mt-2 text-[10px] text-amber-700 dark:text-amber-300">当前 Run 尚未出现在 Operation 持久关系中；没有按名称或时间补连。</p>
         )}
       </section>
+
+      {usage && (
+        <section aria-labelledby="operation-usage-title" className="rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h3 id="operation-usage-title" className="font-semibold">Operation 用量</h3>
+            <span className="rounded bg-slate-100 px-2 py-1 text-[10px] dark:bg-slate-800">
+              {usageCoverageLabel} · {usage.recordedRunCount}/{usage.associatedRunCount} 个关联 Run
+            </span>
+          </div>
+          {usage.totalTokens === null ? (
+            <p role="status" className="mt-2 text-[10px] text-slate-500 dark:text-slate-400">
+              暂无可读取的 Run token telemetry；这不代表零消耗。
+            </p>
+          ) : (
+            <>
+              <dl className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] sm:grid-cols-3">
+                <div><dt className="text-slate-500">输入 tokens</dt><dd className="font-medium">{usage.promptTokens?.toLocaleString() ?? '未报告'}</dd></div>
+                <div><dt className="text-slate-500">输出 tokens</dt><dd className="font-medium">{usage.completionTokens?.toLocaleString() ?? '未报告'}</dd></div>
+                <div><dt className="text-slate-500">总 tokens</dt><dd className="font-medium">{usage.totalTokens.toLocaleString()}</dd></div>
+                <div><dt className="text-slate-500">缓存 tokens</dt><dd className="font-medium">{usage.cachedTokens?.toLocaleString() ?? '未报告'}</dd></div>
+                <div><dt className="text-slate-500">推理 tokens</dt><dd className="font-medium">{usage.reasoningTokens?.toLocaleString() ?? '未报告'}</dd></div>
+                <div><dt className="text-slate-500">Provider 调用</dt><dd className="font-medium">{usage.providerCalls?.toLocaleString() ?? '未报告'}</dd></div>
+              </dl>
+              {usage.coverage === 'partial' && (
+                <p role="status" className="mt-2 text-[10px] text-amber-700 dark:text-amber-300">
+                  以上仅合计已记录的 {usage.recordedRunCount}/{usage.associatedRunCount} 个关联 Run；缺失项不按 0 计。
+                </p>
+              )}
+            </>
+          )}
+          <p className="mt-2 text-[10px] text-slate-500 dark:text-slate-400">
+            模型 · {usage.models.length > 0 ? usage.models.join('、') : '未报告'} · Provider 费用未报告，未作估算。
+          </p>
+        </section>
+      )}
 
       <section aria-labelledby="operation-runs-title" className="rounded-lg border border-slate-200 dark:border-slate-700">
         <div className="border-b border-slate-200 px-3 py-2 font-semibold dark:border-slate-700" id="operation-runs-title">

@@ -53,6 +53,49 @@ test('keeps a child-owned completion ledger so the final feedback card is not lo
   assert.equal(accepted.length, 1);
 });
 
+test('does not advance the parent replay cursor with a child stream sequence', () => {
+  const buffer = new CodeAgentEventBuffer('agent-run-1');
+
+  assert.equal(buffer.accept(event({
+    event_id: 'agent-run-1:sse:3',
+    sequence: 3,
+  })).length, 1);
+
+  const childLedger = buffer.accept(event({
+    type: 'runtime_summary',
+    run_id: 'runtime-test-child',
+    event_id: 'runtime-test-child:sse:99',
+    sequence: 99,
+    done: true,
+    completion_feedback: { summary: 'completed' },
+  }));
+
+  assert.equal(childLedger.length, 1);
+  assert.equal(buffer.lastAcceptedSequence, 3);
+  assert.equal(buffer.accept(event({
+    event_id: 'agent-run-1:sse:4',
+    sequence: 4,
+  })).length, 1);
+  assert.equal(buffer.lastAcceptedSequence, 4);
+});
+
+test('scopes event identity to its stream when projecting a child completion ledger', () => {
+  const buffer = new CodeAgentEventBuffer('agent-run-1');
+
+  assert.equal(buffer.accept(event({
+    event_id: 'shared-event-id',
+    sequence: 2,
+  })).length, 1);
+  assert.equal(buffer.accept(event({
+    type: 'runtime_summary',
+    run_id: 'runtime-test-child',
+    event_id: 'shared-event-id',
+    sequence: 1,
+    done: true,
+    completion_feedback: { summary: 'completed' },
+  })).length, 1);
+});
+
 test('ignores older sequence numbers after a reconnect replay', () => {
   const buffer = new CodeAgentEventBuffer('agent-run-1');
 

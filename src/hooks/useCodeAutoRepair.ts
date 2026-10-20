@@ -24,6 +24,7 @@ import {
   type CodeIntentActiveRun,
   type CodeIntentTurn,
   type CodeTaskScope,
+  type CodeTaskPlanSnapshot,
   type CodeGenerationEvent,
   type ContextUsageEvent,
   type HookEvent,
@@ -35,16 +36,19 @@ import {
   type RuntimeReadEvidence,
   type AcceptanceGoalContract,
   type TestAgentContractReplanEvent,
+  type VerificationSessionSnapshot,
 } from '../lib/api';
 import { appendTimelineEvent, completeTimelineEvent } from '../Code/agentTimeline';
 import { classifyCodeGenerationEvent, summarizeAgentLoopRound } from '../Code/agentEventRouting';
-import { applyCodeTaskEvent } from '../Code/codeTaskPlan';
+import { applyCodeTaskEvent, projectCodeTaskPlanSnapshot } from '../Code/codeTaskPlan';
 import { createRuntimeRepairRunId, rebindRuntimeEvidenceToRun } from '../Code/agentRunIdentity';
 import {
   bindRuntimeVerificationCandidate,
+  getNewestAgentRun,
   projectRuntimeVerificationCandidate,
   projectRuntimeSummaryStatus,
   resetAgentRuns,
+  sortAgentRunsChronologically,
   settleAgentRunAsSuperseded,
 } from '../Code/agentRunLifecycle';
 import { canStartRuntimeRepair } from '../Code/acceptancePolicy';
@@ -498,6 +502,8 @@ export default function useCodeAutoRepair() {
     projectKind: 'frontend' | 'fullstack' = 'frontend',
     options: {
       resumeRun?: CodeAgentRun;
+      resume?: boolean;
+      resumeSourceRunId?: string;
       activeScope?: CodeTaskScope;
       scopeVersion?: number;
       scopeSource?: 'orchestrator' | 'inherited' | 'explicit';
@@ -505,10 +511,12 @@ export default function useCodeAutoRepair() {
       runtimeEvidence?: RuntimeVerificationEvidence;
       acceptanceGoal?: AcceptanceGoalContract;
       verificationSessionId?: string;
+      operationId?: string;
     } = {},
   ) => {
     hasAgentOutputRef.current = false;
     const resumedRun = options.resumeRun;
+    const isResume = Boolean(options.resume || resumedRun);
     // Every user turn owns a fresh execution identity. A resume references the
     // prior run as evidence; it must never append rounds to the old prompt or
     // reuse its runtime-candidate key.
@@ -519,10 +527,10 @@ export default function useCodeAutoRepair() {
     const trace: CodeAgentTrace = {
       ...EMPTY_AGENT_TRACE,
       taskPlan: resumedRun?.trace.taskPlan,
-      fileChanges: resumedRun?.trace.fileChanges,
+      executionPlan: resumedRun?.trace.executionPlan,
       runtimeReadEvidence: resumedRun?.trace.runtimeReadEvidence,
       steps: [message],
-      phase: resumedRun ? 'resuming' : 'analyzing',
+      phase: isResume ? 'resuming' : 'analyzing',
       isRunning: true,
       status: 'running',
       resumeEligible: false,
@@ -534,19 +542,21 @@ export default function useCodeAutoRepair() {
         ? rebindRuntimeEvidenceToRun(options.runtimeEvidence, id)
         : undefined,
       acceptanceGoal: options.acceptanceGoal ?? resumedRun?.trace.acceptanceGoal,
-      // Preserve the last durable report while a resumed turn is running;
-      // otherwise the prompt lane falls back to provisional file events and
-      // the final modification/verification list vanishes from the UI.
-      completionFeedback: resumedRun?.trace.completionFeedback,
+      // Why: completionFeedback/fileChanges 是上一轮的最终 ledger，属于上一轮
+      //   run 的历史卡片，不继承到新 turn——否则 resume 型请求一开始就会显示
+      //   上轮的"完成反馈"，直到本轮 runtime_summary 重建为止。本轮执行期间
+      //   时间线回退为本轮真实的过程事件（provisional file_change）。
       verificationSessionId: options.verificationSessionId
         ?? resumedRun?.trace.verificationSessionId
         ?? id,
+      verificationSession: resumedRun?.trace.verificationSession,
+      operationId: options.operationId ?? resumedRun?.trace.operationId,
     };
     agentTraceRef.current = trace;
     setAgentTrace(trace);
     setAgentRuns((previous) => [...previous, {
           id,
-          resumedFromRunId: resumedRun?.id,
+          resumedFromRunId: resumedRun?.id ?? options.resumeSourceRunId,
           request,
           projectKind,
           createdAt: new Date().toISOString(),
@@ -590,6 +600,7 @@ export default function useCodeAutoRepair() {
         iteration?: number;
         eventId?: string;
         timestampMs?: number;
+        sequence?: number;
         metadata?: Record<string, unknown>;
       } = {},
     ) => {
@@ -639,6 +650,9 @@ export default function useCodeAutoRepair() {
         metrics,
         eventId: options.eventId,
         timestampMs: options.timestampMs,
+        // 持久事件时钟：服务端信封在提交时分配的 sequence 是全序权威；
+        // 缺省时才退回本地递增计数（乐观本地状态行）。
+        sequence: options.sequence,
         iteration: options.iteration,
         metadata: options.metadata,
       });
@@ -728,6 +742,28 @@ export default function useCodeAutoRepair() {
         ?? currentAgentRunIdRef.current;
       const testRunId = testEvent.run_id ?? currentAgentRunIdRef.current;
       const sourceEventId = testEvent.source_event_id ?? testEvent.event_id;
+      const plannerAttemptId = typeof testEvent.metadata?.attempt_id === 'string'
+        ? testEvent.metadata.attempt_id
+        : '';
+      const plannerCallId = typeof testEvent.metadata?.planner_call_id === 'string'
+        ? testEvent.metadata.planner_call_id
+        : '';
+      const plannerStatus = String(testEvent.status ?? '');
+      const isPlannerAttemptUpdate = (
+        event.type === 'test_agent_contract_replan'
+        && Boolean(plannerAttemptId)
+        && typeof testEvent.metadata?.planner_stage === 'string'
+        && (
+          plannerStatus.startsWith('model_')
+          || ['needs_agent', 'completed', 'failed', 'blocked'].includes(plannerStatus)
+        )
+      );
+      // Keep every backend event ID in metadata for replay/debugging, while
+      // projecting one provider call into one live UI row. Separate semantic
+      // stages and model retries have distinct call IDs and clocks.
+      const plannerTimelineProjectionKey = isPlannerAttemptUpdate
+        ? `acceptance-planner:${testRunId}:${plannerCallId || `${plannerAttemptId}:${testEvent.metadata?.planner_stage ?? 'result'}`}`
+        : undefined;
       const compiledAcceptanceGoal = (
         event.type === 'test_agent_contract_replan'
           ? (event as TestAgentContractReplanEvent).acceptance_goal
@@ -738,6 +774,13 @@ export default function useCodeAutoRepair() {
           ? event.metadata.acceptance_goal as AcceptanceGoalContract
           : undefined
       );
+      const verificationSession = (
+        event.metadata?.verification_session
+          && typeof event.metadata.verification_session === 'object'
+          && typeof (event.metadata.verification_session as { verification_session_id?: unknown }).verification_session_id === 'string'
+      )
+        ? event.metadata.verification_session as VerificationSessionSnapshot
+        : undefined;
       appendActivity(
         testEvent.content,
         testEvent.done,
@@ -753,6 +796,10 @@ export default function useCodeAutoRepair() {
             ...testEvent.metadata,
             source: 'test-agent-live',
             eventType: testEvent.type,
+            ...(plannerTimelineProjectionKey ? {
+              timeline_projection_key: plannerTimelineProjectionKey,
+              source_event_id: sourceEventId,
+            } : {}),
             verificationSessionId: lifecycleId,
             lifecycleEvent: testEvent.metadata?.lifecycle_event,
             candidateRevision: testEvent.candidate_revision
@@ -766,6 +813,7 @@ export default function useCodeAutoRepair() {
         ...previous,
         acceptanceGoal: compiledAcceptanceGoal ?? previous.acceptanceGoal,
         verificationSessionId: lifecycleId,
+        verificationSession: verificationSession ?? previous.verificationSession,
       }));
       return true;
     }
@@ -908,9 +956,8 @@ export default function useCodeAutoRepair() {
       return true;
     }
     if (event.type === 'sandbox_command_request') {
-      const source = event.source.slice(0, 240);
       appendActivity(
-        source,
+        '正在检查当前预览的运行状态。',
         false,
         'tool_call',
         'sandbox_console_eval',
@@ -940,23 +987,41 @@ export default function useCodeAutoRepair() {
     // Why: 任务拆解事件是 AgentLoop 状态投影，不是普通文字活动。
     // 由稳定 event_id/sequence 去重后写入 trace.taskPlan，卡片和历史运行
     // 都从这一份状态渲染，不能再把它拼进黑色模型输出框。
-    if (event.type === 'task_list') {
+    if (event.type === 'task_list' || event.type === 'goal_obligations') {
       if (actorKind !== 'main') return true;
       commitAgentTrace((previous) => {
-        const nextTaskPlan = applyCodeTaskEvent(previous.taskPlan ?? null, event);
-        return nextTaskPlan === previous.taskPlan
+        const isExecutionPlan = (
+          event.plan_kind === 'execution'
+          || event.projection_source === 'execution_plan'
+        );
+        const currentPlan = isExecutionPlan
+          ? previous.executionPlan ?? null
+          : previous.taskPlan ?? null;
+        const nextTaskPlan = applyCodeTaskEvent(currentPlan, event);
+        return nextTaskPlan === currentPlan
           ? previous
-          : { ...previous, taskPlan: nextTaskPlan };
+          : isExecutionPlan
+            ? { ...previous, executionPlan: nextTaskPlan }
+            : { ...previous, taskPlan: nextTaskPlan };
       });
       return true;
     }
     if (event.type === 'task_update') {
       if (actorKind !== 'main') return true;
       commitAgentTrace((previous) => {
-        const nextTaskPlan = applyCodeTaskEvent(previous.taskPlan ?? null, event);
-        return nextTaskPlan === previous.taskPlan
+        const isExecutionPlan = (
+          event.plan_kind === 'execution'
+          || event.projection_source === 'execution_plan'
+        );
+        const currentPlan = isExecutionPlan
+          ? previous.executionPlan ?? null
+          : previous.taskPlan ?? null;
+        const nextTaskPlan = applyCodeTaskEvent(currentPlan, event);
+        return nextTaskPlan === currentPlan
           ? previous
-          : { ...previous, taskPlan: nextTaskPlan };
+          : isExecutionPlan
+            ? { ...previous, executionPlan: nextTaskPlan }
+            : { ...previous, taskPlan: nextTaskPlan };
       });
       // Why: 子任务完成时携带 delta，追加到执行记录的 fileChanges 里。
       if (event.status === 'completed' && event.delta) {
@@ -999,8 +1064,9 @@ export default function useCodeAutoRepair() {
           additions: event.additions ?? 0,
           deletions: event.deletions ?? 0,
           operation: event.operation ?? 'modify',
+          diffLines: event.diff_lines,
         },
-        metadata: { path: event.path },
+        metadata: { path: event.path, diffLines: event.diff_lines },
       });
       window.dispatchEvent(new CustomEvent('code-file-written', { detail: { path: event.path } }));
       return true;
@@ -1027,25 +1093,36 @@ export default function useCodeAutoRepair() {
     if (event.type !== 'agent_activity') return false;
     const activity = event as CodeAgentActivityEvent;
     const stage: CodeAgentTimelineStage = event.channel === 'status'
-      ? 'status'
+      ? activity.metadata?.event_semantics === 'action_intent'
+        ? 'tool_call'
+        : 'status'
       : event.channel === 'answer'
         ? 'summary'
         : event.phase === 'preflight'
           ? 'preflight'
         : event.phase === 'thinking'
           ? 'thinking'
-          : event.phase === 'validating'
+          : event.phase === 'validating' || event.phase === 'static_verify'
             ? 'validation'
             : 'output';
     const isTurnBoundary = activity.boundary === 'turn_completed';
     const traceDone = isTurnBoundary ? false : event.done;
-    appendActivity(event.content, event.done, stage, event.phase, {
+    appendActivity(event.content, event.done, stage, event.status ?? event.phase, {
       actorId: activity.actor_id ?? resolvedActorId,
+      actorKind: activity.actor_kind ?? actorKind,
       turnId: activity.turn_id,
       iteration: activity.iteration,
       eventId: activity.event_id,
       timestampMs: activity.timestamp_ms,
-      metadata: activity.metadata,
+      // 持久事件时钟：优先信封 transport sequence，回退 source_sequence；
+      // 这是跨 actor 显示顺序 = 持久存储顺序的唯一通道。
+      sequence: activity.sequence ?? activity.source_sequence,
+      metadata: {
+        ...activity.metadata,
+        phase: event.phase,
+        runtimeStatus: event.status,
+        candidate_revision: event.candidate_revision,
+      },
     });
     if (actorKind !== 'main') return true;
     // 思考增量只进入 reasoning，不应阻止随后真正的代码/JSON 输出更新。
@@ -1290,6 +1367,8 @@ export default function useCodeAutoRepair() {
     try {
       const result = await verifyFullstackRuntime({
         run_id: candidate.runId,
+        session_id: sessionIdRef.current ?? undefined,
+        operation_id: agentTraceRef.current.operationId,
         base_revision: candidate.baseRevision,
         candidate_revision: candidate.candidateRevision,
         boot_completed: bootCompleted,
@@ -1304,12 +1383,21 @@ export default function useCodeAutoRepair() {
         changed_files: changedFiles,
         diff_summary: `+${diffSummary.additions}/-${diffSummary.deletions}`,
       });
-      const completed = result.status === 'completed' && result.verified && result.committed;
+      const candidateCommitted = result.status === 'completed' && result.verified && result.committed;
+      const taskPlan = projectCodeTaskPlanSnapshot(
+        result.runtime_evidence?.task_plan_snapshot,
+        agentTraceRef.current.taskPlan ?? null,
+      );
+      const completed = candidateCommitted && (!taskPlan || taskPlan.status === 'completed');
+      const unresolvedTaskPlan = candidateCommitted && !completed;
       commitAgentTrace((previous) => ({
         ...previous,
         isRunning: false,
         status: completed ? 'completed' : 'needs_attention',
+        phase: completed ? 'completed' : 'needs_attention',
         resumeEligible: !completed,
+        runtimeVerification: candidateCommitted ? undefined : previous.runtimeVerification,
+        taskPlan: taskPlan ?? undefined,
         runtimeEvidence: result.runtime_evidence ?? previous.runtimeEvidence,
       }));
       appendTimeline({
@@ -1318,7 +1406,9 @@ export default function useCodeAutoRepair() {
         runId: candidate.runId,
         stage: completed ? 'verification' : 'error',
         status: completed ? 'completed' : 'needs_attention',
-        content: result.reason,
+        content: unresolvedTaskPlan
+          ? `${result.reason} 仍有未完成的任务义务，任务计划保持待验收并可恢复。`
+          : result.reason,
         metadata: {
           candidateRevision: candidate.candidateRevision,
           consoleErrorCount: result.console_errors?.length ?? 0,
@@ -1414,11 +1504,11 @@ export default function useCodeAutoRepair() {
   }, [reset, updateCode]);
 
   const restoreAgentRuns = useCallback((savedRuns: CodeAgentRun[]) => {
-    const restoredRuns = savedRuns.map((run) => ({
+    const restoredRuns = sortAgentRunsChronologically(savedRuns).map((run) => ({
       ...run,
       trace: { ...run.trace, steps: [...run.trace.steps], isRunning: false },
     }));
-    const latest = restoredRuns.at(-1);
+    const latest = getNewestAgentRun(restoredRuns);
     setAgentRuns(restoredRuns);
     currentAgentRunIdRef.current = latest?.id ?? '';
     agentTraceRef.current = latest?.trace ?? EMPTY_AGENT_TRACE;
@@ -1479,6 +1569,7 @@ export default function useCodeAutoRepair() {
           ? 'fullstack_bootstrap'
           : 'minimal_frontend_patch',
         acceptanceGoal,
+        operationId,
       },
     );
     // 注意：beginAgentTrace 内部设置了 currentAgentRunIdRef，所以必须在它之后取 meta.run_id。
@@ -1546,6 +1637,9 @@ export default function useCodeAutoRepair() {
     mcp: McpRequestContext | null = null,
     options: {
       resumeFromRun?: CodeAgentRun;
+      /** Server-authorized resume may have no matching browser run snapshot. */
+      resume?: boolean;
+      resumeSourceRunId?: string;
       intentRouteId?: string;
       operationId?: string;
       recentTurns?: CodeIntentTurn[];
@@ -1562,9 +1656,16 @@ export default function useCodeAutoRepair() {
   ) => {
     sessionIdRef.current = sessionId;
     mcpRef.current = mcp;
+    const isResume = Boolean(options.resume || options.resumeFromRun);
     const currentCode = codeRef.current;
-    if (!currentCode || !instruction.trim()) return false;
-    const isResume = Boolean(options.resumeFromRun);
+    if (!instruction.trim()) {
+      return { completed: false as const, notStartedReason: 'empty_instruction' as const };
+    }
+    const parsedVfs = currentCode ? parseProjectCode(currentCode) : null;
+    const hasEmptyProjectVfs = parsedVfs !== null && Object.keys(parsedVfs).length === 0;
+    if (!currentCode.trim() || hasEmptyProjectVfs) {
+      return { completed: false as const, notStartedReason: 'empty_candidate' as const };
+    }
     const consoleDiagnostics = consoleEntries
       .filter((entry) => entry.level === 'error' || entry.level === 'warn')
       .slice(-100)
@@ -1589,7 +1690,6 @@ export default function useCodeAutoRepair() {
     runtimeCheckCompletedRef.current = false;
     setRepairLogs([]);
     setStatus({ state: 'modifying', charCount: 0 });
-    const parsedVfs = parseProjectCode(currentCode);
     const currentVfs = parsedVfs ?? {};
     // Why: parseProjectCode('{}') 返回空对象，在 JS 中是 truthy；
     //   必须检查是否包含真实文件，否则会把空 VFS 传给后端触发 422。
@@ -1602,12 +1702,15 @@ export default function useCodeAutoRepair() {
       hasVfs ? 'fullstack' : 'frontend',
       {
         resumeRun: options.resumeFromRun,
+        resume: isResume,
+        resumeSourceRunId: options.resumeSourceRunId,
         activeScope: options.activeScope,
         scopeVersion: options.scopeVersion,
         scopeSource: options.scopeSource,
         allowedNextAction: options.allowedNextAction,
         runtimeEvidence: isResume ? options.runtimeEvidence : undefined,
         acceptanceGoal: options.acceptanceGoal,
+        operationId: options.operationId,
       },
     );
     const runIdForRequest = currentAgentRunIdRef.current;
@@ -1652,6 +1755,9 @@ export default function useCodeAutoRepair() {
         const report = await runCodeAcceptanceTest({
           user_request: instruction.trim(),
           preview_html: previewHtml,
+          workspace_id: terminalWorkspaceId,
+          session_id: sessionId ?? undefined,
+          operation_id: options.operationId ?? agentTraceRef.current.operationId,
           run_id: runIdForRequest,
           verification_run_id: `${runIdForRequest}:preflight`.slice(0, 64),
           console_entries: consoleEntries.slice(-100).map((entry) => ({
@@ -1660,6 +1766,10 @@ export default function useCodeAutoRepair() {
           })),
           acceptance_goal: options.acceptanceGoal ?? agentTraceRef.current.acceptanceGoal,
           verification_session_id: agentTraceRef.current.verificationSessionId,
+          // Why: 预检是只读勘察（页面能不能开 / DOM / console / pageerror），
+          // 不是验收裁决。observation-only 时后端跳过 goal-context fail-closed，
+          // 只返回采集事实，goal_verified 恒为 false。
+          observation_only: true,
         }, undefined, controller.signal);
         const reportDiagnostics = formatRuntimePreflightDiagnostics(report);
         if (!report.passed) {
@@ -1674,13 +1784,17 @@ export default function useCodeAutoRepair() {
           stage: 'verification',
           status: report.blocked
             ? 'runtime_smoke_blocked'
-            : report.passed
-              ? 'runtime_smoke_passed'
-              : 'runtime_smoke_failed',
+            : report.observation_only
+              ? 'runtime_observed'
+              : report.passed
+                ? 'runtime_smoke_passed'
+                : 'runtime_smoke_failed',
           content: report.diagnostic
-            || (report.passed
-              ? '运行时冒烟预检通过（仅代表当前版本能启动，不代表本轮需求已完成）。'
-              : '运行时冒烟预检未通过。'),
+            || (report.observation_only
+              ? '确定性浏览器预检已完成观察采集（仅勘察页面/DOM/console，不代表验收结论）。'
+              : report.passed
+                ? '运行时冒烟预检通过（仅代表当前版本能启动，不代表本轮需求已完成）。'
+                : '运行时冒烟预检未通过。'),
           metadata: {
             source: 'deterministic-browser-preflight',
             verificationClass: 'runtime_smoke',
@@ -1803,6 +1917,26 @@ export default function useCodeAutoRepair() {
   const handleRuntimeError = useCallback(async (
     runtimeError: RuntimeErrorReport,
   ) => {
+    if (agentTraceRef.current.operationId) {
+      // Durable operations are repaired only after Runtime commits a
+      // source-repair authorization. A browser error is not that grant.
+      appendTimeline({
+        actorKind: 'system',
+        actorId: `runtime-repair-await:${runtimeError.runId}`,
+        stage: 'verification',
+        content: '验证证据已交给 Runtime；等待其选择恢复路线。',
+        status: 'needs_attention',
+      });
+      commitAgentTrace((previous) => ({
+        ...previous,
+        phase: 'needs_attention',
+        status: 'needs_attention',
+        isRunning: false,
+        resumeEligible: true,
+      }));
+      setStatus({ state: 'idle' });
+      return;
+    }
     if (
       runtimeError.runId !== runIdRef.current ||
       !canStartRuntimeRepair({
@@ -2019,6 +2153,7 @@ export default function useCodeAutoRepair() {
             workspace_id: terminalWorkspaceId,
             run_id: currentAgentRunIdRef.current,
             session_id: sessionIdRef.current ?? undefined,
+            operation_id: agentTraceRef.current.operationId ?? undefined,
             mcp_mode: mcpRef.current?.mode,
             mcp_server_ids: mcpRef.current?.serverIds,
             intent: 'runtime_fix',
@@ -2035,6 +2170,7 @@ export default function useCodeAutoRepair() {
             workspace_id: terminalWorkspaceId,
             run_id: currentAgentRunIdRef.current,
             session_id: sessionIdRef.current ?? undefined,
+            operation_id: agentTraceRef.current.operationId ?? undefined,
             mcp_mode: mcpRef.current?.mode,
             mcp_server_ids: mcpRef.current?.serverIds,
             intent: 'runtime_fix',
@@ -2133,15 +2269,33 @@ export default function useCodeAutoRepair() {
     }
   }, [appendTimeline, beginRuntimeCheck, clearCheckTimer, clearRepairRetryTimer, commitAgentTrace, consumeAgentEvent, continueAgentTrace, finishTimeline, recordFileChanges, terminalWorkspaceId]);
 
-  const settleCurrentAgentRunAfterAcceptance = useCallback((passed: boolean) => {
+  const reconcileCurrentAgentTaskPlan = useCallback((snapshot?: CodeTaskPlanSnapshot | null) => {
+    if (!snapshot) return;
+    commitAgentTrace((previous) => {
+      const taskPlan = projectCodeTaskPlanSnapshot(snapshot, previous.taskPlan ?? null);
+      return taskPlan === (previous.taskPlan ?? null)
+        ? previous
+        : { ...previous, taskPlan: taskPlan ?? undefined };
+    });
+  }, [commitAgentTrace]);
+
+  const settleCurrentAgentRunAfterAcceptance = useCallback((
+    passed: boolean,
+    snapshot?: CodeTaskPlanSnapshot | null,
+  ) => {
     isRepairingRef.current = false;
-    commitAgentTrace((previous) => ({
-      ...previous,
-      phase: passed ? 'completed' : 'needs_attention',
-      status: passed ? 'completed' : 'needs_attention',
-      isRunning: false,
-      resumeEligible: !passed,
-    }));
+    commitAgentTrace((previous) => {
+      const taskPlan = projectCodeTaskPlanSnapshot(snapshot, previous.taskPlan ?? null);
+      const completed = passed && (!taskPlan || taskPlan.status === 'completed');
+      return {
+        ...previous,
+        phase: completed ? 'completed' : 'needs_attention',
+        status: completed ? 'completed' : 'needs_attention',
+        isRunning: false,
+        resumeEligible: !completed,
+        taskPlan: taskPlan ?? undefined,
+      };
+    });
   }, [commitAgentTrace]);
 
   repairHandlerRef.current = (runtimeError) => {
@@ -2251,6 +2405,7 @@ export default function useCodeAutoRepair() {
     compactContext,
     addTrustedTerminalPrefix,
     verifyRuntimeCandidate,
+    reconcileCurrentAgentTaskPlan,
     settleCurrentAgentRunAfterAcceptance,
   };
 }
@@ -2271,7 +2426,7 @@ function formatRuntimePreflightDiagnostics(report: Awaited<ReturnType<typeof run
     .map((entry) => `network-failure: ${entry.url} (${entry.error})`);
   return [
     '[deterministic-browser-preflight]',
-    `status=${report.blocked ? 'blocked' : report.passed ? 'passed' : 'failed'}`,
+    `status=${report.observation_only ? 'observed' : report.blocked ? 'blocked' : report.passed ? 'passed' : 'failed'}`,
     report.diagnostic ?? '',
     ...findings,
     ...consoleErrors,

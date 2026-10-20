@@ -135,6 +135,16 @@ assert.match(chatInterfaceSource, /id="code-workspace-topbar-slot"/, 'Code mode 
 assert.match(chatInterfaceSource, /topbarActions=\{\(/, 'Code mode should pass the settings and agent actions into the unified top row');
 assert.match(chatInterfaceSource, /topbarTargetId="code-workspace-topbar-slot"/, 'Code workspace should mount its toolbar into the page-level top row');
 assert.match(chatInterfaceSource, /readCodeWorkbench/, 'Read-only Code conversations should use the observation-only AgentLoop');
+assert.match(
+  chatInterfaceSource,
+  /hasProject:\s*true,/,
+  'An empty Code draft is still an available workspace for intent routing',
+);
+assert.doesNotMatch(
+  chatInterfaceSource,
+  /hasProject:\s*Boolean\(codeForTurn\.trim\(\)\)/,
+  'Intent routing must not equate an empty VFS with a missing Code workspace',
+);
 assert.match(chatInterfaceSource, /codeReadOnlyTimeline/, 'Read-only answers should retain their Agent read timeline');
 assert.match(workspaceSource, /answer\.timeline/, 'CodeWorkspace should render the read-only Agent timeline');
 assert.match(workspaceSource, /只读 Agent · 读取过程/, 'Read-only timeline should identify the file-reading process');

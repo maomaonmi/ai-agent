@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { Bot, ChevronDown, ChevronRight, LoaderCircle } from 'lucide-react';
 import { getImageModels, getModelCatalog, getModelSettings, getVideoModels, ImageModelCapability, ModelSettings, ModelVariant, saveModelSettings, VideoModelCapability } from '../lib/api';
 import { chooseVideoParameterPlacement, type VideoParameterPlacement } from '../features/omni/videoParamPlacement';
-import { chooseMenuPlacement, chooseSubmenuSide, type MenuPlacement, type SubmenuSide } from './menuPlacement';
+import { chooseMenuAlign, chooseMenuPlacement, chooseSubmenuSide, type MenuAlign, type MenuPlacement, type SubmenuSide } from './menuPlacement';
 
 export interface VideoComposerParams {
   ratio: string;
@@ -99,6 +99,9 @@ const FALLBACK_CATALOG: Record<string, ModelVariant[]> = {
   deepseek: [
     { value: 'deepseek:deepseek-v4-flash', label: 'DeepSeek V4 Flash · 性价比', model_id: 'deepseek-v4-flash', supports_vision: false, thinking_control: 'deepseek', input_context: 1000000, output_context: 384000 },
     { value: 'deepseek:deepseek-v4-pro', label: 'DeepSeek V4 Pro · 旗舰', model_id: 'deepseek-v4-pro', supports_vision: false, thinking_control: 'deepseek', input_context: 1000000, output_context: 384000 },
+    // Why: V4.1 Flash 官方 ID 为 deepseek-flash（无 v4 前缀）；与后端 MODEL_CATALOG 同步，
+    // 未命中目录会使 CodeAgent 降级为整段 JSON 文本提案执行器（输出卡顿、补丁不落盘）。
+    { value: 'deepseek:deepseek-flash', label: 'DeepSeek V4.1 Flash · 性价比', model_id: 'deepseek-flash', supports_vision: false, thinking_control: 'deepseek', input_context: 1000000, output_context: 384000 },
   ],
   glm: [
     { value: 'glm:glm-5', label: 'GLM-5', model_id: 'glm-5', supports_vision: false, thinking_control: 'glm', input_context: 128000, output_context: 16000 },
@@ -154,6 +157,13 @@ const TEXT_MODEL_PROVIDERS = [
   { id: 'minimax', label: 'MiniMax' },
 ] as const;
 
+type TextProvider = (typeof TEXT_MODEL_PROVIDERS)[number]['id'];
+
+// Why: 弹层几何计算用常量，避免与 w-64 / w-72 class 漂移（历史 bug：宽度估算与 class 不一致导致子菜单贴边被裁）。
+const MODEL_MENU_WIDTH = 256;
+// Why: 子菜单按 280 估算（略小于 w-72 = 288），偏保守预留右侧空间，宁可提前翻边也不贴边。
+const MODEL_SUBMENU_WIDTH = 280;
+
 const FALLBACK_IMAGE_MODELS: ImageModelCapability[] = [
   { id: 'qwen-image-3.0-pro', name: '千问 3.0 Pro', provider: 'qianwen', description: '', max_outputs: 6, max_width: 2048, max_height: 2048, supports_negative_prompt: true, enabled: true },
   { id: 'wan2.7-image-pro', name: '万相 2.7 Pro', provider: 'qianwen', description: '', max_outputs: 4, max_width: 4096, max_height: 4096, supports_negative_prompt: true, enabled: true },
@@ -191,9 +201,14 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
   const [hoveredProvider, setHoveredProvider] = useState<Provider | null>(null);
   const [modelMenuPlacement, setModelMenuPlacement] = useState<MenuPlacement>('bottom');
+  const [modelMenuAlign, setModelMenuAlign] = useState<MenuAlign>('start');
   const [modelSubmenuSide, setModelSubmenuSide] = useState<SubmenuSide>('right');
   const modelMenuAnchorRef = useRef<HTMLDivElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
+
+  // Why: compact 模式（各工作台/对话的底部输入栏）触发器固定在容器底部，向下展开会盖住输入框
+  // 并可能被容器裁掉；用户期望"上滑"，故 compact 统一向上展开；非 compact 仍按视口空间自适应。
+  const resolvedMenuPlacement: MenuPlacement = compact ? 'top' : modelMenuPlacement;
 
   const refresh = useCallback(async () => {
     try {
@@ -237,14 +252,26 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
     };
   }, [modelMenuOpen]);
 
+  // Why: 「点击打开」与「resize/scroll 重算」共用同一份几何计算，避免两处逻辑漂移
+  // （历史 bug：打开瞬间与滚动后对齐方式/子菜单方向不一致）。
+  const updateMenuGeometry = useCallback((anchor: DOMRect) => {
+    // Why: compact 恒定向上展开，无需计算垂直方向，避免滚动时无谓的 state 更新。
+    if (!compact) {
+      const menuHeight = Math.min(modelMenuRef.current?.scrollHeight || 420, window.innerHeight * 0.7);
+      setModelMenuPlacement(chooseMenuPlacement(anchor.top, anchor.bottom, window.innerHeight, menuHeight));
+    }
+    const align = chooseMenuAlign(anchor.left, window.innerWidth, MODEL_MENU_WIDTH);
+    setModelMenuAlign(align);
+    // Why: 子菜单贴主菜单外缘——左对齐时外缘是 anchor.left + 菜单宽度，右对齐时才是 anchor.right。
+    const menuRight = align === 'start' ? anchor.left + MODEL_MENU_WIDTH : anchor.right;
+    setModelSubmenuSide(chooseSubmenuSide(anchor.left, menuRight, window.innerWidth, MODEL_SUBMENU_WIDTH));
+  }, [compact]);
+
   useLayoutEffect(() => {
     if (!modelMenuOpen) return;
     const updatePlacement = () => {
       const anchor = modelMenuAnchorRef.current?.getBoundingClientRect();
-      if (!anchor) return;
-      setModelMenuPlacement(chooseMenuPlacement(anchor.top, anchor.bottom, window.innerHeight, Math.min(modelMenuRef.current?.scrollHeight || 420, window.innerHeight * 0.7)));
-      const submenuWidth = 280;
-      setModelSubmenuSide(chooseSubmenuSide(anchor.left, anchor.right, window.innerWidth, submenuWidth));
+      if (anchor) updateMenuGeometry(anchor);
     };
     updatePlacement();
     window.addEventListener('resize', updatePlacement);
@@ -253,7 +280,7 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
       window.removeEventListener('resize', updatePlacement);
       window.removeEventListener('scroll', updatePlacement, true);
     };
-  }, [modelMenuOpen, hoveredProvider]);
+  }, [modelMenuOpen, hoveredProvider, updateMenuGeometry]);
 
   useEffect(() => {
     if (preferredCapability === 'image') {
@@ -273,10 +300,30 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
     }
   }, [onVideoModelChange, preferredCapability, videoMode, videoModel]);
 
-  const variantsOf = useCallback(
-    (provider: 'deepseek' | 'glm' | 'qwen' | 'minimax') => catalog[provider]?.length ? catalog[provider] : FALLBACK_CATALOG[provider],
+  // Why: 官方目录只收录官方模型；用户在设置里手填保存的 model_id 也必须出现在本选择器，
+  // 否则「刚保存的自定义模型」既看不到也切不回去（历史 bug：设置页能选、这里缺失）。
+  const baseVariants = useCallback(
+    (provider: TextProvider): ModelVariant[] => catalog[provider]?.length ? catalog[provider] : FALLBACK_CATALOG[provider],
     [catalog],
   );
+
+  const variantsOf = useCallback((provider: TextProvider): ModelVariant[] => {
+    const base = baseVariants(provider);
+    const profile = profiles[provider];
+    const savedId = profile?.model_id;
+    if (!savedId || base.some((variant) => variant.model_id === savedId)) return base;
+    // 合成项只借用该 provider 首个官方变体的协议能力，模型标识与上下文档位取用户已保存的真实值。
+    const template = base[0];
+    return [...base, {
+      value: `${provider}:${savedId}`,
+      label: `${savedId}（自定义）`,
+      model_id: savedId,
+      supports_vision: Boolean(profile?.multimodal),
+      thinking_control: template?.thinking_control ?? 'none',
+      input_context: profile?.input_context ?? template?.input_context ?? 128_000,
+      output_context: profile?.output_context ?? template?.output_context ?? 16_000,
+    }];
+  }, [baseVariants, profiles]);
 
   // Why: 当前激活的变体由 profile.model_id 反推，保证刷新页面后下拉框仍能定位到正确项。
   const currentValue = useMemo(() => {
@@ -305,26 +352,31 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
         }
         payload = {
           ...profile,
-          model_id: variant.model_id,
-          display_name: variant.label,
-          multimodal: variant.supports_vision,
-          input_context: variant.input_context,
-          output_context: variant.output_context,
-          // Why: GLM 视觉模型同时承担 model_id 和 vision_model_id；纯文本模型保留 vision_model_id 以便普通对话自动切换。千问/DeepSeek 无此机制。
-          ...(provider === 'glm' ? {
-            vision_model_id: variant.supports_vision ? variant.model_id : (profile.vision_model_id || 'glm-5v-turbo'),
-            text_model_id: variant.supports_vision ? (profile.text_model_id || 'glm-5-turbo') : variant.model_id,
-          } : provider === 'qwen' ? {
-            // 千问切模型时保持既有思考预算；首次使用时给默认标准档。
-            thinking_budget: profile.thinking_budget ?? 8000,
-          } : provider === 'minimax' ? {
-            // Why: MiniMax 思考协议同为 token 预算制（budget_tokens，下限 1024）；
-            // 切模型保持既有预算，首次使用给标准档 4096（chat.py 默认值对齐）。
-            thinking_budget: profile.thinking_budget ?? 4096,
-          } : {
-            // DeepSeek 切模型时保持既有思考强度；首次使用时给默认标准档 high。
-            thinking_budget: null,
-          }),
+          // Why: 合成项是用户在设置里保存的自定义模型（不在官方目录中）。它的标签已是
+          // `xxx（自定义）`，若按官方变体路径回写会把 display_name/上下文改写掉；此路径直接
+          // 复用已保存 profile，点击即幂等重放，不产生额外副作用。
+          ...(baseVariants(provider).some((item) => item.value === variant.value) ? {
+            model_id: variant.model_id,
+            display_name: variant.label,
+            multimodal: variant.supports_vision,
+            input_context: variant.input_context,
+            output_context: variant.output_context,
+            // Why: GLM 视觉模型同时承担 model_id 和 vision_model_id；纯文本模型保留 vision_model_id 以便普通对话自动切换。千问/DeepSeek 无此机制。
+            ...(provider === 'glm' ? {
+              vision_model_id: variant.supports_vision ? variant.model_id : (profile.vision_model_id || 'glm-5v-turbo'),
+              text_model_id: variant.supports_vision ? (profile.text_model_id || 'glm-5-turbo') : variant.model_id,
+            } : provider === 'qwen' ? {
+              // 千问切模型时保持既有思考预算；首次使用时给默认标准档。
+              thinking_budget: profile.thinking_budget ?? 8000,
+            } : provider === 'minimax' ? {
+              // Why: MiniMax 思考协议同为 token 预算制（budget_tokens，下限 1024）；
+              // 切模型保持既有预算，首次使用给标准档 4096（chat.py 默认值对齐）。
+              thinking_budget: profile.thinking_budget ?? 4096,
+            } : {
+              // DeepSeek 切模型时保持既有思考强度；首次使用时给默认标准档 high。
+              thinking_budget: null,
+            }),
+          } : {}),
         };
       } else {
         const provider = rawValue as Provider;
@@ -411,19 +463,16 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
         const willOpen = !modelMenuOpen;
         if (willOpen) {
           const anchor = modelMenuAnchorRef.current?.getBoundingClientRect();
-          if (anchor) {
-            setModelMenuPlacement(chooseMenuPlacement(anchor.top, anchor.bottom, window.innerHeight, Math.min(modelMenuRef.current?.scrollHeight || 420, window.innerHeight * 0.7)));
-            setModelSubmenuSide(chooseSubmenuSide(anchor.left, anchor.right, window.innerWidth, 280));
-          }
+          if (anchor) updateMenuGeometry(anchor);
           setHoveredProvider(active === 'custom' ? null : active);
         } else setHoveredProvider(null);
         setModelMenuOpen(willOpen);
-      }} className={`${labelClass} ${compact ? 'max-w-48' : ''}`}>
+      }} className={`${labelClass} ${compact ? 'max-w-[15rem]' : ''}`}>
         {loading ? <LoaderCircle size={14} className="animate-spin"/> : <Bot size={14} className="text-sky-600"/>}
         <span className="min-w-0 truncate">{activeVariant?.label || profiles[active]?.display_name || '当前模型'}</span>
         <ChevronDown size={13} aria-hidden="true" className={`shrink-0 text-slate-400 transition-transform ${modelMenuOpen ? 'rotate-180' : ''}`} />
       </button>
-      {modelMenuOpen && <div ref={modelMenuRef} role="menu" aria-label="模型选择" className={`absolute right-0 z-[90] w-64 max-h-[min(70vh,520px)] overflow-visible rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl ${modelMenuPlacement === 'top' ? 'bottom-full mb-2' : 'top-full mt-2'}`}>
+      {modelMenuOpen && <div ref={modelMenuRef} role="menu" aria-label="模型选择" className={`absolute z-[90] w-64 max-h-[min(70vh,520px)] overflow-visible rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl ${modelMenuAlign === 'start' ? 'left-0' : 'right-0'} ${resolvedMenuPlacement === 'top' ? 'bottom-full mb-2' : 'top-full mt-2'}`}>
         <div className="px-3 pb-1 pt-2 text-[11px] font-semibold text-slate-400">选择服务商</div>
         {TEXT_MODEL_PROVIDERS.map((provider) => {
           const isHovered = hoveredProvider === provider.id;
@@ -442,7 +491,7 @@ export default function ModelQuickSwitcher({ disabled = false, compact = false, 
             }} className={`flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm ${isHovered ? 'bg-slate-100 text-slate-950' : 'text-slate-700 hover:bg-slate-50'}`}>
               <span className="min-w-0 flex-1 font-medium">{provider.label}</span><ChevronRight size={15} aria-hidden="true" className="text-slate-400" />
             </button>
-            {isHovered && <div role="menu" aria-label={`${provider.label}模型`} className={`absolute top-0 z-[100] w-72 max-h-[min(70vh,520px)] overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl ${modelSubmenuSide === 'right' ? 'left-full ml-1' : 'right-full mr-1'}`}>
+            {isHovered && <div role="menu" aria-label={`${provider.label}模型`} className={`absolute ${resolvedMenuPlacement === 'top' ? 'bottom-0' : 'top-0'} z-[100] w-72 max-h-[min(70vh,520px)] overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl ${modelSubmenuSide === 'right' ? 'left-full ml-1' : 'right-full mr-1'}`}>
               {providerVariants.map((variant) => <button key={variant.value} type="button" role="menuitemradio" aria-checked={currentValue === variant.value} disabled={disabled || loading || !hasKey} onClick={() => { setModelMenuOpen(false); setHoveredProvider(null); void change(variant.value); }} className={`flex w-full items-center gap-2 rounded-lg px-3 py-2.5 text-left text-sm ${currentValue === variant.value ? 'bg-slate-100 font-medium text-slate-950' : 'text-slate-700 hover:bg-slate-50'} disabled:cursor-not-allowed disabled:opacity-45`}>
                 <span className="min-w-0 flex-1">{variant.label}</span>{currentValue === variant.value && <span className="text-sky-600" aria-label="当前模型">✓</span>}
               </button>)}

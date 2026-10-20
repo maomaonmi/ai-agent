@@ -6,6 +6,8 @@ export type AcceptanceProofOutcome =
   | 'invalid_test'
   | 'infra_failure';
 
+export type AcceptancePresentationState = 'passed' | 'failed' | 'unverifiable' | 'blocked';
+
 const ALIASES: Record<string, AcceptanceProofOutcome> = {
   pass: 'verified',
   passed: 'verified',
@@ -120,4 +122,20 @@ export function reduceAcceptanceProofOutcome(report: unknown): AcceptanceProofOu
 
 export function canTriggerAcceptanceRepair(report: unknown): boolean {
   return reduceAcceptanceProofOutcome(report) === 'contradicted';
+}
+
+export function acceptancePresentationState(report: unknown): AcceptancePresentationState {
+  if (report && typeof report === 'object' && (report as Record<string, unknown>).blocked === true) {
+    return 'blocked';
+  }
+  switch (reduceAcceptanceProofOutcome(report)) {
+    case 'verified':
+      return 'passed';
+    case 'contradicted':
+      return 'failed';
+    case 'infra_failure':
+      return 'blocked';
+    default:
+      return 'unverifiable';
+  }
 }

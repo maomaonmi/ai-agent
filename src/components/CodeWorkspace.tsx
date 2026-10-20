@@ -28,17 +28,26 @@ import {
 } from '../lib/codeSandbox';
 import { SANDBOX_EVAL_COMMAND, SANDBOX_SET_INSPECT_MODE } from '../Code/inspectorScript';
 import {
+  findResidentAcceptanceResult,
   getAcceptanceEligibility,
+  isResidentAcceptanceTerminalRun,
+  isAcceptanceGoalReady,
   type AcceptanceEligibilityState,
 } from '../Code/acceptancePolicy';
 import {
+  getNewestAgentRun,
   getAgentRunLineage,
   isAgentRunExecutionActive,
   mapAgentRunsToPrompts,
 } from '../Code/agentRunLifecycle';
 import { bundleVFS, splitHtmlToVFS, VirtualFileSystem } from '../Code/vfsBundler';
 import { VersionSnapshot } from '../Code/versionManager';
+import { acceptancePresentationState } from '../Code/acceptanceProofOutcome';
 import { VersionTimelineDrawer } from '../Code/VersionTimelineDrawer';
+import {
+  transitionFileDiffBaseline,
+  type FileDiffRunStatus,
+} from '../Code/fileDiffBaseline';
 import {
   bundleFullstackVFS,
   FULLSTACK_DATABASE_UPDATED,
@@ -51,7 +60,7 @@ import {
 import { FileTreeExplorer, buildTreeFromVFS, type FileTreeAction } from '../Code/FileTreeExplorer';
 import CodeAgentTimeline from './CodeAgentTimeline';
 import { CodeObservatoryLauncher } from './CodeObservatoryPanel';
-import RuntimeRecoveryHistoryPanel from './RuntimeRecoveryHistoryPanel';
+import type { GoldenTraceSaveMode } from '../Code/goldenTraceEligibility';
 import CodeFileMenu from './CodeFileMenu';
 // Why: Phase3 记忆面板——Code 工作台左侧 aside 的「记忆」Tab 内容。
 import MemoryPanel from './MemoryPanel';
@@ -69,6 +78,7 @@ import {
   type ChatAttachment,
   type CodeAcceptanceReport,
   type AcceptanceProgressEvent,
+  type AcceptanceGoalContract,
   type CodeAgentRun,
   type CodeAgentTimelineEvent,
 } from '../lib/api';
@@ -97,6 +107,7 @@ interface CodeWorkspaceProps {
   isWorkflowBusy?: boolean;
   isSessionReady: boolean;
   runId: string;
+  sessionId?: string;
   status: CodeGenerationStatus;
   snapshots: VersionSnapshot[];
   activeVersionId: string;
@@ -128,7 +139,7 @@ interface CodeWorkspaceProps {
   onPublishProject?: (vfs: VirtualFileSystem) => void;
   onRollbackVersion: (snapshot: VersionSnapshot) => void;
   onSaveManualVersion: (vfs: VirtualFileSystem, summary: string) => void;
-  onSaveGoldenTrace?: (run: CodeAgentRun) => void;
+  onSaveGoldenTrace?: (run: CodeAgentRun, mode?: GoldenTraceSaveMode) => void;
   onProjectKindChange: (kind: 'frontend' | 'fullstack') => void;
   onElementSelected: (element: SelectedElementContext) => void;
   onInputChange: (value: string) => void;
@@ -164,7 +175,7 @@ interface CodeWorkspaceProps {
 }
 
 type AcceptanceProjection = {
-  state: 'idle' | 'running' | 'passed' | 'failed' | 'blocked';
+  state: 'idle' | 'running' | 'passed' | 'failed' | 'unverifiable' | 'blocked';
   report: CodeAcceptanceReport | null;
   elapsedSeconds: number;
   progressMessage?: string;
@@ -229,6 +240,7 @@ export default function CodeWorkspace({
   isWorkflowBusy = isLoading,
   isSessionReady,
   runId,
+  sessionId,
   status,
   snapshots,
   activeVersionId,
@@ -328,8 +340,11 @@ export default function CodeWorkspace({
   // Why: 源码视图提供“高亮/Diff 只读模式”和“原始文本编辑模式”两种体验，默认高亮模式，
   // 用户要手动改代码时再切回 textarea，兼顾可读性与可编辑性。
   const [sourceEditMode, setSourceEditMode] = useState<'highlight' | 'raw'>('highlight');
-  // Why: 上一轮每个文件的内容快照，切换文件或状态进入 done 时更新，用于给新版本做增/删行 diff。
+  // Why: 保存最近一次运行开始前的文件快照，完成后的 diff 保留到下一轮开始。
   const previousFileSnapshotsRef = useRef<Record<string, string>>({});
+  const diffBaselineInitializedRef = useRef(false);
+  const previousDiffRunStatusRef = useRef<FileDiffRunStatus>('idle');
+  const [diffBaselineRevision, setDiffBaselineRevision] = useState(0);
   // Why: 主题色变化（SettingsDialog 通过 documentElement classList 改 dark 类）要即时体现在代码面板上，
   // 所以把 dark/light 作为组件状态监听。
   const [isDarkTheme, setIsDarkTheme] = useState(() => {
@@ -377,13 +392,37 @@ export default function CodeWorkspace({
   const activeAcceptanceState = activeAcceptanceRunIdRef.current
     ? acceptanceByRun[activeAcceptanceRunIdRef.current]?.state
     : undefined;
-  const latestRunId = agentRuns.at(-1)?.id ?? '';
+  const latestRunId = getNewestAgentRun(agentRuns)?.id ?? '';
+  const latestAgentRun = latestRunId
+    ? agentRuns.find((run) => run.id === latestRunId)
+    : undefined;
+  const latestAcceptanceGoal = latestAgentRun?.trace.acceptanceGoal;
+  const latestAcceptanceGoalReady = isAcceptanceGoalReady(latestAcceptanceGoal);
+  const latestAcceptanceCandidateRevision = latestAgentRun?.trace.runtimeVerification?.candidateRevision
+    ?? latestAgentRun?.trace.completionFeedback?.facts?.candidate_revision
+    ?? '';
+  const latestResidentAcceptanceResult = status.state === 'done'
+    && latestAgentRun
+    && isResidentAcceptanceTerminalRun(latestAgentRun.trace)
+    ? findResidentAcceptanceResult(
+      latestAgentRun.trace.timeline ?? [],
+      latestAcceptanceCandidateRevision,
+    )
+    : undefined;
+  const residentAcceptanceProjection: AcceptanceProjection | undefined = latestResidentAcceptanceResult
+    ? {
+      state: acceptancePresentationState(latestResidentAcceptanceResult.metadata),
+      report: latestResidentAcceptanceResult.metadata as unknown as CodeAcceptanceReport,
+      elapsedSeconds: 0,
+    }
+    : undefined;
   // The header belongs to the current code candidate, not merely the last
   // durable timeline item. This prevents a late verifier result from a prior
   // request being shown while a new request is still running.
-  const latestAcceptance = testedRunIdRef.current === runId && activeAcceptanceRunIdRef.current
-    ? acceptanceByRun[activeAcceptanceRunIdRef.current] ?? IDLE_ACCEPTANCE
-    : IDLE_ACCEPTANCE;
+  const latestAcceptance = residentAcceptanceProjection
+    ?? (testedRunIdRef.current === runId && activeAcceptanceRunIdRef.current
+      ? acceptanceByRun[activeAcceptanceRunIdRef.current] ?? IDLE_ACCEPTANCE
+      : IDLE_ACCEPTANCE);
 
   // 终端面板辅助：创建手动终端 / 关闭会话 / 判断是否手动终端 / 选中的 run_id
   const createManualTerminal = useCallback((reuseStored = false) => {
@@ -630,9 +669,8 @@ export default function CodeWorkspace({
   const activeFileDiffLines = useMemo<DiffLine[]>(() => {
     const current = vfs[activeFile] ?? '';
     const previous = previousFileSnapshotsRef.current[activeFile];
-    // 初次生成（没有 previous，或 previous 就是完全相等）时不强行染色成全部新增，
-    // 让“首次”只显示高亮行号，后续改动才显示 diff。
-    if (previous === undefined || previous === current) {
+    const hasDiffBaseline = diffBaselineRevision > 0 && diffBaselineInitializedRef.current;
+    if (!hasDiffBaseline || previous === current) {
       const lines = current.split(/\r?\n/);
       return lines.map((raw, idx): DiffLine => ({
         kind: 'equal',
@@ -642,8 +680,17 @@ export default function CodeWorkspace({
         raw,
       }));
     }
+    if (previous === undefined) {
+      return current.split(/\r?\n/).map((raw, idx): DiffLine => ({
+        kind: 'insert',
+        newLineNo: idx + 1,
+        oldLineNo: null,
+        tokens: [{ text: raw, kind: 'plain' }],
+        raw,
+      }));
+    }
     return diffLines(previous, current);
-  }, [activeFile, vfs]);
+  }, [activeFile, vfs, diffBaselineRevision]);
   const activeFileHighlighted = useMemo<DiffLine[]>(
     () => highlightDiff(activeFileDiffLines, activeFileLanguage),
     [activeFileDiffLines, activeFileLanguage],
@@ -686,6 +733,9 @@ export default function CodeWorkspace({
       initialFileSetRef.current = false;
       // Why: reset 时清空 diff 历史快照，避免新对话的 diff 计算把旧会话的文件显示为"删除"。
       previousFileSnapshotsRef.current = {};
+      diffBaselineInitializedRef.current = true;
+      previousDiffRunStatusRef.current = 'idle';
+      setDiffBaselineRevision((revision) => revision + 1);
     } else if (projectVfs && Object.keys(projectVfs).length > 0 && !initialFileSetRef.current) {
       const manifest = getProjectManifest(projectVfs);
       const firstHtml = Object.keys(projectVfs).find((path) =>
@@ -1143,18 +1193,38 @@ export default function CodeWorkspace({
     };
   }, []);
 
-  // Why: 每轮模型运行结束（done 状态）时，把当前活动文件的内容记入“上一份快照”，
-  // 下一次文件内容发生变化时就能画出增删行 diff。手动编辑回存时同样更新快照。
+  // Why: 只在首次显示或新一轮运行开始时捕获基线。若在 done 时覆盖快照，
+  // 当前候选会与自己比较，红绿 diff 就会在运行结束后消失。
   useEffect(() => {
-    if (status.state !== 'done') return;
-    const next: Record<string, string> = { ...previousFileSnapshotsRef.current };
-    for (const [key, value] of Object.entries(vfs)) next[key] = value;
-    previousFileSnapshotsRef.current = next;
+    const transition = transitionFileDiffBaseline(
+      status.state,
+      previousDiffRunStatusRef.current,
+      vfs,
+      previousFileSnapshotsRef.current,
+      diffBaselineInitializedRef.current,
+    );
+    previousDiffRunStatusRef.current = status.state;
+    if (!transition.captured) return;
+    previousFileSnapshotsRef.current = transition.baseline;
+    diffBaselineInitializedRef.current = true;
+    setDiffBaselineRevision((revision) => revision + 1);
   }, [status.state, vfs]);
 
   useEffect(() => {
     const latestAgentRun = latestRunId
       ? agentRunsRef.current.find((run) => run.id === latestRunId)
+      : undefined;
+    const latestGoal = latestAgentRun?.trace.acceptanceGoal;
+    const acceptanceGoalReady = isAcceptanceGoalReady(latestGoal);
+    const acceptanceCandidateRevision = latestAgentRun?.trace.runtimeVerification?.candidateRevision
+      ?? latestAgentRun?.trace.completionFeedback?.facts?.candidate_revision
+      ?? '';
+    const residentResult = latestAgentRun
+      && isResidentAcceptanceTerminalRun(latestAgentRun.trace)
+      ? findResidentAcceptanceResult(
+        latestAgentRun.trace.timeline ?? [],
+        acceptanceCandidateRevision,
+      )
       : undefined;
     const eligibility = getAcceptanceEligibility(
       acceptanceEligibilityRef.current,
@@ -1162,10 +1232,56 @@ export default function CodeWorkspace({
         runId,
         status: status.state,
         acceptanceUnavailable: latestAgentRun?.trace.status === 'completed_unverified',
+        acceptancePending: Boolean(
+          latestAgentRun?.trace.operationId
+          && (
+            latestAgentRun.trace.isRunning
+            || latestAgentRun.trace.status === 'awaiting_runtime_verification'
+          )
+        ),
+        acceptanceAlreadyRecorded: Boolean(residentResult),
+        // `done` is only the source/runtime check boundary.  The browser
+        // verifier must wait for the same run's Runtime-bound goal; otherwise
+        // a fast code update races the SSE projection and sends an empty goal
+        // to TestAgent.
+        acceptanceGoalReady,
       },
     );
     acceptanceEligibilityRef.current = eligibility.state;
     const acceptanceTimelineRunId = latestRunId;
+    if (status.state === 'done' && residentResult) {
+      const acceptanceLaneId = acceptanceTimelineRunId || runId;
+      if (testedRunIdRef.current === runId && acceptanceControllerRef.current) {
+        acceptanceControllerRef.current.abort();
+        acceptanceControllerRef.current = null;
+      }
+      if (testedRunIdRef.current === runId) testedRunIdRef.current = '';
+      acceptanceEligibilityRef.current = {
+        ...eligibility.state,
+        testedRunId: '',
+      };
+      if (activeAcceptanceRunIdRef.current === runId || !activeAcceptanceRunIdRef.current) {
+        activeAcceptanceRunIdRef.current = acceptanceLaneId;
+      }
+      const report = residentResult.metadata as unknown as CodeAcceptanceReport;
+      const state = acceptancePresentationState(report);
+      setAcceptanceByRun((previous) => {
+        const current = previous[acceptanceLaneId];
+        if (
+          current?.state === state
+          && current.report === report
+        ) return previous;
+        return {
+          ...previous,
+          [acceptanceLaneId]: {
+            ...IDLE_ACCEPTANCE,
+            state,
+            report,
+          },
+        };
+      });
+      return;
+    }
     if (
       testedRunIdRef.current === runId
       && acceptanceTimelineRunId
@@ -1214,18 +1330,30 @@ export default function CodeWorkspace({
     }));
     const previewHtml = acceptancePreviewRef.current;
     const expectation = promptsRef.current.at(-1)?.trim() || '验证页面主要交互可以正常工作';
-    const acceptanceGoal = agentRunsRef.current.find((run) => run.id === acceptanceLaneId)?.trace.acceptanceGoal
-      ?? agentRunsRef.current.find((run) => run.id === acceptanceCodeRunId)?.trace.acceptanceGoal;
-    const verificationSessionId = agentRunsRef.current.find((run) => run.id === acceptanceLaneId)?.trace.verificationSessionId
-      ?? agentRunsRef.current.find((run) => run.id === acceptanceCodeRunId)?.trace.verificationSessionId;
+    const acceptanceLaneTrace = agentRunsRef.current.find((run) => run.id === acceptanceLaneId)?.trace;
+    const acceptanceCodeTrace = agentRunsRef.current.find((run) => run.id === acceptanceCodeRunId)?.trace;
+    const acceptanceGoal: AcceptanceGoalContract | undefined = acceptanceLaneTrace?.acceptanceGoal
+      ?? acceptanceLaneTrace?.runtimeVerification?.acceptanceGoal
+      ?? acceptanceCodeTrace?.acceptanceGoal
+      ?? acceptanceCodeTrace?.runtimeVerification?.acceptanceGoal;
+    const verificationSessionId = acceptanceLaneTrace?.verificationSessionId
+      ?? acceptanceLaneTrace?.runtimeVerification?.verificationSessionId
+      ?? acceptanceCodeTrace?.verificationSessionId
+      ?? acceptanceCodeTrace?.runtimeVerification?.verificationSessionId;
+    const candidateRevision = acceptanceLaneTrace?.runtimeVerification?.candidateRevision
+      ?? acceptanceCodeTrace?.runtimeVerification?.candidateRevision;
 
     void runCodeAcceptanceTest({
       user_request: expectation,
       preview_html: previewHtml,
+      workspace_id: terminalWorkspaceId,
+      session_id: sessionId,
+      operation_id: acceptanceLaneTrace?.operationId ?? acceptanceCodeTrace?.operationId,
       run_id: acceptanceLaneId,
       verification_run_id: acceptanceCodeRunId,
       verification_session_id: verificationSessionId,
       acceptance_goal: acceptanceGoal,
+      candidate_revision: candidateRevision,
       // Let the backend classify the candidate conservatively. This is the
       // exact VFS snapshot rendered into the preview, not a user-text guess.
       changed_files: Object.keys(vfs),
@@ -1253,7 +1381,7 @@ export default function CodeWorkspace({
         [acceptanceLaneId]: {
           ...(previous[acceptanceLaneId] ?? IDLE_ACCEPTANCE),
           report,
-          state: report.blocked ? 'blocked' : report.passed ? 'passed' : 'failed',
+          state: acceptancePresentationState(report),
         },
       }));
       const observedEntries = consoleEntriesRef.current.slice(-100);
@@ -1365,7 +1493,20 @@ export default function CodeWorkspace({
     });
 
     return () => controller.abort();
-  }, [latestRunId, runId, status.state]);
+  }, [
+    latestRunId,
+    latestAgentRun?.trace.status,
+    latestAgentRun?.trace.runtimeVerification?.candidateRevision,
+    latestAgentRun?.trace.completionFeedback?.facts?.candidate_revision,
+    latestAgentRun?.trace.acceptanceGoal,
+    latestResidentAcceptanceResult?.eventId,
+    latestAcceptanceGoalReady,
+    runId,
+    sessionId,
+    status.state,
+    terminalWorkspaceId,
+    vfs,
+  ]);
 
   useEffect(() => {
     const acceptanceRunId = activeAcceptanceRunIdRef.current;
@@ -1427,7 +1568,7 @@ export default function CodeWorkspace({
   }, [activeAcceptanceState, runId]);
 
   useEffect(() => {
-    const latest = agentRuns.at(-1);
+    const latest = getNewestAgentRun(agentRuns);
     if (!latest?.trace.isRunning) return;
     setExpandedRunIds((previous) => {
       if (previous.has(latest.id)) return previous;
@@ -1632,6 +1773,7 @@ export default function CodeWorkspace({
     onSaveManualVersion(vfs, `手动编辑：${activeFile}`);
     // Why: 手动编辑保存后也要把这份新内容作为“基线”，否则下次模型改动的 diff 会把用户刚手写的也当作插入。
     previousFileSnapshotsRef.current = { ...previousFileSnapshotsRef.current, [activeFile]: vfs[activeFile] ?? '' };
+    setDiffBaselineRevision((revision) => revision + 1);
     setHasUnsavedManualEdit(false);
   };
 
@@ -1768,6 +1910,10 @@ export default function CodeWorkspace({
           >
             {latestAcceptance.state === 'running' &&
               `浏览器验证中 · 已用 ${latestAcceptance.elapsedSeconds} 秒，完成后才会提交运行时补丁`}
+            {latestAcceptance.state === 'passed' && '验收已通过'}
+            {latestAcceptance.state === 'failed' && '验收未通过'}
+            {latestAcceptance.state === 'unverifiable' && '验收结果无法判定'}
+            {latestAcceptance.state === 'blocked' && '验收环境受阻'}
             {latestAcceptance.state !== 'running' && status.state === 'generating' &&
               `正在生成 · ${status.charCount.toLocaleString()} 字符`}
             {latestAcceptance.state !== 'running' && status.state === 'modifying' &&
@@ -1775,10 +1921,18 @@ export default function CodeWorkspace({
             {latestAcceptance.state !== 'running' && status.state === 'checking' && '正在检测运行时错误...'}
             {latestAcceptance.state !== 'running' && status.state === 'repairing' &&
               `自动修复第 ${status.attempt} 次 · ${status.charCount.toLocaleString()} 字符`}
-            {latestAcceptance.state !== 'running' && status.state === 'done' &&
-              (status.repairCount > 0
-                ? `运行正常 · 已自动修复 ${status.repairCount} 次`
-                : `生成完成 · ${status.charCount.toLocaleString()} 字符`)}
+            {latestAcceptance.state === 'idle' && status.state === 'done' &&
+              (latestAgentRun?.trace.status === 'completed_unverified'
+                ? '实现已落地，但用户目标尚未完成验收'
+                : latestAgentRun?.trace.status === 'awaiting_runtime_verification'
+                  ? latestAcceptanceGoalReady
+                    ? '实现阶段已结束，等待目标级 Runtime/Test Agent 验收'
+                    : '实现阶段已结束，等待当前候选的 Runtime 验收契约'
+                  : latestAgentRun?.trace.status === 'needs_attention'
+                    ? '实现已保留，但目标验收需要继续处理'
+                    : status.repairCount > 0
+                      ? `运行正常 · 已自动修复 ${status.repairCount} 次`
+                      : `生成完成 · ${status.charCount.toLocaleString()} 字符`)}
             {latestAcceptance.state !== 'running' && status.state === 'error' && status.message}
             {latestAcceptance.state !== 'running' && status.state === 'idle' && '等待需求'}
           </div>
@@ -1823,7 +1977,7 @@ export default function CodeWorkspace({
                     : 'text-slate-600 hover:bg-slate-100 disabled:opacity-60'
                 }`}
               >
-                {kind === 'frontend' ? '前端' : '全栈 Mock API'}
+                {kind === 'frontend' ? '前端' : '全栈（后端按需）'}
               </button>
             ))}
           </div>
@@ -1897,7 +2051,7 @@ export default function CodeWorkspace({
           >
             {isInspectMode ? '退出检查' : '检查元素'}
           </button>
-          <CodeObservatoryLauncher run={latestAgentRun} sidebarCollapsed={sidebarCollapsed} />
+          <CodeObservatoryLauncher run={latestAgentRun} agentRuns={agentRuns} sidebarCollapsed={sidebarCollapsed} />
           {topbarActions}
         </div>
       </div>
@@ -2056,6 +2210,7 @@ export default function CodeWorkspace({
                           acceptanceProgressMessage={runAcceptance.progressMessage}
                           acceptanceStartSequence={runAcceptance.startSequence}
                           taskPlan={run.trace.taskPlan}
+                          executionPlan={run.trace.executionPlan}
                           sourceRun={run}
                           onSaveGoldenTrace={onSaveGoldenTrace}
                           onOpenTerminal={onOpenAgentTerminal ?? focusAgentTerminal}
@@ -2064,13 +2219,6 @@ export default function CodeWorkspace({
                             setActiveView('source');
                           }}
                         />
-                        {run.trace.operationId && sessionId ? (
-                          <RuntimeRecoveryHistoryPanel
-                            operationId={run.trace.operationId}
-                            sessionId={sessionId}
-                            runId={run.id}
-                          />
-                        ) : null}
                       </div>
                     )}
                     {conversationAnswers.filter((answer) => answer.promptIndex === index)
@@ -2410,7 +2558,7 @@ export default function CodeWorkspace({
               </div>
               <p className="font-medium text-slate-700">正在生成文件…</p>
               <p className="mt-2 max-w-md text-sm leading-6 text-slate-500">
-                全栈项目包含前端页面、样式、脚本、Mock API 与数据库，请稍候。
+                全栈模式可按需求使用后端能力；当前只生成需要的文件与资源。
               </p>
             </div>
           )}

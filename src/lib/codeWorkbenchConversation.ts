@@ -4,7 +4,11 @@ import type {
   CodeIntentCompletedResult,
   CodeIntentTurn,
 } from './api';
-import { mapAgentRunsToPrompts } from '../Code/agentRunLifecycle.ts';
+import {
+  getNewestAgentRun,
+  mapAgentRunsToPrompts,
+  sortAgentRunsChronologically,
+} from '../Code/agentRunLifecycle.ts';
 
 export interface CodeReadOnlyRunContext {
   request: string;
@@ -12,6 +16,7 @@ export interface CodeReadOnlyRunContext {
   summary?: string;
   taskPlan?: {
     completedCount: number;
+    implementedCount?: number;
     totalCount: number;
     status: string;
   };
@@ -43,6 +48,7 @@ interface CodeRunLike {
     resumeEligible?: boolean;
     taskPlan?: {
       completedCount: number;
+      implementedCount?: number;
       totalCount: number;
       status: string;
     };
@@ -67,21 +73,40 @@ export interface CodeIntentContext {
  *
  * Agent runs are durable and can outlive a rewritten/deleted branch. Matching
  * them against visible user prompts prevents an old run from becoming the
- * implicit "current task" on the next request.
+ * implicit "current task" on the next request. Callers also exclude runs
+ * removed by branch identity before this prompt projection, so repeated text
+ * cannot make a replaced run visible again.
+ *
+ * A rewrite of the LAST user turn is the one exception: the branch cut removes
+ * the only prompt that bound its run, but the user is amending that same
+ * unfinished operation rather than replacing it. `preservedRunIds` therefore
+ * carries those identities past the prompt projection.
  */
 export function buildCodeIntentContext(
   messages: Array<Pick<CodeIntentTurn, 'role' | 'content'> & { id?: string }>,
   agentRuns: CodeAgentRun[],
-  options: { activeRevisionId?: string } = {},
+  options: {
+    activeRevisionId?: string;
+    excludedRunIds?: readonly string[];
+    preservedRunIds?: readonly string[];
+  } = {},
 ): CodeIntentContext {
   const userMessages = messages.filter((message) => message.role === 'user');
-  const visibleRuns = mapAgentRunsToPrompts(
-    agentRuns,
+  const excludedRunIds = new Set(options.excludedRunIds ?? []);
+  const preservedRunIds = new Set(options.preservedRunIds ?? []);
+  const projectedRuns = mapAgentRunsToPrompts(
+    excludedRunIds.size > 0
+      ? agentRuns.filter((run) => !excludedRunIds.has(run.id))
+      : agentRuns,
     userMessages.map((message) => message.content),
   ).filter((run): run is CodeAgentRun => Boolean(run));
+  const preservedRuns = preservedRunIds.size > 0
+    ? agentRuns.filter((run) => preservedRunIds.has(run.id) && !excludedRunIds.has(run.id))
+    : [];
   const uniqueRuns = Array.from(
-    new Map(visibleRuns.map((run) => [run.id, run])).values(),
+    new Map([...projectedRuns, ...preservedRuns].map((run) => [run.id, run])).values(),
   );
+  const orderedRuns = sortAgentRunsChronologically(uniqueRuns);
   const assistantReferences = messages
     .filter((message) => message.role === 'assistant' && message.content.trim())
     .slice(-2)
@@ -96,16 +121,16 @@ export function buildCodeIntentContext(
       content: trimForPrompt(message.content, 1_200),
     })),
     assistantReferences,
-    latestRun: uniqueRuns.at(-1),
+    latestRun: getNewestAgentRun(orderedRuns),
     latestCompletedResult: (() => {
-      const latest = uniqueRuns.at(-1);
+      const latest = getNewestAgentRun(orderedRuns);
       if (!latest || isCodeAgentRunUnfinished(latest)) return undefined;
       return {
         run_id: latest.id,
         ...(options.activeRevisionId ? { revision_id: options.activeRevisionId } : {}),
       };
     })(),
-    resumeCandidates: uniqueRuns
+    resumeCandidates: orderedRuns
       .filter((run) => isCodeAgentRunUnfinished(run))
       .slice(-4),
   };
@@ -119,6 +144,7 @@ export function buildCodeIntentContext(
 export function toCodeIntentResumeCandidate(run: CodeAgentRun): CodeIntentActiveRun {
   return {
     run_id: run.id,
+    operation_id: run.trace.operationId,
     request: trimForPrompt(run.request, 240),
     phase: trimForPrompt(run.trace.phase, 48),
     status: trimForPrompt(run.trace.status || '', 64),
@@ -130,6 +156,7 @@ export function toCodeIntentResumeCandidate(run: CodeAgentRun): CodeIntentActive
     allowed_next_action: run.trace.allowedNextAction,
     acceptance_goal: run.trace.acceptanceGoal,
     verification_session_id: run.trace.verificationSessionId,
+    verification_session: run.trace.verificationSession,
   };
 }
 
@@ -156,6 +183,12 @@ function trimForPrompt(value: string, maxLength: number): string {
  * Build the bounded context for a Code workbench question. The ordinary chat
  * model receives project facts and task state, never the complete VFS, so a
  * question or summary cannot accidentally become a code-edit request.
+ *
+ * WARNING — internal model prompt only. The returned string is a protocol
+ * envelope for the model and must never be assigned to a user-visible
+ * message's `content` or persisted as one. Persistence boundaries
+ * (`saveSessionSnapshot` / `replaceSessionChatMemory` in api.ts and the
+ * backend snapshot store) unwrap and drop such envelopes on sight.
  */
 export function buildCodeReadOnlyPrompt(
   message: string,
@@ -177,7 +210,7 @@ export function buildCodeReadOnlyPrompt(
   const includeRunContext = context.includeRunContext === true;
   const latestRun = includeRunContext ? context.latestRun : undefined;
   const taskLine = latestRun?.taskPlan
-    ? `任务计划：${latestRun.taskPlan.completedCount}/${latestRun.taskPlan.totalCount} 已完成，状态 ${latestRun.taskPlan.status}`
+    ? `任务计划：${latestRun.taskPlan.completedCount}/${latestRun.taskPlan.totalCount} 已验证，${latestRun.taskPlan.implementedCount ?? latestRun.taskPlan.completedCount}/${latestRun.taskPlan.totalCount} 已实现，状态 ${latestRun.taskPlan.status}`
     : '任务计划：当前没有可展示的持久化任务计划';
   const latestRunLine = latestRun
     ? [
@@ -204,7 +237,7 @@ export function buildCodeReadOnlyPrompt(
     '',
     `用户问题：${trimForPrompt(message, 1_200)}`,
     '',
-    `项目类型：${context.projectKind === 'fullstack' ? '全栈 Mock API' : '前端'}`,
+    `项目类型：${context.projectKind === 'fullstack' ? '全栈（后端按需）' : '前端'}`,
     `项目文件（仅目录摘要）：${files.length > 0 ? files.join('、') : '暂无已知文件'}`,
     recentTurns.length > 0
       ? `最近聊天记录（按时间顺序）：\n${recentTurns.join('\n')}`

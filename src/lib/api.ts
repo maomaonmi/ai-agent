@@ -5,6 +5,7 @@
 
 import type { OmniTurnContext } from '../features/omni/types';
 import { CodeAgentEventBuffer } from '../Code/codeEventStream.ts';
+import { normalizeChatMessages } from './chatHistoryNormalization.ts';
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 const ACCEPTANCE_REQUEST_TIMEOUT_MS = 50_000;
@@ -926,7 +927,7 @@ export async function saveModelSettings(settings: ModelSettings): Promise<ModelS
 // 全局联网服务：搜索提供商选择 + Tavily/Firecrawl/Reranker/Suno Key
 // 注意：GET 不会回传 key 明文（只传 has_*_key 状态）；PUT 才明文发送并持久化。
 // ==========================================
-export type SearchProvider = "tavily" | "firecrawl";
+export type SearchProvider = "tavily" | "firecrawl" | "deepseek";
 export type DeepResearchEngine = "firecrawl" | "native";
 
 export interface ServiceSettings {
@@ -941,6 +942,8 @@ export interface ServiceSettings {
   suno_api_key: string;
   has_tavily_key: boolean;
   has_firecrawl_key: boolean;
+  // DeepSeek 官方联网与模型共用同一个 Key，故为只读派生状态（非独立 Key 字段）。
+  has_deepseek_search_key: boolean;
   has_rerank_key: boolean;
   has_suno_key: boolean;
   suno_base_url: string;
@@ -1315,7 +1318,7 @@ export interface CodeErrorEvent {
 export interface CodeAgentActivityEvent {
   type: 'agent_activity';
   channel: 'status' | 'output' | 'answer';
-  phase: 'preflight' | 'analyzing' | 'diagnosing' | 'thinking' | 'generating' | 'patching' | 'validating' | 'planning' | 'tool_calling' | 'tool_result' | 'done';
+  phase: 'preflight' | 'analyzing' | 'diagnosing' | 'thinking' | 'generating' | 'patching' | 'validating' | 'static_verify' | 'planning' | 'tool_calling' | 'action_intent' | 'tool_result' | 'next_step' | 'done';
   content: string;
   /** Provider chunks are deltas; summary/status events may omit this field. */
   content_mode?: 'delta' | 'summary' | string;
@@ -1326,9 +1329,15 @@ export interface CodeAgentActivityEvent {
   iteration?: number;
   boundary?: 'turn_completed' | string;
   run_id?: string;
+  /** Candidate identity for Runtime validation results. */
+  candidate_revision?: string;
   actor_id?: string;
+    actor_kind?: 'main' | 'test' | 'ops' | 'system';
   event_id?: string;
+  /** 持久事件存储在提交时分配的全序（显示顺序权威）。 */
   sequence?: number;
+  /** 生产者自有序号（如 preflight 帧 source sequence=0），仅作诊断回退。 */
+  source_sequence?: number;
   timestamp_ms?: number;
   resume_eligible?: boolean;
   status?: string;
@@ -1451,9 +1460,62 @@ export interface RuntimeSummaryEvent {
 
 export interface CodeCompletionFeedback {
   summary: string;
+  operation_id?: string;
+  completion_feedback_id?: string;
+  completion_feedback_digest?: string;
+  facts?: {
+    run_id: string;
+    operation_id: string;
+    candidate_revision: string;
+    changed_files: string[];
+    created_files: string[];
+    implemented_goals: string[];
+    verified_goals: string[];
+    unresolved_goals: string[];
+    verification_results: Record<string, unknown>;
+    constraint_audit: Record<string, unknown>;
+    recovery_attempts: Array<Record<string, unknown>>;
+    terminal_or_pause_reason: string;
+  };
   changes: Array<CodeFileChange & {
     operation?: 'create' | 'modify' | 'delete' | string;
+    diff_ref?: string;
   }>;
+  change_inventory_status?: 'available' | 'unavailable' | string;
+  diffs?: Array<{
+    diff_ref: string;
+    path: string;
+    preview: string;
+    truncated?: boolean;
+  }>;
+  diffs_truncated?: boolean;
+  tasks?: {
+    goal_id: string;
+    goal_set_revision: number;
+    candidate_revision: string;
+    required_count: number;
+    implemented_count: number;
+    verified_count: number;
+    obligations: Array<{
+      obligation_id: string;
+      title: string;
+      implementation_status: string;
+      verification_status: string;
+      clauses: Array<{
+        clause_id: string;
+        semantic_text: string;
+        spec_status: string;
+        verdict: string;
+      }>;
+    }>;
+  };
+  acceptance?: {
+    status: string;
+    goal_verified: boolean;
+    required_clause_ids: string[];
+    verified_clause_ids: string[];
+    clause_statuses: Record<string, string>;
+  };
   verification: {
     status: string;
     static_validation: string;
@@ -1504,12 +1566,13 @@ export interface SandboxCommandRequestEvent {
 export type CodeTaskStatus =
   | 'pending'
   | 'in_progress'
+  | 'implemented_unverified'
   | 'completed'
   | 'failed'
   | 'skipped'
   | 'needs_attention';
 
-export type CodeTaskPlanStatus = 'running' | 'completed' | 'needs_attention';
+export type CodeTaskPlanStatus = 'running' | 'awaiting_verification' | 'completed' | 'needs_attention';
 
 export interface TaskItem {
   id: number | string;
@@ -1518,6 +1581,19 @@ export interface TaskItem {
   target_files: string[];
   description: string;
   status: CodeTaskStatus;
+  obligation_id?: string;
+  goal_id?: string;
+  candidate_revision?: string;
+  implementation_status?: 'not_started' | 'unresolved' | 'in_progress' | 'implemented' | 'blocked';
+  verification_status?: 'not_applicable_yet' | 'pending' | 'unverified' | 'verified' | 'contradicted' | 'inconclusive' | 'invalid_test' | 'blocked';
+  depends_on?: string[];
+  produces?: string[];
+  consumes?: string[];
+  cross_task_relations?: Array<string | Record<string, unknown>>;
+  implementation_obligations?: string[];
+  verification_obligations?: string[];
+  verification_barrier?: string;
+  verification_evidence?: Record<string, unknown>;
   reason?: string;
 }
 
@@ -1525,6 +1601,7 @@ export interface TaskListEvent {
   type: 'task_list';
   tasks: TaskItem[];
   done: boolean;
+  plan_kind?: 'execution' | 'acceptance';
   run_id?: string;
   plan_id?: string;
   plan_path?: string;
@@ -1533,8 +1610,39 @@ export interface TaskListEvent {
   sequence?: number;
   timestamp_ms?: number;
   completed_count?: number;
+  implemented_count?: number;
+  verification_pending_count?: number;
   total_count?: number;
   status?: CodeTaskPlanStatus;
+  planning_mode?: 'NONE' | 'COMPACT' | 'DETAILED';
+  goal_id?: string;
+  goal_set_revision?: number;
+  candidate_revision?: string;
+  projection_source?: 'goal_obligation_ledger' | 'code_task_plan' | 'execution_plan';
+}
+
+/** Acceptance ledger progress is persisted separately from execution plans. */
+export interface GoalObligationsEvent extends Omit<TaskListEvent, 'type'> {
+  type: 'goal_obligations';
+}
+
+/** Durable CodeTaskPlan state returned with persisted verification evidence. */
+export interface CodeTaskPlanSnapshot {
+  run_id: string;
+  plan_id: string;
+  plan_kind?: 'execution' | 'acceptance';
+  plan_path: string;
+  todo_path: string;
+  ledger_path?: string;
+  instruction?: string;
+  goal_id?: string;
+  goal_set_revision?: number;
+  candidate_revision?: string;
+  projection_source?: 'goal_obligation_ledger' | 'code_task_plan' | 'execution_plan';
+  planning_mode?: 'NONE' | 'COMPACT' | 'DETAILED';
+  sequence: number;
+  status: CodeTaskPlanStatus;
+  tasks: TaskItem[];
 }
 
 export interface TaskUpdateEvent {
@@ -1543,6 +1651,9 @@ export interface TaskUpdateEvent {
   task_key?: string;
   status: CodeTaskStatus;
   plan_status?: CodeTaskPlanStatus;
+  plan_kind?: 'execution' | 'acceptance';
+  projection_source?: 'goal_obligation_ledger' | 'code_task_plan' | 'execution_plan';
+  planning_mode?: 'NONE' | 'COMPACT' | 'DETAILED';
   task?: TaskItem;
   reason?: string;
   done: boolean;
@@ -1554,6 +1665,8 @@ export interface TaskUpdateEvent {
   sequence?: number;
   timestamp_ms?: number;
   completed_count?: number;
+  implemented_count?: number;
+  verification_pending_count?: number;
   total_count?: number;
   // Why: 兼容旧版 task_update 的子任务级 diff；当前实现用 file_written
   // 作为唯一文件变更事件，避免同一修改在任务完成时重复渲染。
@@ -1563,11 +1676,17 @@ export interface TaskUpdateEvent {
 export interface CodeTaskPlanState {
   runId: string;
   planId: string;
+  planKind?: 'execution' | 'acceptance';
   planPath: string;
   todoPath: string;
+  projectionSource?: 'goal_obligation_ledger' | 'code_task_plan' | 'execution_plan';
+  planningMode?: 'NONE' | 'COMPACT' | 'DETAILED';
+  goalId?: string;
+  goalSetRevision?: number;
   tasks: TaskItem[];
   status: CodeTaskPlanStatus;
   completedCount: number;
+  implementedCount: number;
   totalCount: number;
   lastSequence: number;
   seenEventIds?: string[];
@@ -1583,6 +1702,7 @@ export interface FileWrittenEvent {
   deletions?: number;
   line_count?: number;
   operation?: 'create' | 'modify' | 'delete';
+  diff_lines?: string[];
 }
 
 // Why: AgentLoop 每轮结束后推送的运行指标不是代码内容，不能落入
@@ -1609,6 +1729,9 @@ export interface AgentLoopRoundEvent {
   semantic_progress?: boolean;
   progress_score?: number;
   progress_facts?: string[];
+  round_summary?: string;
+  next_action?: string;
+  controller_phase?: string;
   consecutive_no_progress_rounds?: number;
   consecutive_error_rounds?: number;
 }
@@ -1650,6 +1773,7 @@ export type CodeGenerationEvent = (
   | TerminalProposalEvent
   | SandboxCommandRequestEvent
   | TaskListEvent
+  | GoalObligationsEvent
   | TaskUpdateEvent
   | FileWrittenEvent
   | AgentLoopRoundEvent
@@ -1837,6 +1961,9 @@ export interface CodeAgentTrace {
     browserRunId?: string;
     baseRevision: string;
     candidateRevision: string;
+    /** The immutable Runtime-bound goal for this candidate. */
+    acceptanceGoal?: AcceptanceGoalContract;
+    verificationSessionId?: string;
   };
   /** Terminal outcome of the orchestrated run, including a resumable checkpoint. */
   status?: 'running' | 'awaiting_runtime_verification' | 'completed' | 'completed_unverified' | 'needs_attention' | 'failed' | 'superseded';
@@ -1854,6 +1981,8 @@ export interface CodeAgentTrace {
   tokenUsage?: TokenUsage;
   contextUsage?: ContextUsageEvent;
   taskPlan?: CodeTaskPlanState;
+  /** Runtime-owned work breakdown, separate from acceptance/verification state. */
+  executionPlan?: CodeTaskPlanState;
   timeline?: CodeAgentTimelineEvent[];
   /** Orchestrator-owned sticky scope; restored with the run. */
   activeScope?: CodeTaskScope;
@@ -1870,6 +1999,25 @@ export interface CodeAgentTrace {
   completionFeedback?: CodeCompletionFeedback;
   /** Resident Test Agent identity shared by initial and repair runs. */
   verificationSessionId?: string;
+  /** Server-emitted Runtime ledger projection used to recover an explicit resume after restart. */
+  verificationSession?: VerificationSessionSnapshot;
+  /** Durable operation identity used to rebind a run after a server restart. */
+  operationId?: string;
+}
+
+export interface VerificationSessionSnapshot {
+  verification_session_id: string;
+  run_id: string;
+  checkpoint_count: number;
+  last_candidate_revision: string;
+  frozen_candidate_revision?: string;
+  baseline_evidence_identity?: Record<string, unknown>;
+  obligations: Record<string, Record<string, unknown> & {
+    /** Verification result; controller handoff state is recorded separately. */
+    status?: string;
+    control_status?: string;
+  }>;
+  test_runs: Array<Record<string, unknown>>;
 }
 
 export type CodeTaskScope =
@@ -1902,6 +2050,7 @@ export interface RuntimeVerificationEvidence {
   goal_verified?: boolean;
   proof_outcome?: string;
   goal_assertion_ids?: string[];
+  acceptance_goal?: AcceptanceGoalContract;
   console_errors: string[];
   deterministic_findings?: DeterministicBrowserFinding[];
   repair_obligations?: Array<Record<string, unknown>>;
@@ -1910,6 +2059,8 @@ export interface RuntimeVerificationEvidence {
   same_failure_persisted?: boolean;
   required_inspection_paths?: string[];
   blocked_patch_paths?: string[];
+  /** Authoritative task state after this proof was persisted by the server. */
+  task_plan_snapshot?: CodeTaskPlanSnapshot;
   page_errors?: string[];
   diagnostic: string;
 }
@@ -1973,7 +2124,7 @@ export interface CodeAgentTimelineEvent {
     tokenCount?: number;
     durationMs?: number;
   };
-  file?: CodeFileChange & { operation?: 'create' | 'modify' | 'delete' };
+  file?: CodeFileChange & { operation?: 'create' | 'modify' | 'delete'; diffLines?: string[] };
   metadata?: Record<string, unknown>;
 }
 
@@ -1981,6 +2132,7 @@ export interface CodeFileChange {
   path: string;
   additions: number;
   deletions: number;
+  diffLines?: string[];
 }
 
 export interface CodeAgentRun {
@@ -2070,18 +2222,28 @@ export interface CodeAcceptanceReport {
   interaction_scenario?: Record<string, unknown>;
   goal_verified?: boolean;
   inconclusive?: boolean;
+  /** Observation-only preflight: collected page/DOM/console/capability facts,
+   * never an acceptance verdict. goal_verified stays false. */
+  observation_only?: boolean;
+  observation_status?: 'available' | 'unavailable';
   proof_outcome?: 'verified' | 'contradicted' | 'inconclusive' | 'unverifiable' | 'invalid_test' | 'infra_failure' | string;
   outcome?: string;
-  verification_status?: 'passed' | 'failed' | 'blocked' | 'inconclusive';
+  verification_status?: 'passed' | 'failed' | 'blocked' | 'inconclusive' | 'not_applicable' | string;
   goal_assertion_ids?: string[];
+  /** Server-owned task ledger after this report has been persisted. */
+  task_plan_snapshot?: CodeTaskPlanSnapshot;
   /** Evidence produced by the autonomous, isolated Test Agent child. */
   test_agent_runs?: TestAgentRun[];
   test_agent?: TestAgentRun;
 }
 
 export interface TestAgentRun {
-  status: 'passed' | 'failed' | 'blocked' | 'skipped';
+  status: 'passed' | 'failed' | 'blocked' | 'skipped' | 'completed';
   phase: 'precheck' | 'targeted_reproduction' | 'final_replay' | 'none' | string;
+  observation_only?: boolean;
+  observation_status?: 'available' | 'unavailable';
+  outcome?: string;
+  verification_status?: string;
   should_run?: boolean;
   reason?: string;
   diagnostic?: string;
@@ -2095,6 +2257,7 @@ export interface TestAgentRun {
   returncode?: number;
   duration_ms?: number;
   timeout_seconds?: number;
+  terminal_session_id?: string;
   script_line_count?: number;
   artifact_revisions?: Array<{
     revision: number;
@@ -2104,16 +2267,8 @@ export interface TestAgentRun {
     contract_changed: boolean;
     artifact: string;
   }>;
-  duration_ms?: number;
   verification_session_id?: string;
-  verification_session?: {
-    verification_session_id: string;
-    run_id: string;
-    checkpoint_count: number;
-    last_candidate_revision: string;
-    obligations: Record<string, Record<string, unknown>>;
-    test_runs: Array<Record<string, unknown>>;
-  };
+  verification_session?: VerificationSessionSnapshot;
 }
 
 export interface ChatOptions {
@@ -2139,6 +2294,7 @@ export interface CodeIntentTurn {
 
 export interface CodeIntentActiveRun {
   run_id: string;
+  operation_id?: string;
   request?: string;
   phase?: string;
   status?: string;
@@ -2153,6 +2309,7 @@ export interface CodeIntentActiveRun {
   runtime_read_evidence?: Record<string, RuntimeReadEvidence>;
   acceptance_goal?: AcceptanceGoalContract;
   verification_session_id?: string;
+  verification_session?: VerificationSessionSnapshot;
 }
 
 export interface CodeIntentCompletedResult {
@@ -2298,6 +2455,7 @@ export interface SessionSnapshot {
 export interface SessionHistoryResponse {
   session: SessionSummary;
   snapshot: Partial<SessionSnapshot>;
+  snapshot_revision?: number;
 }
 
 // 深度调研专用事件
@@ -3274,6 +3432,8 @@ export async function modifyFullstackCode(
 export async function verifyFullstackRuntime(
   body: {
     run_id: string;
+    session_id?: string;
+    operation_id?: string;
     base_revision: string;
     candidate_revision: string;
     boot_completed: boolean;
@@ -3317,43 +3477,67 @@ export async function replayCodeEvents(
   onEvent: (event: CodeGenerationEvent) => void,
   signal?: AbortSignal,
 ): Promise<number> {
-  const query = new URLSearchParams({ after: String(Math.max(0, afterSequence)) });
-  const response = await fetch(
-    `${API_BASE_URL}/api/code/events/${encodeURIComponent(runId)}?${query.toString()}`,
-    { headers: { Accept: 'text/event-stream' }, signal },
-  );
-  if (!response.ok) throw new Error(await parseApiError(response));
-  const reader = response.body?.getReader();
-  if (!reader) throw new Error('代码事件重放响应为空。');
-
-  const decoder = new TextDecoder();
-  let buffer = '';
+  const streamRunId = runId.trim();
+  const pageLimit = 1000;
+  let cursor = Number.isFinite(afterSequence)
+    ? Math.max(0, Math.trunc(afterSequence))
+    : 0;
   let delivered = 0;
   const eventBuffer = new CodeAgentEventBuffer(runId);
-  const handleFrame = (frame: string) => {
-    const data = frame
-      .split('\n')
-      .find((line) => line.startsWith('data:'))
-      ?.slice(5)
-      .trim();
-    if (!data) return;
-    const parsed = JSON.parse(data) as CodeGenerationEvent;
-    for (const event of eventBuffer.accept(parsed)) {
-      delivered += 1;
-      onEvent(event);
-    }
-  };
 
-  while (true) {
-    const { done, value } = await reader.read();
-    buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-    const frames = buffer.split('\n\n');
-    buffer = frames.pop() ?? '';
-    for (const frame of frames) handleFrame(frame);
-    if (done) {
-      if (buffer.trim()) handleFrame(buffer);
-      break;
+  while (streamRunId) {
+    const query = new URLSearchParams({
+      after: String(cursor),
+      limit: String(pageLimit),
+    });
+    const response = await fetch(
+      `${API_BASE_URL}/api/code/events/${encodeURIComponent(streamRunId)}?${query.toString()}`,
+      { headers: { Accept: 'text/event-stream' }, signal },
+    );
+    if (!response.ok) throw new Error(await parseApiError(response));
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('代码事件重放响应为空。');
+
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let pageEventCount = 0;
+    let pageLastSequence = cursor;
+    const handleFrame = (frame: string) => {
+      const data = frame
+        .split('\n')
+        .find((line) => line.startsWith('data:'))
+        ?.slice(5)
+        .trim();
+      if (!data) return;
+      const parsed = JSON.parse(data) as CodeGenerationEvent;
+      pageEventCount += 1;
+      if (
+        parsed.run_id?.trim() === streamRunId
+        && typeof parsed.sequence === 'number'
+        && Number.isFinite(parsed.sequence)
+      ) {
+        pageLastSequence = Math.max(pageLastSequence, Math.trunc(parsed.sequence));
+      }
+      for (const event of eventBuffer.accept(parsed)) {
+        delivered += 1;
+        onEvent(event);
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() ?? '';
+      for (const frame of frames) handleFrame(frame);
+      if (done) {
+        if (buffer.trim()) handleFrame(buffer);
+        break;
+      }
     }
+
+    if (pageEventCount < pageLimit || pageLastSequence <= cursor) break;
+    cursor = pageLastSequence;
   }
   return delivered;
 }
@@ -3435,12 +3619,17 @@ export async function runCodeAcceptanceTest(
     user_request: string;
     preview_html: string;
     console_entries: Array<{ level: 'log' | 'info' | 'warn' | 'error'; text: string }>;
+    workspace_id?: string;
+    session_id?: string;
+    operation_id?: string;
     run_id?: string;
     verification_run_id: string;
     verification_session_id?: string;
     acceptance_goal?: AcceptanceGoalContract;
     candidate_revision?: string;
     changed_files?: string[];
+    /** Observation-only preflight: collect facts, never a verification verdict. */
+    observation_only?: boolean;
   },
   onProgress?: (event: AcceptanceProgressEvent) => void,
   signal?: AbortSignal,
@@ -3556,9 +3745,45 @@ async function streamCodeRequest(
   const eventBuffer = new CodeAgentEventBuffer(
     typeof body.run_id === 'string' ? body.run_id : undefined,
   );
+  let replayRunId = typeof body.run_id === 'string' ? body.run_id.trim() : '';
+  let lastAcceptedSequence = 0;
+  let terminalEventSeen = false;
+  let replayAttempted = false;
   // Why: 诊断"前端瞬间已结束但后端仍在流式传输"——记录首个/终止性事件与断流方式。
   let frameCount = 0;
   console.log('[sse-diag] stream start', path);
+
+  const deliverEvent = (event: CodeGenerationEvent) => {
+    const eventRunId = event.run_id?.trim() || '';
+    if (!replayRunId && eventRunId) replayRunId = eventRunId;
+    const belongsToRequestedRun = !eventRunId || !replayRunId || eventRunId === replayRunId;
+    if (belongsToRequestedRun) {
+      if (typeof event.sequence === 'number' && Number.isFinite(event.sequence)) {
+        lastAcceptedSequence = Math.max(lastAcceptedSequence, Math.trunc(event.sequence));
+      }
+      if (event.type === 'error' || (event.type === 'runtime_summary' && event.done)) {
+        terminalEventSeen = true;
+      }
+    }
+    frameCount += 1;
+    onEvent(event);
+  };
+
+  const replayMissingEvents = async (): Promise<number> => {
+    if (replayAttempted || signal?.aborted || !replayRunId) return 0;
+    replayAttempted = true;
+    const afterSequence = lastAcceptedSequence;
+    const recovered = await replayCodeEvents(
+      replayRunId,
+      afterSequence,
+      deliverEvent,
+      signal,
+    );
+    if (recovered > 0) {
+      console.log('[sse-diag] recovered events=%d after=%d', recovered, afterSequence);
+    }
+    return recovered;
+  };
 
   try {
     while (true) {
@@ -3576,12 +3801,11 @@ async function streamCodeRequest(
         if (!data) return;
         const parsed = JSON.parse(data) as CodeGenerationEvent;
         for (const deliverable of eventBuffer.accept(parsed)) {
-          frameCount += 1;
+          deliverEvent(deliverable);
           const diag = deliverable as { type: string; done?: boolean; channel?: string };
           if (diag.done || diag.type === 'error' || diag.type === 'code_update' || diag.type === 'runtime_summary') {
             console.log('[sse-diag] terminal-ish event #%d type=%s channel=%s done=%s', frameCount, diag.type, diag.channel, diag.done);
           }
-          onEvent(deliverable);
         }
       };
 
@@ -3597,30 +3821,28 @@ async function streamCodeRequest(
         break;
       }
     }
+
+    // A clean EOF can still follow a transport interruption. Reconcile it
+    // against the durable stream; this GET never submits work to the Runner.
+    if (!signal?.aborted && replayRunId) {
+      await replayMissingEvents();
+      if (!terminalEventSeen) {
+        throw new Error('代码生成流在收到运行终态事件前结束。');
+      }
+    }
   } catch (error) {
     console.log('[sse-diag] stream error at frames=%d:', frameCount, error);
     // The POST is never retried: it may have already executed tools or
     // written a candidate. Ask the durable read-only ledger for only events
     // after the last accepted cursor, then let the event buffer deduplicate.
-    if (!signal?.aborted && typeof body.run_id === 'string' && body.run_id.trim()) {
+    if (!signal?.aborted && replayRunId) {
       try {
-        const recovered = await replayCodeEvents(
-          body.run_id,
-          eventBuffer.lastAcceptedSequence,
-          (event) => {
-            frameCount += 1;
-            onEvent(event);
-          },
-          signal,
-        );
-        if (recovered > 0) {
-          console.log('[sse-diag] recovered events=%d after=%d', recovered, eventBuffer.lastAcceptedSequence);
-          return;
-        }
+        await replayMissingEvents();
       } catch (replayError) {
         console.log('[sse-diag] durable replay unavailable:', replayError);
       }
     }
+    if (terminalEventSeen) return;
     throw error;
   }
 }
@@ -3642,6 +3864,9 @@ async function parseApiError(response: Response): Promise<string> {
   try {
     const payload = await response.json() as { detail?: unknown; error?: { message?: unknown } };
     const detail = payload.detail;
+    const detailRecord = detail && typeof detail === 'object' && !Array.isArray(detail)
+      ? detail as Record<string, unknown>
+      : null;
     const normalizedDetail = typeof detail === 'string'
       ? detail
       : Array.isArray(detail)
@@ -3654,7 +3879,15 @@ async function parseApiError(response: Response): Promise<string> {
           ? JSON.stringify(detail)
           : '';
     const errorMessage = payload.error?.message;
-    return typeof errorMessage === 'string' ? errorMessage : normalizedDetail || `请求失败（${response.status}）`;
+    if (typeof errorMessage === 'string') return errorMessage;
+    const detailMessage = detailRecord?.message;
+    if (typeof detailMessage === 'string' && detailMessage.trim()) {
+      const detailCode = detailRecord?.code;
+      return typeof detailCode === 'string' && detailCode.trim()
+        ? `${detailCode}: ${detailMessage}`
+        : detailMessage;
+    }
+    return normalizedDetail || `请求失败（${response.status}）`;
   } catch {
     return `请求失败（${response.status}）`;
   }
@@ -3717,6 +3950,26 @@ export async function createSession(
   return response.json();
 }
 
+type SnapshotWriteState = {
+  revision?: number;
+  nextSequence: number;
+  queue: Promise<void>;
+};
+
+const snapshotWriteStates = new Map<string, SnapshotWriteState>();
+const snapshotWriterId = `browser-${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
+
+function snapshotWriteStateFor(sessionId: string): SnapshotWriteState {
+  const existing = snapshotWriteStates.get(sessionId);
+  if (existing) return existing;
+  const created: SnapshotWriteState = {
+    nextSequence: 0,
+    queue: Promise.resolve(),
+  };
+  snapshotWriteStates.set(sessionId, created);
+  return created;
+}
+
 export async function getSessionHistory(
   sessionId: string,
 ): Promise<SessionHistoryResponse> {
@@ -3724,7 +3977,10 @@ export async function getSessionHistory(
     `${API_BASE_URL}/api/sessions/${encodeURIComponent(sessionId)}/history`,
   );
   if (!response.ok) throw new Error(await parseApiError(response));
-  return response.json();
+  const history = await response.json() as SessionHistoryResponse;
+  const state = snapshotWriteStateFor(sessionId);
+  state.revision = Math.max(state.revision ?? 0, history.snapshot_revision ?? 0);
+  return history;
 }
 
 export async function saveSessionSnapshot(
@@ -3732,20 +3988,46 @@ export async function saveSessionSnapshot(
   snapshot: SessionSnapshot,
   generateTitle = false,
 ): Promise<SessionSummary> {
-  const response = await fetch(
-    `${API_BASE_URL}/api/sessions/${encodeURIComponent(sessionId)}/history`,
-    {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        snapshot,
-        generate_title: generateTitle,
-      }),
-    },
-  );
-  if (!response.ok) throw new Error(await parseApiError(response));
-  const payload = await response.json() as { session: SessionSummary };
-  return payload.session;
+  const state = snapshotWriteStateFor(sessionId);
+  const writerSequence = state.nextSequence += 1;
+  const write = state.queue.then(async () => {
+    if (state.revision === undefined) {
+      const history = await getSessionHistory(sessionId);
+      state.revision = history.snapshot_revision ?? 0;
+    }
+    // Persistence boundary: strip internal read-only prompt envelopes from
+    // user turns before they can leave the browser (mirrors Core/chat_history.py).
+    const safeSnapshot: SessionSnapshot = {
+      ...snapshot,
+      messages: normalizeChatMessages<ChatMessage>(snapshot.messages),
+    };
+    const body: Record<string, unknown> = {
+      snapshot: safeSnapshot,
+      generate_title: generateTitle,
+      writer_id: snapshotWriterId,
+      writer_sequence: writerSequence,
+    };
+    if (state.revision !== undefined) body.snapshot_revision = state.revision;
+    const response = await fetch(
+      `${API_BASE_URL}/api/sessions/${encodeURIComponent(sessionId)}/history`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
+    if (!response.ok) throw new Error(await parseApiError(response));
+    const payload = await response.json() as {
+      session: SessionSummary;
+      snapshot_revision?: number;
+    };
+    if (typeof payload.snapshot_revision === 'number') {
+      state.revision = Math.max(state.revision ?? 0, payload.snapshot_revision);
+    }
+    return payload.session;
+  });
+  state.queue = write.then(() => undefined, () => undefined);
+  return write;
 }
 
 /** Replace the durable memory branch after a rewrite/delete operation. */
@@ -3758,7 +4040,9 @@ export async function replaceSessionChatMemory(
     {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages }),
+      // Same boundary as the snapshot save: the durable memory branch must
+      // never receive internal prompt envelopes as user turns.
+      body: JSON.stringify({ messages: normalizeChatMessages(messages) }),
     },
   );
   if (!response.ok) throw new Error(await parseApiError(response));
@@ -4028,6 +4312,7 @@ export interface GoldenTraceCreateInput {
   sessionId: string;
   sourceRunId: string;
   title: string;
+  sourceMode?: 'verified' | 'draft';
   contract?: GoldenTraceOutcomeContract;
   semanticTrace?: GoldenTraceSemanticTraceInput;
 }
@@ -4177,6 +4462,7 @@ export async function createGoldenTrace(
       session_id: input.sessionId,
       source_run_id: input.sourceRunId,
       title: input.title,
+      ...(input.sourceMode ? { source_mode: input.sourceMode } : {}),
       ...(input.contract ? { contract: input.contract } : {}),
       ...(input.semanticTrace ? { semantic_trace: input.semanticTrace } : {}),
     }),

@@ -2,8 +2,11 @@ import type { CodeAgentRun } from '../lib/api';
 
 export type GoldenTraceEligibility = {
   eligible: boolean;
+  draftEligible?: boolean;
   reason?: string;
 };
+
+export type GoldenTraceSaveMode = 'verified' | 'draft';
 
 /**
  * Keep the save affordance aligned with the backend's source-trace gate.
@@ -14,7 +17,7 @@ export function getGoldenTraceEligibility(
   run: Pick<CodeAgentRun, 'trace'> | null | undefined,
 ): GoldenTraceEligibility {
   if (!run) return { eligible: false, reason: '没有可保存的 Agent run。' };
-  if (run.trace.status !== 'completed') {
+  if (run.trace.status !== 'completed' && run.trace.status !== 'completed_unverified') {
     return { eligible: false, reason: '只有已完成的 run 才能保存。' };
   }
 
@@ -23,8 +26,21 @@ export function getGoldenTraceEligibility(
   if (!verification?.browserRunId) {
     return { eligible: false, reason: '缺少真实浏览器验证 run id。' };
   }
+  const hasCleanBoot = evidence?.boot_completed === true;
+  const hasNoRuntimeErrors = Boolean(
+    evidence
+    && (evidence.console_errors ?? []).length === 0
+    && (evidence.new_errors ?? []).length === 0
+    && !evidence.same_error_persisted,
+  );
   if (evidence?.status !== 'verified') {
-    return { eligible: false, reason: '浏览器验收证据尚未通过。' };
+    return hasCleanBoot && hasNoRuntimeErrors
+      ? {
+          eligible: false,
+          draftEligible: true,
+          reason: '浏览器验收尚未形成最终结论，只能保存为 Golden Trace 草稿。',
+        }
+      : { eligible: false, reason: '浏览器验收证据尚未通过。' };
   }
   if (!evidence.boot_completed) {
     return { eligible: false, reason: '页面尚未确认启动完成。' };
@@ -35,7 +51,7 @@ export function getGoldenTraceEligibility(
   if (evidence.goal_verified !== true) {
     return { eligible: false, reason: '目标级浏览器断言尚未通过，冒烟通过不能保存为 Golden Trace。' };
   }
-  if (evidence.console_errors.length > 0 || evidence.new_errors.length > 0 || evidence.same_error_persisted) {
+  if (!hasNoRuntimeErrors) {
     return { eligible: false, reason: '仍存在 Console/page 错误或原错误持续。' };
   }
   return { eligible: true };
